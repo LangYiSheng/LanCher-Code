@@ -12,7 +12,7 @@ from lancher_code.errors import (
     ProviderResponseError,
     StreamProtocolError,
 )
-from lancher_code.models import ChatRequest, ProviderConfig, StreamEvent
+from lancher_code.models import ChatRequest, MessageUsage, ProviderConfig, StreamEvent
 
 
 class ChatProvider(Protocol):
@@ -31,6 +31,20 @@ class BaseChatProvider:
 
     def _default_client_factory(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self.config.timeout_seconds)
+
+    @staticmethod
+    def build_usage(
+        raw_usage: object,
+        *,
+        input_keys: tuple[str, ...],
+        output_keys: tuple[str, ...],
+    ) -> MessageUsage:
+        if not isinstance(raw_usage, dict):
+            return MessageUsage()
+
+        input_tokens = BaseChatProvider._read_usage_value(raw_usage, input_keys)
+        output_tokens = BaseChatProvider._read_usage_value(raw_usage, output_keys)
+        return MessageUsage(input_tokens=input_tokens, output_tokens=output_tokens)
 
     @staticmethod
     async def iter_sse_events(response: httpx.Response) -> AsyncIterator[tuple[str, str]]:
@@ -109,3 +123,11 @@ class BaseChatProvider:
         if isinstance(exc, httpx.RequestError):
             return ProviderRequestError(f"请求模型失败: {exc}")
         return ProviderRequestError("请求模型失败。")
+
+    @staticmethod
+    def _read_usage_value(raw_usage: dict[str, object], keys: tuple[str, ...]) -> int:
+        for key in keys:
+            value = raw_usage.get(key)
+            if isinstance(value, int):
+                return value
+        return 0

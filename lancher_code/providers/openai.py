@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable
 import httpx
 
 from lancher_code.errors import ProviderRequestError, ProviderResponseError
-from lancher_code.models import ChatMessage, ChatRequest, ProviderConfig, StreamEvent
+from lancher_code.models import ApiMessage, ChatRequest, MessageUsage, ProviderConfig, StreamEvent
 from lancher_code.providers.base import BaseChatProvider
 
 
@@ -30,19 +30,16 @@ class OpenAIProvider(BaseChatProvider):
             "stream_options": {"include_usage": True},
         }
 
-        usage: dict | None = None
+        usage = MessageUsage()
         try:
             async with self._client_factory() as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     await self.raise_for_error_status(response)
-                    yield StreamEvent(kind="message_start", metadata={"provider": "openai"})
+                    yield StreamEvent(kind="message_start")
 
                     async for _event_name, data in self.iter_sse_events(response):
                         if data == "[DONE]":
-                            yield StreamEvent(
-                                kind="message_end",
-                                metadata={"provider": "openai", "usage": usage or {}},
-                            )
+                            yield StreamEvent(kind="message_end", usage=usage)
                             return
 
                         chunk = self.parse_json_payload(data)
@@ -50,7 +47,11 @@ class OpenAIProvider(BaseChatProvider):
                             raise ProviderResponseError("OpenAI 响应包含 error 字段。")
 
                         if isinstance(chunk.get("usage"), dict):
-                            usage = chunk["usage"]
+                            usage = self.build_usage(
+                                chunk["usage"],
+                                input_keys=("prompt_tokens", "input_tokens"),
+                                output_keys=("completion_tokens", "output_tokens"),
+                            )
 
                         for choice in chunk.get("choices", []):
                             delta = choice.get("delta", {})
@@ -62,10 +63,7 @@ class OpenAIProvider(BaseChatProvider):
                             if isinstance(reasoning, str) and reasoning:
                                 yield StreamEvent(kind="thinking_delta", text=reasoning)
 
-                    yield StreamEvent(
-                        kind="message_end",
-                        metadata={"provider": "openai", "usage": usage or {}},
-                    )
+                    yield StreamEvent(kind="message_end", usage=usage)
         except ProviderResponseError:
             raise
         except Exception as exc:
@@ -76,7 +74,7 @@ class OpenAIProvider(BaseChatProvider):
             raise
 
     @staticmethod
-    def _serialize_message(message: ChatMessage) -> dict[str, str]:
+    def _serialize_message(message: ApiMessage) -> dict[str, str]:
         return {
             "role": message.role,
             "content": message.content,

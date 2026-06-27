@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from datetime import datetime
+from typing import Literal
 
 ProviderProtocol = Literal["openai", "claude"]
 MessageRole = Literal["system", "user", "assistant"]
+MessageStatus = Literal["streaming", "complete", "error"]
 StreamEventKind = Literal[
     "text_delta",
     "thinking_delta",
@@ -43,26 +45,40 @@ class AppConfig:
 
 
 @dataclass(slots=True)
-class ChatMessage:
+class MessageUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(slots=True)
+class ApiMessage:
     role: MessageRole
     content: str
 
 
 @dataclass(slots=True)
+class SessionMessage:
+    id: str
+    role: MessageRole
+    content: str
+    status: MessageStatus
+    timestamp: datetime
+    usage: MessageUsage = field(default_factory=MessageUsage)
+    thinking: str = ""
+
+
+@dataclass(slots=True)
 class SessionState:
-    messages: list[ChatMessage] = field(default_factory=list)
+    messages: list[SessionMessage] = field(default_factory=list)
 
-    def add_message(self, role: MessageRole, content: str) -> None:
-        self.messages.append(ChatMessage(role=role, content=content))
-
-    def snapshot(self) -> list[ChatMessage]:
+    def snapshot(self) -> list[SessionMessage]:
         return list(self.messages)
 
 
 @dataclass(slots=True)
 class ChatRequest:
     model: str
-    messages: list[ChatMessage]
+    messages: list[ApiMessage]
     thinking: ThinkingConfig | None = None
 
 
@@ -70,4 +86,4 @@ class ChatRequest:
 class StreamEvent:
     kind: StreamEventKind
     text: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    usage: MessageUsage = field(default_factory=MessageUsage)

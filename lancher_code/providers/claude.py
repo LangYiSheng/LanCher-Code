@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable
 import httpx
 
 from lancher_code.errors import ProviderRequestError, ProviderResponseError
-from lancher_code.models import ChatMessage, ChatRequest, ProviderConfig, StreamEvent
+from lancher_code.models import ApiMessage, ChatRequest, MessageUsage, ProviderConfig, StreamEvent
 from lancher_code.providers.base import BaseChatProvider
 
 DEFAULT_MAX_TOKENS = 4096
@@ -30,7 +30,7 @@ class ClaudeProvider(BaseChatProvider):
         payload = self._build_payload(request)
 
         saw_end = False
-        usage: dict[str, int] = {}
+        usage = MessageUsage()
         try:
             async with self._client_factory() as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -42,10 +42,15 @@ class ClaudeProvider(BaseChatProvider):
 
                         event = self.parse_json_payload(data)
                         event_type = event.get("type")
-                        self._merge_usage(usage, event.get("usage"))
-
                         if event_type == "message_start":
-                            yield StreamEvent(kind="message_start", metadata={"provider": "claude"})
+                            message = event.get("message")
+                            if isinstance(message, dict):
+                                usage = self._merge_usage(usage, message.get("usage"))
+                            yield StreamEvent(kind="message_start")
+                            continue
+
+                        if event_type == "message_delta":
+                            usage = self._merge_usage(usage, event.get("usage"))
                             continue
 
                         if event_type == "content_block_delta":
@@ -61,16 +66,9 @@ class ClaudeProvider(BaseChatProvider):
                                     yield StreamEvent(kind="thinking_delta", text=thinking)
                             continue
 
-                        if event_type == "message_delta":
-                            self._merge_usage(usage, event.get("usage"))
-                            continue
-
                         if event_type == "message_stop":
                             saw_end = True
-                            yield StreamEvent(
-                                kind="message_end",
-                                metadata={"provider": "claude", "usage": usage},
-                            )
+                            yield StreamEvent(kind="message_end", usage=usage)
                             return
 
                         if event_type == "error":
@@ -83,10 +81,7 @@ class ClaudeProvider(BaseChatProvider):
                             raise ProviderResponseError(message)
 
                     if not saw_end:
-                        yield StreamEvent(
-                            kind="message_end",
-                            metadata={"provider": "claude", "usage": usage},
-                        )
+                        yield StreamEvent(kind="message_end", usage=usage)
         except ProviderResponseError:
             raise
         except Exception as exc:
@@ -122,15 +117,22 @@ class ClaudeProvider(BaseChatProvider):
         return payload
 
     @staticmethod
-    def _merge_usage(target: dict[str, int], raw_usage: object) -> None:
+    def _merge_usage(current: MessageUsage, raw_usage: object) -> MessageUsage:
         if not isinstance(raw_usage, dict):
-            return
-        for key, value in raw_usage.items():
-            if isinstance(value, int):
-                target[key] = value
+            return current
+
+        incoming = ClaudeProvider.build_usage(
+            raw_usage,
+            input_keys=("input_tokens", "prompt_tokens"),
+            output_keys=("output_tokens", "completion_tokens"),
+        )
+        return MessageUsage(
+            input_tokens=incoming.input_tokens or current.input_tokens,
+            output_tokens=incoming.output_tokens or current.output_tokens,
+        )
 
     @staticmethod
-    def _serialize_message(message: ChatMessage) -> dict[str, str]:
+    def _serialize_message(message: ApiMessage) -> dict[str, str]:
         return {
             "role": message.role,
             "content": message.content,

@@ -12,9 +12,8 @@ from textual.events import Message
 from textual.widgets import Static, TextArea
 
 from lancher_code.errors import LanCherError
-from lancher_code.models import ChatRequest, ProviderConfig, UIConfig
+from lancher_code.models import ChatRequest, MessageUsage, ProviderConfig, SessionMessage, UIConfig
 from lancher_code.providers.base import ChatProvider
-from lancher_code.rendering import StreamAccumulator, estimate_token_count
 from lancher_code.session import SessionController
 
 BANNER_TEXT = r"""
@@ -83,31 +82,28 @@ class BannerWidget(Static):
 
 class MessageWidget(Vertical):
     ROLE_LABELS = {
+        "system": "SYSTEM",
         "user": "YOU",
         "assistant": "LANCHER",
-        "error": "ERROR",
     }
     ROLE_STYLES = {
+        "system": "#97adc7",
         "user": "#78d98a",
         "assistant": "#73b6ff",
-        "error": "#ff7b72",
     }
 
-    def __init__(self, role: str, content: str = "", status: str = "") -> None:
-        super().__init__(classes=f"message message--{role}")
-        self.role = role
-        self.content = content
-        self._status = status
-        self._thinking = ""
-        self._thinking_collapsed = False
-
-    @property
-    def thinking(self) -> str:
-        return self._thinking
+    def __init__(self, message: SessionMessage, *, show_thinking: bool) -> None:
+        super().__init__(classes=f"message message--{message.role}")
+        self.message_id = message.id
+        self._show_thinking = show_thinking
+        self.role = message.role
+        self.content = message.content
+        self.thinking = message.thinking
+        self.status = message.status
 
     @property
     def thinking_collapsed(self) -> bool:
-        return self._thinking_collapsed
+        return bool(self.content)
 
     def compose(self) -> ComposeResult:
         yield Static(classes="message-label")
@@ -117,42 +113,64 @@ class MessageWidget(Vertical):
     def on_mount(self) -> None:
         self._sync_view()
 
-    def set_content(self, content: str) -> None:
-        self.content = content
-        self._status = ""
-        if self._thinking:
-            self._thinking_collapsed = True
-        self._sync_view()
-
-    def set_status(self, status: str) -> None:
-        self._status = status
-        self._sync_view()
-
-    def set_thinking(self, thinking: str, *, collapsed: bool = False) -> None:
-        self._thinking = thinking
-        self._thinking_collapsed = collapsed
+    def update_from_message(self, message: SessionMessage) -> None:
+        self.role = message.role
+        self.content = message.content
+        self.thinking = message.thinking
+        self.status = message.status
         self._sync_view()
 
     def _sync_view(self) -> None:
+        self.set_class(self.status == "error", "-error")
+
         label_widget = self.query_one(".message-label", Static)
-        label_widget.update(
-            self.ROLE_LABELS.get(self.role, self.role.upper()),
-        )
-        label_widget.styles.color = self.ROLE_STYLES.get(self.role, "#ffffff")
+        label_widget.update(self._label_text())
+        label_widget.styles.color = self._label_color()
         label_widget.styles.text_style = "bold"
 
         thinking_widget = self.query_one(".message-thinking", Static)
-        thinking_visible = bool(self._thinking and not self._thinking_collapsed)
+        thinking_visible = self._thinking_visible()
         thinking_widget.display = thinking_visible
         if thinking_visible:
-            thinking_widget.update(self._thinking)
+            thinking_widget.update(self.thinking)
 
         body_widget = self.query_one(".message-body", Static)
-        body_text = self.content or self._status
+        body_text = self._body_text()
         body_widget.display = bool(body_text)
         if body_text:
-            body_widget.styles.color = "#e8e8e8" if self.content else "#97adc7"
+            body_widget.styles.color = self._body_color()
             body_widget.update(body_text)
+
+    def _label_text(self) -> str:
+        if self.status == "error":
+            return "ERROR"
+        return self.ROLE_LABELS.get(self.role, self.role.upper())
+
+    def _label_color(self) -> str:
+        if self.status == "error":
+            return "#ff7b72"
+        return self.ROLE_STYLES.get(self.role, "#ffffff")
+
+    def _thinking_visible(self) -> bool:
+        return self._show_thinking and bool(self.thinking) and not self.thinking_collapsed and self.status != "error"
+
+    def _body_text(self) -> str:
+        if self.status == "error":
+            return self.content or "请求失败。"
+        if self.content:
+            return self.content
+        if self.status == "streaming" and not self.thinking:
+            return "等待模型回复..."
+        if self.status == "complete" and not self.thinking:
+            return "本轮未收到任何回复。"
+        return ""
+
+    def _body_color(self) -> str:
+        if self.status == "error":
+            return "#ff7b72"
+        if self.content:
+            return "#e8e8e8"
+        return "#97adc7"
 
 
 class LanCherTextualApp(App[int]):
@@ -226,7 +244,11 @@ class LanCherTextualApp(App[int]):
         border-left: wide #73b6ff;
     }
 
-    .message--error {
+    .message--system {
+        border-left: wide #97adc7;
+    }
+
+    .message.-error {
         border-left: wide #ff7b72;
     }
 
@@ -321,10 +343,9 @@ class LanCherTextualApp(App[int]):
         self._provider_config = provider_config
         self._session_controller = session_controller
         self._ui_config = ui_config
-        self._input_tokens_total = 0
-        self._output_tokens_total = 0
         self._is_streaming = False
         self._chat_started = False
+        self._message_widgets: dict[str, MessageWidget] = {}
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -378,69 +399,49 @@ class LanCherTextualApp(App[int]):
             self.query_one(BannerWidget).set_compact(True)
             self.query_one("#chat-view", VerticalScroll).set_class(True, "-banner-collapsed")
 
-        self._session_controller.record_user_message(text)
+        user_message = self._session_controller.create_user_message(text)
+        assistant_message = self._session_controller.create_assistant_message()
         request = self._session_controller.build_request()
-        estimated_prompt_tokens = sum(
-            estimate_token_count(message.content) for message in request.messages
-        )
 
-        user_widget = MessageWidget("user", text)
-        assistant_widget = MessageWidget("assistant", status="等待模型回复...")
         chat_view = self.query_one("#chat-view", VerticalScroll)
-        await chat_view.mount(user_widget)
-        await chat_view.mount(assistant_widget)
+        await chat_view.mount(self._register_message_widget(user_message))
+        await chat_view.mount(self._register_message_widget(assistant_message))
         chat_view.scroll_end(animate=False)
 
         self._is_streaming = True
         event.composer.disabled = True
         self._refresh_status_bar()
-        self.process_prompt(request, assistant_widget, estimated_prompt_tokens)
+        self.process_prompt(request, assistant_message.id)
 
     @work(exclusive=False, exit_on_error=False)
     async def process_prompt(
         self,
         request: ChatRequest,
-        assistant_widget: MessageWidget,
-        estimated_prompt_tokens: int,
+        assistant_message_id: str,
     ) -> None:
-        accumulator = StreamAccumulator()
-        usage_received = False
-
         try:
             async for event in self._provider.stream_chat(request):
-                accumulator.consume(event)
-
-                if event.kind == "thinking_delta" and self._ui_config.show_thinking_status:
-                    if accumulator.thinking:
-                        assistant_widget.set_thinking(accumulator.thinking)
-                    else:
-                        assistant_widget.set_status("模型正在思考...")
-                elif event.kind == "text_delta":
-                    assistant_widget.set_content(accumulator.text)
+                if event.kind == "thinking_delta" and event.text:
+                    self._session_controller.append_message_thinking(assistant_message_id, event.text)
+                elif event.kind == "text_delta" and event.text:
+                    self._session_controller.append_message_content(assistant_message_id, event.text)
                 elif event.kind == "message_end":
-                    usage_received = self._apply_usage(event.metadata.get("usage"))
+                    self._session_controller.complete_message(assistant_message_id, event.usage)
 
+                self._sync_message_widget(assistant_message_id)
                 self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
                 self._refresh_status_bar()
 
-            assistant_text = accumulator.text.strip()
-            if assistant_text:
-                self._session_controller.record_assistant_message(assistant_text)
-                if not usage_received:
-                    self._input_tokens_total += estimated_prompt_tokens
-                    self._output_tokens_total += estimate_token_count(assistant_text)
-            elif accumulator.thinking_seen:
-                assistant_widget.set_status("思考完成，但当前未返回可显示文本。")
-                if not usage_received:
-                    self._input_tokens_total += estimated_prompt_tokens
-            else:
-                assistant_widget.set_status("本轮未收到任何回复。")
+            assistant_message = self._session_controller.get_message(assistant_message_id)
+            if assistant_message.status == "streaming":
+                self._session_controller.complete_message(assistant_message_id, MessageUsage())
+                self._sync_message_widget(assistant_message_id)
         except LanCherError as exc:
-            assistant_widget.remove()
-            await self._append_error_message(exc.user_message)
+            self._session_controller.fail_message(assistant_message_id, exc.user_message)
+            self._sync_message_widget(assistant_message_id)
         except Exception as exc:
-            assistant_widget.remove()
-            await self._append_error_message(f"发生未预期异常: {exc}")
+            self._session_controller.fail_message(assistant_message_id, f"发生未预期异常: {exc}")
+            self._sync_message_widget(assistant_message_id)
         finally:
             self._is_streaming = False
             input_widget = self.query_one("#composer-input", ComposerTextArea)
@@ -449,38 +450,23 @@ class LanCherTextualApp(App[int]):
             self._refresh_status_bar()
             self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
 
-    async def _append_error_message(self, message: str) -> None:
-        chat_view = self.query_one("#chat-view", VerticalScroll)
-        await chat_view.mount(MessageWidget("error", message))
-        chat_view.scroll_end(animate=False)
-
-    def _apply_usage(self, usage: object) -> bool:
-        if not isinstance(usage, dict) or not usage:
-            return False
-
-        prompt_tokens = usage.get("prompt_tokens")
-        if prompt_tokens is None:
-            prompt_tokens = usage.get("input_tokens")
-        completion_tokens = usage.get("completion_tokens")
-        if completion_tokens is None:
-            completion_tokens = usage.get("output_tokens")
-
-        applied = False
-        if isinstance(prompt_tokens, int):
-            self._input_tokens_total += prompt_tokens
-            applied = True
-        if isinstance(completion_tokens, int):
-            self._output_tokens_total += completion_tokens
-            applied = True
-        return applied
-
     def _refresh_status_bar(self) -> None:
+        usage = self._session_controller.total_usage()
         provider_name = "Anthropic Claude" if self._provider_config.protocol == "claude" else "OpenAI"
         self.query_one("#status-left", Static).update(f"Provider: {provider_name}")
         self.query_one("#status-center", Static).update("Busy" if self._is_streaming else "Ready")
         self.query_one("#status-right", Static).update(
-            f"{self._provider_config.model} · Tokens In {self._input_tokens_total} · Out {self._output_tokens_total}"
+            f"{self._provider_config.model} · Tokens In {usage.input_tokens} · Out {usage.output_tokens}"
         )
+
+    def _register_message_widget(self, message: SessionMessage) -> MessageWidget:
+        widget = MessageWidget(message, show_thinking=self._ui_config.show_thinking_status)
+        self._message_widgets[message.id] = widget
+        return widget
+
+    def _sync_message_widget(self, message_id: str) -> None:
+        widget = self._message_widgets[message_id]
+        widget.update_from_message(self._session_controller.get_message(message_id))
 
     def _update_composer_height(self) -> None:
         composer_input = self.query_one("#composer-input", ComposerTextArea)
