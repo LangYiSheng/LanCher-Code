@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 import pytest
 from rich.text import Text
 from textual.widgets import Static
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 
 from lancher_code.errors import ProviderRequestError
 from lancher_code.models import ChatRequest, StreamEvent
@@ -39,7 +39,7 @@ async def _submit_message(app: LanCherTextualApp, pilot, value: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_composer_alt_enter_inserts_newline(
+async def test_composer_shift_enter_inserts_newline(
     openai_provider_config,
     ui_config,
 ) -> None:
@@ -57,11 +57,53 @@ async def test_composer_alt_enter_inserts_newline(
         composer.text = "第一行"
         composer.cursor_location = composer.document.end
         composer.focus()
-        await pilot.press("alt+enter")
+        await pilot.press("shift+enter")
         composer.insert("第二行")
         await pilot.pause(0.05)
 
         assert composer.text == "第一行\n第二行"
+
+
+@pytest.mark.asyncio
+async def test_composer_grows_with_multiline_input_and_shrinks_after_submit(
+    openai_provider_config,
+    ui_config,
+) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="text_delta", text="收到"),
+                StreamEvent(kind="message_end"),
+            ]
+        ]
+    )
+    session = SessionController(openai_provider_config)
+    app = LanCherTextualApp(
+        provider=provider,
+        provider_config=openai_provider_config,
+        session_controller=session,
+        ui_config=ui_config,
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer_box = app.query_one("#composer", Horizontal)
+
+        assert str(composer.styles.height) == "1"
+        assert str(composer_box.styles.height) == "3"
+
+        composer.text = "第一行\n第二行\n第三行"
+        composer.focus()
+        await pilot.pause(0.05)
+
+        assert str(composer.styles.height) == "3"
+        assert str(composer_box.styles.height) == "5"
+
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+
+        assert str(composer.styles.height) == "1"
+        assert str(composer_box.styles.height) == "3"
 
 
 @pytest.mark.asyncio

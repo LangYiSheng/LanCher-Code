@@ -25,6 +25,10 @@ BANNER_TEXT = r"""
 /_____/\__,_/_/ /_/\____/_/ /_/\___/_/      \____/\____/\__,_/\___/ 
 """
 
+MIN_COMPOSER_LINES = 1
+MAX_COMPOSER_LINES = 6
+COMPOSER_FRAME_HEIGHT = 2
+
 
 class ComposerSubmitted(Message):
     def __init__(self, composer: "ComposerTextArea", value: str) -> None:
@@ -36,7 +40,7 @@ class ComposerSubmitted(Message):
 class ComposerTextArea(TextArea):
     BINDINGS = [
         Binding("enter", "submit_message", "发送", show=False, priority=True),
-        Binding("alt+enter", "insert_newline", "换行", show=False, priority=True),
+        Binding("shift+enter", "insert_newline", "换行", show=False, priority=True),
     ] + TextArea.BINDINGS
 
     def action_submit_message(self) -> None:
@@ -230,6 +234,8 @@ class LanCherTextualApp(App[int]):
         margin: 1 1 0 1;
         border: tall #4b6f97;
         height: 3;
+        min-height: 3;
+        max-height: 8;
         layout: horizontal;
         width: 1fr;
         padding: 0 1;
@@ -249,6 +255,8 @@ class LanCherTextualApp(App[int]):
     #composer-input {
         width: 1fr;
         height: 100%;
+        min-height: 1;
+        max-height: 6;
         margin: 0;
         padding: 0;
         background: transparent;
@@ -330,7 +338,7 @@ class LanCherTextualApp(App[int]):
                     show_line_numbers=False,
                     compact=True,
                     highlight_cursor_line=False,
-                    placeholder="发送一条消息... Enter发送，Alt+Enter换行，/exit 或 Ctrl+C/Ctrl+D 退出",
+                    placeholder="发送一条消息... Enter发送，Shift+Enter换行，/exit 或 Ctrl+C/Ctrl+D 退出",
                     id="composer-input",
                 )
             with Horizontal(id="status-bar"):
@@ -340,10 +348,18 @@ class LanCherTextualApp(App[int]):
 
     def on_mount(self) -> None:
         self.query_one(ComposerTextArea).focus()
+        self._update_composer_height()
         self._refresh_status_bar()
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._update_composer_height)
 
     async def action_request_quit(self) -> None:
         self.exit(0)
+
+    @on(TextArea.Changed, "#composer-input")
+    def handle_composer_changed(self) -> None:
+        self._update_composer_height()
 
     @on(ComposerSubmitted)
     async def handle_input_submitted(self, event: ComposerSubmitted) -> None:
@@ -465,6 +481,17 @@ class LanCherTextualApp(App[int]):
         self.query_one("#status-right", Static).update(
             f"{self._provider_config.model} · Tokens In {self._input_tokens_total} · Out {self._output_tokens_total}"
         )
+
+    def _update_composer_height(self) -> None:
+        composer_input = self.query_one("#composer-input", ComposerTextArea)
+        composer = self.query_one("#composer", Horizontal)
+
+        visible_lines = max(
+            MIN_COMPOSER_LINES,
+            min(MAX_COMPOSER_LINES, composer_input.wrapped_document.height),
+        )
+        composer_input.styles.height = str(visible_lines)
+        composer.styles.height = str(visible_lines + COMPOSER_FRAME_HEIGHT)
 
 
 class ChatTUI:
