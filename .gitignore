@@ -1,0 +1,37 @@
+# 项目文档（当前不纳入版本控制）
+docs/
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 本地 IDE / Agent 配置
+.idea/
+.vscode/
+.codex/
+.agents/
+
+# 本地运行配置
+lancher.yaml
+.env
+.env.*
+
+# 系统文件
+.DS_Store
+Thumbs.db

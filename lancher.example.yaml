@@ -1,0 +1,15 @@
+provider:
+  # 协议可选 openai anthropic
+  protocol: openai
+  model: gpt-4.1-mini
+  base_url: https://api.openai.com/v1
+  api_key: ${OPENAI_API_KEY}
+  timeout_seconds: 60
+
+  thinking:
+    enabled: false
+    budget_tokens: 2048
+
+ui:
+  show_timestamps: false
+  show_thinking_status: true
