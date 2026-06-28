@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 
 import httpx
 
 from lancher_code.errors import ProviderRequestError, ProviderResponseError
-from lancher_code.models import ApiMessage, ChatRequest, MessageUsage, ProviderConfig, StreamEvent
+from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
 
 DEFAULT_MAX_TOKENS = 4096
@@ -15,7 +16,7 @@ DEFAULT_THINKING_BUDGET = 2048
 class ClaudeProvider(BaseChatProvider):
     def __init__(
         self,
-        config: ProviderConfig,
+        config,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         super().__init__(config=config, client_factory=client_factory)
@@ -31,7 +32,6 @@ class ClaudeProvider(BaseChatProvider):
 
         saw_end = False
         usage = MessageUsage()
-        content_block_types: dict[int, str] = {}
         try:
             async with self._client_factory() as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -55,34 +55,44 @@ class ClaudeProvider(BaseChatProvider):
                             continue
 
                         if event_type == "content_block_start":
-                            index = event.get("index")
-                            content_block = event.get("content_block")
-                            if isinstance(index, int) and isinstance(content_block, dict):
-                                block_type = content_block.get("type")
-                                if isinstance(block_type, str):
-                                    content_block_types[index] = block_type
+                            block = event.get("content_block", {})
+                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                                input_payload = block.get("input")
+                                arguments_delta = ""
+                                if isinstance(input_payload, dict) and input_payload:
+                                    arguments_delta = json.dumps(input_payload, ensure_ascii=False)
+                                yield StreamEvent(
+                                    kind="tool_call_delta",
+                                    tool_call_chunk=ToolCallChunk(
+                                        call_index=int(event.get("index", 0)),
+                                        provider_call_id=block.get("id") if isinstance(block.get("id"), str) else None,
+                                        name_delta=block.get("name") if isinstance(block.get("name"), str) else "",
+                                        arguments_delta=arguments_delta,
+                                    ),
+                                )
                             continue
 
                         if event_type == "content_block_delta":
-                            index = event.get("index")
                             delta = event.get("delta", {})
                             delta_type = delta.get("type")
-                            block_type = content_block_types.get(index) if isinstance(index, int) else None
-
-                            if block_type == "text" and delta_type == "text_delta":
+                            if delta_type == "text_delta":
                                 text = delta.get("text")
                                 if isinstance(text, str) and text:
                                     yield StreamEvent(kind="text_delta", text=text)
-                            elif block_type == "thinking" and delta_type == "thinking_delta":
+                            elif delta_type == "thinking_delta":
                                 thinking = delta.get("thinking")
                                 if isinstance(thinking, str) and thinking:
                                     yield StreamEvent(kind="thinking_delta", text=thinking)
-                            continue
-
-                        if event_type == "content_block_stop":
-                            index = event.get("index")
-                            if isinstance(index, int):
-                                content_block_types.pop(index, None)
+                            elif delta_type == "input_json_delta":
+                                partial_json = delta.get("partial_json")
+                                if isinstance(partial_json, str) and partial_json:
+                                    yield StreamEvent(
+                                        kind="tool_call_delta",
+                                        tool_call_chunk=ToolCallChunk(
+                                            call_index=int(event.get("index", 0)),
+                                            arguments_delta=partial_json,
+                                        ),
+                                    )
                             continue
 
                         if event_type == "message_stop":
@@ -110,32 +120,70 @@ class ClaudeProvider(BaseChatProvider):
                 raise self.map_request_error(exc) from exc
             raise
 
-    def _build_payload(self, request: ChatRequest) -> dict:
-        system_messages = [
-            message.content for message in request.messages if message.role == "system"
-        ]
-        chat_messages = [
-            self._serialize_message(message)
-            for message in request.messages
-            if message.role in {"user", "assistant"}
-        ]
-
+    def _build_payload(self, request: ChatRequest) -> dict[str, object]:
+        system_messages, chat_messages = self.split_system_and_chat_messages(request.messages)
         payload: dict[str, object] = {
             "model": request.model,
-            "messages": chat_messages,
+            "messages": [self._serialize_message(message) for message in chat_messages],
             "max_tokens": DEFAULT_MAX_TOKENS,
             "stream": True,
+            "thinking": self._build_thinking_payload(request),
         }
         if system_messages:
-            payload["system"] = "\n\n".join(system_messages)
+            payload["system"] = "\n\n".join(self.text_from_blocks(message.blocks) for message in system_messages)
+        if request.allow_tool_calls and request.tools:
+            payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
+        return payload
+
+    def _build_thinking_payload(self, request: ChatRequest) -> dict[str, object]:
         if request.thinking and request.thinking.enabled:
-            payload["thinking"] = {
+            return {
                 "type": "enabled",
                 "budget_tokens": request.thinking.budget_tokens or DEFAULT_THINKING_BUDGET,
             }
-        else:
-            payload["thinking"] = {"type": "disabled"}
-        return payload
+        return {"type": "disabled"}
+
+    def _serialize_message(self, message) -> dict[str, object]:
+        if message.role == "tool":
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.call_id,
+                        "content": block.text,
+                        "is_error": block.is_error,
+                    }
+                    for block in message.blocks
+                    if block.kind == "tool_result"
+                ],
+            }
+
+        content: list[dict[str, object]] = []
+        for block in message.blocks:
+            if block.kind == "text":
+                content.append({"type": "text", "text": block.text})
+            elif block.kind == "tool_use":
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.call_id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+        return {
+            "role": message.role,
+            "content": content,
+        }
+
+    @staticmethod
+    def _serialize_tool(tool) -> dict[str, object]:
+        return {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+        }
 
     @staticmethod
     def _merge_usage(current: MessageUsage, raw_usage: object) -> MessageUsage:
@@ -151,10 +199,3 @@ class ClaudeProvider(BaseChatProvider):
             input_tokens=incoming.input_tokens or current.input_tokens,
             output_tokens=incoming.output_tokens or current.output_tokens,
         )
-
-    @staticmethod
-    def _serialize_message(message: ApiMessage) -> dict[str, str]:
-        return {
-            "role": message.role,
-            "content": message.content,
-        }

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 
 import httpx
 
 from lancher_code.errors import ProviderRequestError, ProviderResponseError
-from lancher_code.models import ApiMessage, ChatRequest, MessageUsage, ProviderConfig, StreamEvent
+from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
 
 
 class OpenAIProvider(BaseChatProvider):
     def __init__(
         self,
-        config: ProviderConfig,
+        config,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
         super().__init__(config=config, client_factory=client_factory)
@@ -23,12 +24,7 @@ class OpenAIProvider(BaseChatProvider):
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "model": request.model,
-            "messages": [self._serialize_message(message) for message in request.messages],
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
+        payload = self._build_payload(request)
 
         usage = MessageUsage()
         try:
@@ -63,6 +59,34 @@ class OpenAIProvider(BaseChatProvider):
                             if isinstance(reasoning, str) and reasoning:
                                 yield StreamEvent(kind="thinking_delta", text=reasoning)
 
+                            tool_calls = delta.get("tool_calls")
+                            if isinstance(tool_calls, list):
+                                for tool_call in tool_calls:
+                                    if not isinstance(tool_call, dict):
+                                        continue
+                                    function = tool_call.get("function", {})
+                                    if not isinstance(function, dict):
+                                        function = {}
+                                    name_delta = function.get("name")
+                                    arguments_delta = function.get("arguments")
+                                    if not isinstance(name_delta, str):
+                                        name_delta = ""
+                                    if not isinstance(arguments_delta, str):
+                                        arguments_delta = ""
+                                    if not name_delta and not arguments_delta and not tool_call.get("id"):
+                                        continue
+                                    yield StreamEvent(
+                                        kind="tool_call_delta",
+                                        tool_call_chunk=ToolCallChunk(
+                                            call_index=int(tool_call.get("index", 0)),
+                                            provider_call_id=tool_call.get("id")
+                                            if isinstance(tool_call.get("id"), str)
+                                            else None,
+                                            name_delta=name_delta,
+                                            arguments_delta=arguments_delta,
+                                        ),
+                                    )
+
                     yield StreamEvent(kind="message_end", usage=usage)
         except ProviderResponseError:
             raise
@@ -73,9 +97,57 @@ class OpenAIProvider(BaseChatProvider):
                 raise self.map_request_error(exc) from exc
             raise
 
-    @staticmethod
-    def _serialize_message(message: ApiMessage) -> dict[str, str]:
+    def _build_payload(self, request: ChatRequest) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": request.model,
+            "messages": [self._serialize_message(message) for message in request.messages],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if request.allow_tool_calls and request.tools:
+            payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
+        return payload
+
+    def _serialize_message(self, message) -> dict[str, object]:
+        if message.role == "tool":
+            block = message.blocks[0]
+            return {
+                "role": "tool",
+                "tool_call_id": block.call_id,
+                "content": block.text,
+            }
+
+        tool_use_blocks = [block for block in message.blocks if block.kind == "tool_use"]
+        text_content = self.text_from_blocks(message.blocks)
+        if message.role == "assistant" and tool_use_blocks:
+            return {
+                "role": "assistant",
+                "content": text_content or "",
+                "tool_calls": [
+                    {
+                        "id": block.call_id,
+                        "type": "function",
+                        "function": {
+                            "name": block.name,
+                            "arguments": json.dumps(block.input, ensure_ascii=False),
+                        },
+                    }
+                    for block in tool_use_blocks
+                ],
+            }
+
         return {
             "role": message.role,
-            "content": message.content,
+            "content": text_content,
+        }
+
+    @staticmethod
+    def _serialize_tool(tool) -> dict[str, object]:
+        return {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            },
         }

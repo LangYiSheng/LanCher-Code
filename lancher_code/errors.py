@@ -31,3 +31,15 @@ class ProviderResponseError(ProviderError):
 
 class StreamProtocolError(ProviderError):
     """流式协议解析失败。"""
+
+
+class ToolCallParseError(LanCherError):
+    """工具调用分片拼接或 JSON 解析失败。"""
+
+
+class ToolNotFoundError(LanCherError):
+    """未找到指定工具。"""
+
+
+class ToolExecutionError(LanCherError):
+    """工具执行过程中发生不可恢复错误。"""

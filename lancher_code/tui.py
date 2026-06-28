@@ -8,13 +8,12 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Message
+from textual.events import Click, Message
 from textual.widgets import Static, TextArea
 
-from lancher_code.errors import LanCherError
-from lancher_code.models import ChatRequest, MessageUsage, ProviderConfig, SessionMessage, UIConfig
-from lancher_code.providers.base import ChatProvider
+from lancher_code.models import ProviderConfig, SessionMessage, TraceEntry, UIConfig
 from lancher_code.session import SessionController
+from lancher_code.turn_runner import TurnRunner
 
 BANNER_TEXT = r"""
     __                ________                 ______          __   
@@ -80,37 +79,86 @@ class BannerWidget(Static):
         return Group(title, subtitle)
 
 
-class MessageLabelWidget(Static):
-    def update_label(self, text: str, color: str) -> None:
-        self.styles.color = color
-        self.styles.text_style = "bold"
-        self.update(text)
-        self.refresh(layout=True)
+class ThinkingTraceWidget(Vertical):
+    def __init__(self, entries: list[TraceEntry], *, collapsed: bool = True) -> None:
+        super().__init__(classes="thinking-trace")
+        self._entries = list(entries)
+        self._collapsed = collapsed
+
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
+
+    def compose(self) -> ComposeResult:
+        yield Static(classes="thinking-trace-header")
+        yield Static(classes="thinking-trace-body")
+
+    def on_mount(self) -> None:
+        self._sync_view()
+
+    @on(Click, ".thinking-trace-header")
+    def toggle_collapsed(self) -> None:
+        self._collapsed = not self._collapsed
+        self._sync_view()
+
+    def update_entries(self, entries: list[TraceEntry]) -> None:
+        self._entries = list(entries)
+        self._sync_view()
+
+    def _sync_view(self) -> None:
+        header = self.query_one(".thinking-trace-header", Static)
+        body = self.query_one(".thinking-trace-body", Static)
+        marker = "▶" if self._collapsed else "▼"
+        header.update(f"{marker} 思考内容 ({len(self._entries)})")
+        header.styles.color = "#a8b9cc"
+        header.styles.text_style = "bold"
+        body.display = bool(self._entries) and not self._collapsed
+        if body.display:
+            body.update(_format_trace_entries(self._entries))
 
 
-class MessageThinkingWidget(Static):
-    def show_thinking(self, text: str) -> None:
-        self.display = True
-        self.update(text)
-        self.refresh(layout=True)
+def _format_trace_entries(entries: list[TraceEntry]) -> Text:
+    renderable = Text()
+    for entry in entries:
+        if entry.kind == "thinking":
+            renderable.append(entry.text, style="#a8b9cc")
+        elif entry.kind == "tool_call":
+            renderable.append(_format_tool_call_entry(entry), style="#73b6ff")
+        elif entry.kind == "tool_result":
+            prefix = "✓ " if entry.ok else "✗ "
+            style = "#78d98a" if entry.ok else "#ff7b72"
+            renderable.append(f"{prefix}{entry.text}", style=style)
+            for display_line in entry.metadata.get("display_lines", []):
+                if not isinstance(display_line, dict):
+                    continue
+                line_text = display_line.get("text")
+                if not isinstance(line_text, str):
+                    continue
+                tone = display_line.get("tone")
+                line_style = "#78d98a" if tone == "success" else "#ff7b72" if tone == "error" else style
+                renderable.append("\n")
+                renderable.append(line_text, style=line_style)
+        elif entry.kind == "text":
+            renderable.append(entry.text, style="#e8e8e8")
+        elif entry.kind == "notice":
+            renderable.append(f"提示：{entry.text}", style="#ffb86c")
+        renderable.append("\n")
 
-    def hide_thinking(self) -> None:
-        self.display = False
-        self.update("")
-        self.refresh(layout=True)
+    if renderable.plain.endswith("\n"):
+        renderable.rstrip()
+    return renderable
 
 
-class MessageBodyWidget(Static):
-    def show_body(self, text: str, color: str) -> None:
-        self.styles.color = color
-        self.display = True
-        self.update(text)
-        self.refresh(layout=True)
-
-    def hide_body(self) -> None:
-        self.display = False
-        self.update("")
-        self.refresh(layout=True)
+def _format_tool_call_entry(entry: TraceEntry) -> str:
+    if not entry.arguments:
+        return f"● {entry.tool_name}"
+    parts: list[str] = []
+    for key, value in entry.arguments.items():
+        rendered = str(value)
+        if len(rendered) > 24:
+            rendered = rendered[:24] + "..."
+        parts.append(f"{key}={rendered}")
+    return f"● {entry.tool_name}({', '.join(parts[:2])})"
 
 
 class MessageWidget(Vertical):
@@ -131,17 +179,13 @@ class MessageWidget(Vertical):
         self._show_thinking = show_thinking
         self.role = message.role
         self.content = message.content
-        self.thinking = message.thinking
         self.status = message.status
-
-    @property
-    def thinking_collapsed(self) -> bool:
-        return bool(self.content)
+        self.trace_entries = list(message.trace.entries)
 
     def compose(self) -> ComposeResult:
-        yield MessageLabelWidget(classes="message-label")
-        yield MessageThinkingWidget(classes="message-thinking")
-        yield MessageBodyWidget(classes="message-body")
+        yield Static(classes="message-label")
+        yield ThinkingTraceWidget(self.trace_entries, collapsed=True)
+        yield Static(classes="message-body")
 
     def on_mount(self) -> None:
         self._sync_view()
@@ -149,30 +193,33 @@ class MessageWidget(Vertical):
     def update_from_message(self, message: SessionMessage) -> None:
         self.role = message.role
         self.content = message.content
-        self.thinking = message.thinking
         self.status = message.status
+        self.trace_entries = list(message.trace.entries)
         self._sync_view()
 
     def _sync_view(self) -> None:
         self.set_class(self.status == "error", "-error")
 
-        label_widget = self.query_one(MessageLabelWidget)
-        label_widget.update_label(self._label_text(), self._label_color())
+        label_widget = self.query_one(".message-label", Static)
+        label_widget.update(self._label_text())
+        label_widget.styles.color = self._label_color()
+        label_widget.styles.text_style = "bold"
 
-        thinking_widget = self.query_one(MessageThinkingWidget)
-        if self._thinking_visible():
-            thinking_widget.show_thinking(self.thinking)
-        else:
-            thinking_widget.hide_thinking()
+        trace_widget = self.query_one(ThinkingTraceWidget)
+        trace_visible = self._show_trace()
+        trace_widget.display = trace_visible
+        if trace_visible:
+            trace_widget.update_entries(self.trace_entries)
 
-        body_widget = self.query_one(MessageBodyWidget)
+        body_widget = self.query_one(".message-body", Static)
         body_text = self._body_text()
+        body_widget.display = bool(body_text)
         if body_text:
-            body_widget.show_body(body_text, self._body_color())
-        else:
-            body_widget.hide_body()
+            body_widget.styles.color = self._body_color()
+            body_widget.update(body_text)
 
-        self.refresh(layout=True)
+    def _show_trace(self) -> bool:
+        return self._show_thinking and self.role == "assistant" and bool(self.trace_entries)
 
     def _label_text(self) -> str:
         if self.status == "error":
@@ -184,26 +231,21 @@ class MessageWidget(Vertical):
             return "#ff7b72"
         return self.ROLE_STYLES.get(self.role, "#ffffff")
 
-    def _thinking_visible(self) -> bool:
-        return self._show_thinking and bool(self.thinking) and not self.thinking_collapsed and self.status != "error"
-
     def _body_text(self) -> str:
         if self.status == "error":
             return self.content or "请求失败。"
         if self.content:
             return self.content
-        if self.status == "streaming" and not self.thinking:
+        if self.status == "streaming" and not self.trace_entries:
             return "等待模型回复..."
-        if self.status == "complete" and not self.thinking:
+        if self.status == "complete" and not self.trace_entries:
             return "本轮未收到任何回复。"
         return ""
 
     def _body_color(self) -> str:
         if self.status == "error":
             return "#ff7b72"
-        if self.content:
-            return "#e8e8e8"
-        return "#97adc7"
+        return "#e8e8e8"
 
 
 class LanCherTextualApp(App[int]):
@@ -248,21 +290,20 @@ class LanCherTextualApp(App[int]):
         layout: vertical;
     }
 
-    .message-label {
+    .message-label, .message-body, .thinking-trace-header, .thinking-trace-body {
         width: 1fr;
         height: auto;
     }
 
-    .message-thinking {
-        width: 1fr;
-        height: auto;
-        color: #a8b9cc;
+    .thinking-trace {
         margin: 0 0 1 0;
-    }
-
-    .message-body {
         width: 1fr;
         height: auto;
+        layout: vertical;
+    }
+
+    .thinking-trace-body {
+        color: #a8b9cc;
     }
 
     #chat-view.-banner-collapsed {
@@ -366,13 +407,13 @@ class LanCherTextualApp(App[int]):
 
     def __init__(
         self,
-        provider: ChatProvider,
+        turn_runner: TurnRunner,
         provider_config: ProviderConfig,
         session_controller: SessionController,
         ui_config: UIConfig,
     ) -> None:
         super().__init__()
-        self._provider = provider
+        self._turn_runner = turn_runner
         self._provider_config = provider_config
         self._session_controller = session_controller
         self._ui_config = ui_config
@@ -432,49 +473,23 @@ class LanCherTextualApp(App[int]):
             self.query_one(BannerWidget).set_compact(True)
             self.query_one("#chat-view", VerticalScroll).set_class(True, "-banner-collapsed")
 
-        user_message = self._session_controller.create_user_message(text)
-        assistant_message = self._session_controller.create_assistant_message()
-        request = self._session_controller.build_request()
-
-        chat_view = self.query_one("#chat-view", VerticalScroll)
-        await chat_view.mount(self._register_message_widget(user_message))
-        await chat_view.mount(self._register_message_widget(assistant_message))
-        chat_view.scroll_end(animate=False)
-
         self._is_streaming = True
         event.composer.disabled = True
         self._refresh_status_bar()
-        self.process_prompt(request, assistant_message.id)
+        self.process_prompt(text)
 
     @work(exclusive=False, exit_on_error=False)
-    async def process_prompt(
-        self,
-        request: ChatRequest,
-        assistant_message_id: str,
-    ) -> None:
+    async def process_prompt(self, text: str) -> None:
         try:
-            async for event in self._provider.stream_chat(request):
-                if event.kind == "thinking_delta" and event.text:
-                    self._session_controller.append_message_thinking(assistant_message_id, event.text)
-                elif event.kind == "text_delta" and event.text:
-                    self._session_controller.append_message_content(assistant_message_id, event.text)
-                elif event.kind == "message_end":
-                    self._session_controller.complete_message(assistant_message_id, event.usage)
+            async for event in self._turn_runner.run_user_turn(text):
+                if event.message is not None:
+                    if event.kind in {"user_message_created", "assistant_message_started"}:
+                        await self._mount_message_widget(event.message)
+                    else:
+                        self._sync_message_widget(event.message.id)
 
-                self._sync_message_widget(assistant_message_id)
                 self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
                 self._refresh_status_bar()
-
-            assistant_message = self._session_controller.get_message(assistant_message_id)
-            if assistant_message.status == "streaming":
-                self._session_controller.complete_message(assistant_message_id, MessageUsage())
-                self._sync_message_widget(assistant_message_id)
-        except LanCherError as exc:
-            self._session_controller.fail_message(assistant_message_id, exc.user_message)
-            self._sync_message_widget(assistant_message_id)
-        except Exception as exc:
-            self._session_controller.fail_message(assistant_message_id, f"发生未预期异常: {exc}")
-            self._sync_message_widget(assistant_message_id)
         finally:
             self._is_streaming = False
             input_widget = self.query_one("#composer-input", ComposerTextArea)
@@ -492,10 +507,11 @@ class LanCherTextualApp(App[int]):
             f"{self._provider_config.model} · Tokens In {usage.input_tokens} · Out {usage.output_tokens}"
         )
 
-    def _register_message_widget(self, message: SessionMessage) -> MessageWidget:
+    async def _mount_message_widget(self, message: SessionMessage) -> None:
+        chat_view = self.query_one("#chat-view", VerticalScroll)
         widget = MessageWidget(message, show_thinking=self._ui_config.show_thinking_status)
         self._message_widgets[message.id] = widget
-        return widget
+        await chat_view.mount(widget)
 
     def _sync_message_widget(self, message_id: str) -> None:
         widget = self._message_widgets[message_id]
@@ -516,13 +532,13 @@ class LanCherTextualApp(App[int]):
 class ChatTUI:
     def __init__(
         self,
-        provider: ChatProvider,
+        turn_runner: TurnRunner,
         provider_config: ProviderConfig,
         session_controller: SessionController,
         ui_config: UIConfig,
     ) -> None:
         self._app = LanCherTextualApp(
-            provider=provider,
+            turn_runner=turn_runner,
             provider_config=provider_config,
             session_controller=session_controller,
             ui_config=ui_config,

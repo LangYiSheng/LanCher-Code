@@ -12,7 +12,7 @@ from lancher_code.errors import (
     ProviderResponseError,
     StreamProtocolError,
 )
-from lancher_code.models import ChatRequest, MessageUsage, ProviderConfig, StreamEvent
+from lancher_code.models import ChatRequest, ContentBlock, ConversationMessage, MessageUsage, ProviderConfig, StreamEvent
 
 
 class ChatProvider(Protocol):
@@ -123,6 +123,23 @@ class BaseChatProvider:
         if isinstance(exc, httpx.RequestError):
             return ProviderRequestError(f"请求模型失败: {exc}")
         return ProviderRequestError("请求模型失败。")
+
+    @staticmethod
+    def text_from_blocks(blocks: list[ContentBlock]) -> str:
+        return "".join(block.text for block in blocks if block.kind == "text")
+
+    @staticmethod
+    def split_system_and_chat_messages(
+        messages: list[ConversationMessage],
+    ) -> tuple[list[ConversationMessage], list[ConversationMessage]]:
+        system_messages: list[ConversationMessage] = []
+        chat_messages: list[ConversationMessage] = []
+        for message in messages:
+            if message.role == "system":
+                system_messages.append(message)
+            else:
+                chat_messages.append(message)
+        return system_messages, chat_messages
 
     @staticmethod
     def _read_usage_value(raw_usage: dict[str, object], keys: tuple[str, ...]) -> int:
