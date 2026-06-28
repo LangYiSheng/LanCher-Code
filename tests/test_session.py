@@ -67,6 +67,8 @@ def test_session_controller_system_prompt_contains_cwd_and_date(openai_provider_
 
     assert str(tmp_path.resolve()) in system_text
     assert "2026-06-28" in system_text
+    assert "当前系统：" in system_text
+    assert "metadata" not in system_text
 
 
 def test_session_controller_appends_trace_tool_calls_and_results(openai_provider_config) -> None:
