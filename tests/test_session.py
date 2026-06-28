@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
-from datetime import timezone
+from datetime import date, timezone
 from pathlib import Path
 
 from lancher_code.models import MessageUsage, ToolCall, ToolDefinition, ToolExecutionResult
@@ -32,7 +31,7 @@ def test_session_controller_builds_request_with_fixed_system_prompt_and_tools(op
     controller = SessionController(openai_provider_config)
     controller.create_user_message("第一轮")
     first_reply = controller.create_assistant_message()
-    controller.append_message_content(first_reply.id, "第一轮回复")
+    controller.append_message_content(first_reply.id, "第一轮回答")
     controller.complete_message(first_reply.id)
     controller.create_user_message("第二轮")
 
@@ -172,3 +171,28 @@ def test_session_controller_totals_usage(openai_provider_config) -> None:
 
     assert usage.input_tokens == 5
     assert usage.output_tokens == 7
+
+
+def test_session_controller_can_accumulate_usage_before_completion(openai_provider_config) -> None:
+    controller = SessionController(openai_provider_config)
+    assistant_message = controller.create_assistant_message()
+
+    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=3, output_tokens=4))
+    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=2, output_tokens=1))
+
+    usage = controller.total_usage()
+
+    assert usage.input_tokens == 5
+    assert usage.output_tokens == 5
+
+
+def test_session_controller_keeps_usage_when_message_fails(openai_provider_config) -> None:
+    controller = SessionController(openai_provider_config)
+    assistant_message = controller.create_assistant_message()
+    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=8, output_tokens=13))
+
+    controller.fail_message(assistant_message.id, "网络失败")
+
+    failed = controller.get_message(assistant_message.id)
+    assert failed.usage.input_tokens == 8
+    assert failed.usage.output_tokens == 13

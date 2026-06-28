@@ -52,21 +52,38 @@ class TurnRunner:
                 )
                 total_usage.input_tokens += loop_usage.input_tokens
                 total_usage.output_tokens += loop_usage.output_tokens
-                yield TurnEvent(kind="assistant_trace_updated", message=self._session.get_message(assistant_message.id))
+                self._session.add_message_usage(assistant_message.id, loop_usage)
+                yield TurnEvent(
+                    kind="assistant_trace_updated",
+                    message=self._session.get_message(assistant_message.id),
+                    usage=self._current_message_usage(assistant_message.id),
+                )
 
                 if tool_calls:
                     if buffered_text:
                         self._session.append_trace_text(assistant_message.id, buffered_text)
-                        yield TurnEvent(kind="assistant_trace_updated", message=self._session.get_message(assistant_message.id))
+                        yield TurnEvent(
+                            kind="assistant_trace_updated",
+                            message=self._session.get_message(assistant_message.id),
+                            usage=self._current_message_usage(assistant_message.id),
+                        )
 
                     self._session.append_assistant_tool_calls(tool_calls)
                     self._session.append_trace_tool_calls(assistant_message.id, tool_calls)
-                    yield TurnEvent(kind="assistant_trace_updated", message=self._session.get_message(assistant_message.id))
+                    yield TurnEvent(
+                        kind="assistant_trace_updated",
+                        message=self._session.get_message(assistant_message.id),
+                        usage=self._current_message_usage(assistant_message.id),
+                    )
 
                     results = precomputed_results or await self._tool_executor.execute_calls(tool_calls)
                     self._session.append_tool_results(results)
                     self._session.append_trace_tool_results(assistant_message.id, results)
-                    yield TurnEvent(kind="assistant_trace_updated", message=self._session.get_message(assistant_message.id))
+                    yield TurnEvent(
+                        kind="assistant_trace_updated",
+                        message=self._session.get_message(assistant_message.id),
+                        usage=self._current_message_usage(assistant_message.id),
+                    )
                     continue
 
                 if buffered_text:
@@ -129,4 +146,11 @@ class TurnRunner:
             tool_name="tool_call_parser",
             arguments={},
             arguments_json="{}",
+        )
+
+    def _current_message_usage(self, message_id: str) -> MessageUsage:
+        usage = self._session.get_message(message_id).usage
+        return MessageUsage(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
         )

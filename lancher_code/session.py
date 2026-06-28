@@ -79,6 +79,12 @@ class SessionController:
         message.content += delta
         return message
 
+    def add_message_usage(self, message_id: str, usage: MessageUsage) -> SessionMessage:
+        message = self.get_message(message_id)
+        message.usage.input_tokens += usage.input_tokens
+        message.usage.output_tokens += usage.output_tokens
+        return message
+
     def append_trace_thinking(self, message_id: str, delta: str) -> SessionMessage:
         message = self.get_message(message_id)
         entries = message.trace.entries
@@ -164,7 +170,6 @@ class SessionController:
         message = self.get_message(message_id)
         message.status = "error"
         message.content = error_text
-        message.usage = MessageUsage()
         return message
 
     def get_message(self, message_id: str) -> SessionMessage:

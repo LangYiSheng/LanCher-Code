@@ -207,3 +207,53 @@ async def test_turn_runner_reports_provider_error(openai_provider_config, tmp_pa
 
     assert events[-1].kind == "turn_failed"
     assert events[-1].error_text == "网络失败"
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_accumulates_usage_after_each_model_call(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="echo_tool")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"value":"a"}')),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=2, output_tokens=3)),
+            ],
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="text_delta", text="最终回答"),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=5, output_tokens=7)),
+            ],
+        ]
+    )
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+
+    events = [event async for event in runner.run_user_turn("多次计费")]
+
+    trace_updates = [event for event in events if event.kind == "assistant_trace_updated"]
+    assert trace_updates[0].usage.input_tokens == 2
+    assert trace_updates[0].usage.output_tokens == 3
+    assert session.state.messages[-1].usage.input_tokens == 7
+    assert session.state.messages[-1].usage.output_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_keeps_accumulated_usage_on_failed_turn(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="echo_tool")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"value":"a"}')),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=4, output_tokens=6)),
+            ],
+            ProviderRequestError("网络失败"),
+        ]
+    )
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+
+    events = [event async for event in runner.run_user_turn("失败但要计费")]
+
+    assert events[-1].kind == "turn_failed"
+    assert session.state.messages[-1].usage.input_tokens == 4
+    assert session.state.messages[-1].usage.output_tokens == 6
