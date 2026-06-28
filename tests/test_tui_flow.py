@@ -308,3 +308,6 @@ async def test_thinking_is_shown_before_answer_and_then_collapsed(
         assert assistant.thinking == "先整理一下思路"
         assert assistant.thinking_collapsed is True
         assert assistant.query_one(".message-thinking", Static).display is False
+        body_widget = assistant.query_one(".message-body", Static)
+        assert str(body_widget.render()) == "这是正式回答"
+        assert str(body_widget.styles.color) == "Color(232, 232, 232)"

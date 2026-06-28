@@ -80,6 +80,39 @@ class BannerWidget(Static):
         return Group(title, subtitle)
 
 
+class MessageLabelWidget(Static):
+    def update_label(self, text: str, color: str) -> None:
+        self.styles.color = color
+        self.styles.text_style = "bold"
+        self.update(text)
+        self.refresh(layout=True)
+
+
+class MessageThinkingWidget(Static):
+    def show_thinking(self, text: str) -> None:
+        self.display = True
+        self.update(text)
+        self.refresh(layout=True)
+
+    def hide_thinking(self) -> None:
+        self.display = False
+        self.update("")
+        self.refresh(layout=True)
+
+
+class MessageBodyWidget(Static):
+    def show_body(self, text: str, color: str) -> None:
+        self.styles.color = color
+        self.display = True
+        self.update(text)
+        self.refresh(layout=True)
+
+    def hide_body(self) -> None:
+        self.display = False
+        self.update("")
+        self.refresh(layout=True)
+
+
 class MessageWidget(Vertical):
     ROLE_LABELS = {
         "system": "SYSTEM",
@@ -106,9 +139,9 @@ class MessageWidget(Vertical):
         return bool(self.content)
 
     def compose(self) -> ComposeResult:
-        yield Static(classes="message-label")
-        yield Static(classes="message-thinking")
-        yield Static(classes="message-body")
+        yield MessageLabelWidget(classes="message-label")
+        yield MessageThinkingWidget(classes="message-thinking")
+        yield MessageBodyWidget(classes="message-body")
 
     def on_mount(self) -> None:
         self._sync_view()
@@ -123,23 +156,23 @@ class MessageWidget(Vertical):
     def _sync_view(self) -> None:
         self.set_class(self.status == "error", "-error")
 
-        label_widget = self.query_one(".message-label", Static)
-        label_widget.update(self._label_text())
-        label_widget.styles.color = self._label_color()
-        label_widget.styles.text_style = "bold"
+        label_widget = self.query_one(MessageLabelWidget)
+        label_widget.update_label(self._label_text(), self._label_color())
 
-        thinking_widget = self.query_one(".message-thinking", Static)
-        thinking_visible = self._thinking_visible()
-        thinking_widget.display = thinking_visible
-        if thinking_visible:
-            thinking_widget.update(self.thinking)
+        thinking_widget = self.query_one(MessageThinkingWidget)
+        if self._thinking_visible():
+            thinking_widget.show_thinking(self.thinking)
+        else:
+            thinking_widget.hide_thinking()
 
-        body_widget = self.query_one(".message-body", Static)
+        body_widget = self.query_one(MessageBodyWidget)
         body_text = self._body_text()
-        body_widget.display = bool(body_text)
         if body_text:
-            body_widget.styles.color = self._body_color()
-            body_widget.update(body_text)
+            body_widget.show_body(body_text, self._body_color())
+        else:
+            body_widget.hide_body()
+
+        self.refresh(layout=True)
 
     def _label_text(self) -> str:
         if self.status == "error":

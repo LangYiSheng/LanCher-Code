@@ -31,6 +31,7 @@ class ClaudeProvider(BaseChatProvider):
 
         saw_end = False
         usage = MessageUsage()
+        content_block_types: dict[int, str] = {}
         try:
             async with self._client_factory() as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
@@ -53,17 +54,35 @@ class ClaudeProvider(BaseChatProvider):
                             usage = self._merge_usage(usage, event.get("usage"))
                             continue
 
+                        if event_type == "content_block_start":
+                            index = event.get("index")
+                            content_block = event.get("content_block")
+                            if isinstance(index, int) and isinstance(content_block, dict):
+                                block_type = content_block.get("type")
+                                if isinstance(block_type, str):
+                                    content_block_types[index] = block_type
+                            continue
+
                         if event_type == "content_block_delta":
+                            index = event.get("index")
                             delta = event.get("delta", {})
                             delta_type = delta.get("type")
-                            if delta_type == "text_delta":
+                            block_type = content_block_types.get(index) if isinstance(index, int) else None
+
+                            if block_type == "text" and delta_type == "text_delta":
                                 text = delta.get("text")
                                 if isinstance(text, str) and text:
                                     yield StreamEvent(kind="text_delta", text=text)
-                            elif delta_type == "thinking_delta":
+                            elif block_type == "thinking" and delta_type == "thinking_delta":
                                 thinking = delta.get("thinking")
                                 if isinstance(thinking, str) and thinking:
                                     yield StreamEvent(kind="thinking_delta", text=thinking)
+                            continue
+
+                        if event_type == "content_block_stop":
+                            index = event.get("index")
+                            if isinstance(index, int):
+                                content_block_types.pop(index, None)
                             continue
 
                         if event_type == "message_stop":
@@ -114,6 +133,8 @@ class ClaudeProvider(BaseChatProvider):
                 "type": "enabled",
                 "budget_tokens": request.thinking.budget_tokens or DEFAULT_THINKING_BUDGET,
             }
+        else:
+            payload["thinking"] = {"type": "disabled"}
         return payload
 
     @staticmethod
