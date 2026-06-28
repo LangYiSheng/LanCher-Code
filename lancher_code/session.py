@@ -87,6 +87,7 @@ class SessionController:
 
     def append_trace_thinking(self, message_id: str, delta: str) -> SessionMessage:
         message = self.get_message(message_id)
+        self._expand_trace_on_first_entry(message)
         entries = message.trace.entries
         if entries and entries[-1].kind == "thinking":
             entries[-1].text += delta
@@ -97,16 +98,19 @@ class SessionController:
     def append_trace_text(self, message_id: str, text: str) -> SessionMessage:
         message = self.get_message(message_id)
         if text:
+            self._expand_trace_on_first_entry(message)
             message.trace.entries.append(TraceEntry(kind="text", text=text))
         return message
 
     def append_trace_notice(self, message_id: str, text: str) -> SessionMessage:
         message = self.get_message(message_id)
+        self._expand_trace_on_first_entry(message)
         message.trace.entries.append(TraceEntry(kind="notice", text=text))
         return message
 
     def append_trace_tool_calls(self, message_id: str, tool_calls: list[ToolCall]) -> SessionMessage:
         message = self.get_message(message_id)
+        self._expand_trace_on_first_entry(message)
         for call in tool_calls:
             message.trace.entries.append(
                 TraceEntry(
@@ -120,6 +124,7 @@ class SessionController:
 
     def append_trace_tool_results(self, message_id: str, results: list[ToolExecutionResult]) -> SessionMessage:
         message = self.get_message(message_id)
+        self._expand_trace_on_first_entry(message)
         for result in results:
             message.trace.entries.append(
                 TraceEntry(
@@ -161,6 +166,7 @@ class SessionController:
     def complete_message(self, message_id: str, usage: MessageUsage | None = None) -> SessionMessage:
         message = self.get_message(message_id)
         message.status = "complete"
+        message.trace.collapsed = True
         message.usage = usage or MessageUsage()
         if message.content.strip():
             self._transcript.append(ConversationMessage.text_message("assistant", message.content))
@@ -170,6 +176,7 @@ class SessionController:
         message = self.get_message(message_id)
         message.status = "error"
         message.content = error_text
+        message.trace.collapsed = True
         return message
 
     def get_message(self, message_id: str) -> SessionMessage:
@@ -210,6 +217,11 @@ class SessionController:
         if result.ok:
             return result.content.strip() or result.summary
         return result.error_message or result.content or result.summary
+
+    @staticmethod
+    def _expand_trace_on_first_entry(message: SessionMessage) -> None:
+        if message.role == "assistant" and message.status == "streaming" and not message.trace.entries:
+            message.trace.collapsed = False
 
     @staticmethod
     def _new_message_id() -> str:

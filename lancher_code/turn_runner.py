@@ -47,43 +47,62 @@ class TurnRunner:
                     yield TurnEvent(kind="turn_failed", message=message, error_text=error_text)
                     return
 
-                loop_usage, tool_calls, buffered_text, precomputed_results = await self._run_single_model_reply(
-                    assistant_message.id
+                request = self._session.build_request(
+                    self._tool_registry.list_definitions(),
+                    allow_tool_calls=True,
                 )
+                loop_usage = MessageUsage()
+                assembler = ToolCallAssembler()
+                buffered_text_parts: list[str] = []
+
+                async for event in self._provider.stream_chat(request):
+                    if event.kind == "thinking_delta" and event.text:
+                        self._session.append_trace_thinking(assistant_message.id, event.text)
+                        yield self._trace_updated_event(assistant_message.id)
+                    elif event.kind == "text_delta" and event.text:
+                        buffered_text_parts.append(event.text)
+                    elif event.kind == "tool_call_delta" and event.tool_call_chunk:
+                        assembler.consume(event.tool_call_chunk)
+                    elif event.kind == "message_end":
+                        loop_usage = event.usage
+
+                buffered_text = "".join(buffered_text_parts)
+                try:
+                    tool_calls = assembler.finalize()
+                    precomputed_results: list[ToolExecutionResult] = []
+                except ToolCallParseError as exc:
+                    tool_calls = [self._synthetic_tool_call()]
+                    precomputed_results = [
+                        ToolExecutionResult(
+                            call_id=tool_calls[0].call_id,
+                            tool_name=tool_calls[0].tool_name,
+                            content=exc.user_message,
+                            is_error=True,
+                            metadata={},
+                            summary="工具调用解析失败",
+                            error_code="tool_call_parse_error",
+                            error_message=exc.user_message,
+                        )
+                    ]
+
                 total_usage.input_tokens += loop_usage.input_tokens
                 total_usage.output_tokens += loop_usage.output_tokens
                 self._session.add_message_usage(assistant_message.id, loop_usage)
-                yield TurnEvent(
-                    kind="assistant_trace_updated",
-                    message=self._session.get_message(assistant_message.id),
-                    usage=self._current_message_usage(assistant_message.id),
-                )
+                yield self._trace_updated_event(assistant_message.id)
 
                 if tool_calls:
                     if buffered_text:
                         self._session.append_trace_text(assistant_message.id, buffered_text)
-                        yield TurnEvent(
-                            kind="assistant_trace_updated",
-                            message=self._session.get_message(assistant_message.id),
-                            usage=self._current_message_usage(assistant_message.id),
-                        )
+                        yield self._trace_updated_event(assistant_message.id)
 
                     self._session.append_assistant_tool_calls(tool_calls)
                     self._session.append_trace_tool_calls(assistant_message.id, tool_calls)
-                    yield TurnEvent(
-                        kind="assistant_trace_updated",
-                        message=self._session.get_message(assistant_message.id),
-                        usage=self._current_message_usage(assistant_message.id),
-                    )
+                    yield self._trace_updated_event(assistant_message.id)
 
                     results = precomputed_results or await self._tool_executor.execute_calls(tool_calls)
                     self._session.append_tool_results(results)
                     self._session.append_trace_tool_results(assistant_message.id, results)
-                    yield TurnEvent(
-                        kind="assistant_trace_updated",
-                        message=self._session.get_message(assistant_message.id),
-                        usage=self._current_message_usage(assistant_message.id),
-                    )
+                    yield self._trace_updated_event(assistant_message.id)
                     continue
 
                 if buffered_text:
@@ -101,43 +120,6 @@ class TurnRunner:
             message = self._session.fail_message(assistant_message.id, error_text)
             yield TurnEvent(kind="turn_failed", message=message, error_text=error_text)
 
-    async def _run_single_model_reply(
-        self,
-        assistant_message_id: str,
-    ) -> tuple[MessageUsage, list[ToolCall], str, list[ToolExecutionResult]]:
-        request = self._session.build_request(self._tool_registry.list_definitions(), allow_tool_calls=True)
-        usage = MessageUsage()
-        assembler = ToolCallAssembler()
-        buffered_text_parts: list[str] = []
-
-        async for event in self._provider.stream_chat(request):
-            if event.kind == "thinking_delta" and event.text:
-                self._session.append_trace_thinking(assistant_message_id, event.text)
-            elif event.kind == "text_delta" and event.text:
-                buffered_text_parts.append(event.text)
-            elif event.kind == "tool_call_delta" and event.tool_call_chunk:
-                assembler.consume(event.tool_call_chunk)
-            elif event.kind == "message_end":
-                usage = event.usage
-
-        try:
-            tool_calls = assembler.finalize()
-        except ToolCallParseError as exc:
-            tool_calls = [self._synthetic_tool_call()]
-            parse_result = ToolExecutionResult(
-                call_id=tool_calls[0].call_id,
-                tool_name=tool_calls[0].tool_name,
-                content=exc.user_message,
-                is_error=True,
-                metadata={},
-                summary="工具调用解析失败",
-                error_code="tool_call_parse_error",
-                error_message=exc.user_message,
-            )
-            return usage, tool_calls, "".join(buffered_text_parts), [parse_result]
-
-        return usage, tool_calls, "".join(buffered_text_parts), []
-
     @staticmethod
     def _synthetic_tool_call() -> ToolCall:
         return ToolCall(
@@ -146,6 +128,13 @@ class TurnRunner:
             tool_name="tool_call_parser",
             arguments={},
             arguments_json="{}",
+        )
+
+    def _trace_updated_event(self, message_id: str) -> TurnEvent:
+        return TurnEvent(
+            kind="assistant_trace_updated",
+            message=self._session.get_message(message_id),
+            usage=self._current_message_usage(message_id),
         )
 
     def _current_message_usage(self, message_id: str) -> MessageUsage:

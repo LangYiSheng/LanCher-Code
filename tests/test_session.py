@@ -12,6 +12,7 @@ def test_session_controller_creates_messages_with_metadata(openai_provider_confi
 
     user_message = controller.create_user_message("你好")
     assistant_message = controller.create_assistant_message()
+    assert assistant_message.trace.collapsed is True
     controller.append_message_content(assistant_message.id, "你好呀")
     controller.complete_message(assistant_message.id, MessageUsage(input_tokens=3, output_tokens=2))
 
@@ -99,8 +100,13 @@ def test_session_controller_appends_trace_tool_calls_and_results(openai_provider
         ],
     )
 
-    entries = controller.get_message(assistant_message.id).trace.entries
+    traced_message = controller.get_message(assistant_message.id)
+    entries = traced_message.trace.entries
     assert [entry.kind for entry in entries] == ["thinking", "tool_call", "tool_result"]
+    assert traced_message.trace.collapsed is False
+
+    controller.complete_message(assistant_message.id)
+    assert controller.get_message(assistant_message.id).trace.collapsed is True
 
 
 def test_session_controller_appends_transcript_tool_calls_and_results(openai_provider_config) -> None:

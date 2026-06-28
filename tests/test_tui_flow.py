@@ -170,8 +170,12 @@ async def test_tui_streams_single_turn_by_message_id(
         assert messages[-1].message_id == session.state.messages[-1].id
         assert len(provider.requests) == 1
         assert app.query_one("#composer-input", ComposerTextArea).text == ""
+        status_left = app.query_one("#status-left", Static)
         status_right = app.query_one("#status-right", Static)
-        assert "Tokens In 3 · Out 2" in str(status_right.render())
+        assert str(status_left.render()) == "gpt-test (OpenAI)"
+        assert "gpt-test" not in str(status_right.render())
+        assert "Tokens In 3" in str(status_right.render())
+        assert "Out 2" in str(status_right.render())
 
 
 @pytest.mark.asyncio
@@ -354,6 +358,38 @@ async def test_tui_renders_tool_flow_inside_thinking_trace(
         assert ("● echo_tool(value=hello)", "#73b6ff") in segments
         assert ("✓ 执行成功: hello", "#78d98a") in segments
         assert ("再整理一下", "#a8b9cc") in segments
+
+@pytest.mark.asyncio
+async def test_thinking_trace_expands_while_streaming_and_auto_collapses_when_done(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                (StreamEvent(kind="thinking_delta", text="thinking"), 0.3),
+                StreamEvent(kind="text_delta", text="final answer"),
+                StreamEvent(kind="message_end"),
+            ]
+        ]
+    )
+    app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "demo prompt")
+        await pilot.pause(0.05)
+
+        trace_widget = list(app.query(ThinkingTraceWidget))[-1]
+        assert trace_widget.collapsed is False
+        assert session.state.messages[-1].trace.collapsed is False
+
+        await pilot.pause(0.35)
+
+        trace_widget = list(app.query(ThinkingTraceWidget))[-1]
+        assert trace_widget.collapsed is True
+        assert session.state.messages[-1].trace.collapsed is True
 
 
 def test_format_trace_entries_renders_edit_preview_lines() -> None:

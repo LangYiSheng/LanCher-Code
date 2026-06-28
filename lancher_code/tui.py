@@ -101,6 +101,12 @@ class ThinkingTraceWidget(Vertical):
         self._collapsed = not self._collapsed
         self._sync_view()
 
+    def set_collapsed(self, collapsed: bool) -> None:
+        if self._collapsed == collapsed:
+            return
+        self._collapsed = collapsed
+        self._sync_view()
+
     def update_entries(self, entries: list[TraceEntry]) -> None:
         self._entries = list(entries)
         self._sync_view()
@@ -181,10 +187,11 @@ class MessageWidget(Vertical):
         self.content = message.content
         self.status = message.status
         self.trace_entries = list(message.trace.entries)
+        self.trace_collapsed = message.trace.collapsed
 
     def compose(self) -> ComposeResult:
         yield Static(classes="message-label")
-        yield ThinkingTraceWidget(self.trace_entries, collapsed=True)
+        yield ThinkingTraceWidget(self.trace_entries, collapsed=self.trace_collapsed)
         yield Static(classes="message-body")
 
     def on_mount(self) -> None:
@@ -195,6 +202,7 @@ class MessageWidget(Vertical):
         self.content = message.content
         self.status = message.status
         self.trace_entries = list(message.trace.entries)
+        self.trace_collapsed = message.trace.collapsed
         self._sync_view()
 
     def _sync_view(self) -> None:
@@ -209,6 +217,7 @@ class MessageWidget(Vertical):
         trace_visible = self._show_trace()
         trace_widget.display = trace_visible
         if trace_visible:
+            trace_widget.set_collapsed(self.trace_collapsed)
             trace_widget.update_entries(self.trace_entries)
 
         body_widget = self.query_one(".message-body", Static)
@@ -500,12 +509,10 @@ class LanCherTextualApp(App[int]):
 
     def _refresh_status_bar(self) -> None:
         usage = self._session_controller.total_usage()
-        provider_name = "Anthropic Claude" if self._provider_config.protocol == "claude" else "OpenAI"
-        self.query_one("#status-left", Static).update(f"Provider: {provider_name}")
+        api_type = "OpenAI" if self._provider_config.protocol == "openai" else "Claude"
+        self.query_one("#status-left", Static).update(f"{self._provider_config.model} ({api_type})")
         self.query_one("#status-center", Static).update("Busy" if self._is_streaming else "Ready")
-        self.query_one("#status-right", Static).update(
-            f"{self._provider_config.model} · Tokens In {usage.input_tokens} · Out {usage.output_tokens}"
-        )
+        self.query_one("#status-right", Static).update(f"Tokens In {usage.input_tokens} | Out {usage.output_tokens}")
 
     async def _mount_message_widget(self, message: SessionMessage) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)
