@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -12,9 +13,11 @@ from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.turn_runner import MAX_TOOL_LOOPS, TurnRunner
 
+DelayedEvent = tuple[StreamEvent, float]
+
 
 class FakeProvider:
-    def __init__(self, responses: list[list[StreamEvent] | Exception]) -> None:
+    def __init__(self, responses: list[list[StreamEvent | DelayedEvent] | Exception]) -> None:
         self._responses = responses
         self.requests: list[ChatRequest] = []
 
@@ -23,16 +26,22 @@ class FakeProvider:
         current = self._responses.pop(0)
         if isinstance(current, Exception):
             raise current
-        for event in current:
+        for item in current:
+            if isinstance(item, tuple):
+                event, delay = item
+            else:
+                event, delay = item, 0.0
             yield event
+            if delay > 0:
+                await asyncio.sleep(delay)
 
 
 class EchoTool:
     @property
-    def definition(self):
+    def definition(self) -> ToolDefinition:
         return ToolDefinition(name="echo_tool", description="echo", input_schema={"type": "object"})
 
-    async def execute(self, arguments, context):
+    async def execute(self, arguments: dict[str, object], context) -> ToolExecutionResult:
         return ToolExecutionResult(
             call_id="",
             tool_name=self.definition.name,
@@ -68,7 +77,10 @@ async def test_turn_runner_completes_plain_text_turn(openai_provider_config, tmp
     assert [event.kind for event in events] == [
         "user_message_created",
         "assistant_message_started",
-        "assistant_trace_updated",
+        "progress_updated",
+        "progress_updated",
+        "assistant_text_delta",
+        "usage_updated",
         "assistant_message_completed",
     ]
     assert events[-1].message is not None
@@ -103,6 +115,8 @@ async def test_turn_runner_executes_multiple_tool_calls_in_one_reply(openai_prov
 
     assert events[-1].kind == "assistant_message_completed"
     assert len(provider.requests) == 2
+    assert sum(event.kind == "tool_call_started" for event in events) == 2
+    assert sum(event.kind == "tool_result_received" for event in events) == 2
     entries = session.state.messages[-1].trace.entries
     assert [entry.kind for entry in entries] == ["thinking", "tool_call", "tool_call", "tool_result", "tool_result"]
     assert session.state.messages[-1].content == "最终回答"
@@ -230,9 +244,11 @@ async def test_turn_runner_accumulates_usage_after_each_model_call(openai_provid
 
     events = [event async for event in runner.run_user_turn("多次计费")]
 
-    trace_updates = [event for event in events if event.kind == "assistant_trace_updated"]
-    assert trace_updates[0].usage.input_tokens == 2
-    assert trace_updates[0].usage.output_tokens == 3
+    usage_updates = [event for event in events if event.kind == "usage_updated"]
+    assert usage_updates[0].usage.input_tokens == 2
+    assert usage_updates[0].usage.output_tokens == 3
+    assert usage_updates[1].usage.input_tokens == 7
+    assert usage_updates[1].usage.output_tokens == 10
     assert session.state.messages[-1].usage.input_tokens == 7
     assert session.state.messages[-1].usage.output_tokens == 10
 
@@ -288,3 +304,65 @@ async def test_turn_runner_respects_custom_loop_limit(openai_provider_config, tm
     assert events[-1].kind == "turn_failed"
     assert events[-1].error_text is not None
     assert "1 次" in events[-1].error_text
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_stops_after_consecutive_unknown_tools(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="missing_tool")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta="{}")),
+                StreamEvent(kind="message_end"),
+            ],
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-2", name_delta="missing_tool")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta="{}")),
+                StreamEvent(kind="message_end"),
+            ],
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-3", name_delta="missing_tool")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta="{}")),
+                StreamEvent(kind="message_end"),
+            ],
+        ]
+    )
+    registry = ToolRegistry()
+    session = SessionController(openai_provider_config)
+    executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
+    runner = TurnRunner(provider, session, registry, executor, unknown_tool_streak_limit=3)
+
+    events = [event async for event in runner.run_user_turn("连续未知工具")]
+
+    assert events[-1].kind == "turn_failed"
+    assert events[-1].error_text is not None
+    assert "连续请求未知工具" in events[-1].error_text
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_can_cancel_active_turn(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                (StreamEvent(kind="text_delta", text="先来一点"), 0.5),
+                StreamEvent(kind="text_delta", text="后面的内容"),
+                StreamEvent(kind="message_end"),
+            ]
+        ]
+    )
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+
+    async def collect_events():
+        return [event async for event in runner.run_user_turn("取消一下")]
+
+    task = asyncio.create_task(collect_events())
+    await asyncio.sleep(0.1)
+    assert runner.cancel_active_turn() is True
+    events = await task
+
+    assert events[-1].kind == "turn_cancelled"
+    assert session.state.messages[-1].status == "cancelled"

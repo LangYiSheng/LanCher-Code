@@ -6,6 +6,7 @@ from lancher_code.tools.builtin.glob import FindFilesTool, GlobTool
 from lancher_code.tools.builtin.grep import GrepTool, SearchCodeTool
 from lancher_code.tools.builtin.read_file import ReadFileTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
+from lancher_code.tools.builtin.write_plan_file import WritePlanFileTool
 
 __all__ = [
     "BashTool",
@@ -18,4 +19,5 @@ __all__ = [
     "RunCommandTool",
     "SearchCodeTool",
     "WriteFileTool",
+    "WritePlanFileTool",
 ]

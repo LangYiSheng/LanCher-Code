@@ -26,7 +26,11 @@ async def run_app(config_path: str) -> int:
 
     provider = create_provider(config.provider)
     cwd = Path.cwd()
-    session_controller = SessionController(config.provider, cwd=cwd)
+    session_controller = SessionController(
+        config.provider,
+        cwd=cwd,
+        plan_file_path=Path(config.runtime.plan_file_path),
+    )
     tool_registry = create_default_tool_registry()
     tool_executor = ToolExecutor(
         tool_registry,
@@ -39,6 +43,7 @@ async def run_app(config_path: str) -> int:
         tool_registry,
         tool_executor,
         max_tool_loops=config.runtime.tool_loop_limit,
+        unknown_tool_streak_limit=config.runtime.unknown_tool_streak_limit,
     )
     tui = ChatTUI(
         turn_runner=turn_runner,

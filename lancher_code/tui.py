@@ -11,16 +11,16 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Click, Message
 from textual.widgets import Static, TextArea
 
-from lancher_code.models import ProviderConfig, SessionMessage, TraceEntry, UIConfig
+from lancher_code.models import ProviderConfig, SessionMessage, TraceEntry, TurnEvent, UIConfig
 from lancher_code.session import SessionController
 from lancher_code.turn_runner import TurnRunner
 
 BANNER_TEXT = r"""
-    __                ________                 ______          __   
-   / /   ____ _____  / ____/ /_  ___  _____   / ____/___  ____/ /__ 
+    __                ________                 ______          __
+   / /   ____ _____  / ____/ /_  ___  _____   / ____/___  ____/ /__
   / /   / __ `/ __ \/ /   / __ \/ _ \/ ___/  / /   / __ \/ __  / _ \
  / /___/ /_/ / / / / /___/ / / /  __/ /     / /___/ /_/ / /_/ /  __/
-/_____/\__,_/_/ /_/\____/_/ /_/\___/_/      \____/\____/\__,_/\___/ 
+/_____/\__,_/_/ /_/\____/_/ /_/\___/_/      \____/\____/\__,_/\___/
 """
 
 MIN_COMPOSER_LINES = 1
@@ -115,7 +115,7 @@ class ThinkingTraceWidget(Vertical):
         header = self.query_one(".thinking-trace-header", Static)
         body = self.query_one(".thinking-trace-body", Static)
         marker = "▶" if self._collapsed else "▼"
-        header.update(f"{marker} 思考内容 ({len(self._entries)})")
+        header.update(f"{marker} 思考轨迹 ({len(self._entries)})")
         header.styles.color = "#a8b9cc"
         header.styles.text_style = "bold"
         body.display = bool(self._entries) and not self._collapsed
@@ -178,6 +178,10 @@ class MessageWidget(Vertical):
         "user": "#78d98a",
         "assistant": "#73b6ff",
     }
+    STATUS_LABELS = {
+        "error": "ERROR",
+        "cancelled": "CANCELLED",
+    }
 
     def __init__(self, message: SessionMessage, *, show_thinking: bool) -> None:
         super().__init__(classes=f"message message--{message.role}")
@@ -206,7 +210,7 @@ class MessageWidget(Vertical):
         self._sync_view()
 
     def _sync_view(self) -> None:
-        self.set_class(self.status == "error", "-error")
+        self.set_class(self.status in {"error", "cancelled"}, "-error")
 
         label_widget = self.query_one(".message-label", Static)
         label_widget.update(self._label_text())
@@ -231,18 +235,20 @@ class MessageWidget(Vertical):
         return self._show_thinking and self.role == "assistant" and bool(self.trace_entries)
 
     def _label_text(self) -> str:
-        if self.status == "error":
-            return "ERROR"
+        if self.status in self.STATUS_LABELS:
+            return self.STATUS_LABELS[self.status]
         return self.ROLE_LABELS.get(self.role, self.role.upper())
 
     def _label_color(self) -> str:
-        if self.status == "error":
+        if self.status in {"error", "cancelled"}:
             return "#ff7b72"
         return self.ROLE_STYLES.get(self.role, "#ffffff")
 
     def _body_text(self) -> str:
         if self.status == "error":
             return self.content or "请求失败。"
+        if self.status == "cancelled":
+            return self.content or "本轮已取消。"
         if self.content:
             return self.content
         if self.status == "streaming" and not self.trace_entries:
@@ -252,7 +258,7 @@ class MessageWidget(Vertical):
         return ""
 
     def _body_color(self) -> str:
-        if self.status == "error":
+        if self.status in {"error", "cancelled"}:
             return "#ff7b72"
         return "#e8e8e8"
 
@@ -410,7 +416,7 @@ class LanCherTextualApp(App[int]):
     """
 
     BINDINGS = [
-        ("ctrl+c", "request_quit", "退出"),
+        ("ctrl+c", "request_quit", "取消/退出"),
     ]
 
     def __init__(
@@ -428,20 +434,21 @@ class LanCherTextualApp(App[int]):
         self._is_streaming = False
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
+        self._status_hint = "Ready"
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield BannerWidget(Path.cwd())
             yield VerticalScroll(id="chat-view")
             with Horizontal(id="composer"):
-                yield Static("❯", id="prompt-glyph")
+                yield Static("✦", id="prompt-glyph")
                 yield ComposerTextArea(
                     "",
                     soft_wrap=True,
                     show_line_numbers=False,
                     compact=True,
                     highlight_cursor_line=False,
-                    placeholder="发送一条消息... Enter发送，Shift+Enter换行，/exit 或 Ctrl+C 退出",
+                    placeholder="",
                     id="composer-input",
                 )
             with Horizontal(id="status-bar"):
@@ -452,12 +459,18 @@ class LanCherTextualApp(App[int]):
     def on_mount(self) -> None:
         self.query_one(ComposerTextArea).focus()
         self._update_composer_height()
+        self._refresh_composer_placeholder()
         self._refresh_status_bar()
 
     def on_resize(self) -> None:
         self.call_after_refresh(self._update_composer_height)
 
     async def action_request_quit(self) -> None:
+        if self._is_streaming:
+            if self._turn_runner.cancel_active_turn():
+                self._status_hint = "Cancelling..."
+                self._refresh_status_bar()
+            return
         self.exit(0)
 
     @on(TextArea.Changed, "#composer-input")
@@ -476,12 +489,26 @@ class LanCherTextualApp(App[int]):
         if self._is_streaming:
             return
 
+        if text == "/do":
+            self._apply_turn_event(self._turn_runner.set_mode("normal"))
+            self._refresh_status_bar()
+            return
+
+        if text == "/plan" or text.startswith("/plan "):
+            self._apply_turn_event(self._turn_runner.set_mode("plan"))
+            self._refresh_status_bar()
+            payload = text[5:].strip()
+            if not payload:
+                return
+            text = payload
+
         if not self._chat_started:
             self._chat_started = True
             self.query_one(BannerWidget).set_compact(True)
             self.query_one("#chat-view", VerticalScroll).set_class(True, "-banner-collapsed")
 
         self._is_streaming = True
+        self._status_hint = "Busy"
         event.composer.disabled = True
         self._refresh_status_bar()
         self.process_prompt(text)
@@ -490,27 +517,24 @@ class LanCherTextualApp(App[int]):
     async def process_prompt(self, text: str) -> None:
         try:
             async for event in self._turn_runner.run_user_turn(text):
-                if event.message is not None:
-                    if event.kind in {"user_message_created", "assistant_message_started"}:
-                        await self._mount_message_widget(event.message)
-                    else:
-                        self._sync_message_widget(event.message.id)
-
-                self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
-                self._refresh_status_bar()
+                await self._consume_turn_event(event)
         finally:
             self._is_streaming = False
+            self._status_hint = "Ready"
             input_widget = self.query_one("#composer-input", ComposerTextArea)
             input_widget.disabled = False
             input_widget.focus()
+            self._refresh_composer_placeholder()
             self._refresh_status_bar()
             self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
 
     def _refresh_status_bar(self) -> None:
         usage = self._session_controller.total_usage()
         api_type = "OpenAI" if self._provider_config.protocol == "openai" else "Claude"
+        mode_label = "PLAN" if self._session_controller.runtime_mode == "plan" else "NORMAL"
         self.query_one("#status-left", Static).update(f"{self._provider_config.model} ({api_type})")
-        self.query_one("#status-center", Static).update("Busy" if self._is_streaming else "Ready")
+        center_text = self._status_hint or ("Busy" if self._is_streaming else "Ready")
+        self.query_one("#status-center", Static).update(f"{center_text} [{mode_label}]")
         self.query_one("#status-right", Static).update(f"Tokens In {usage.input_tokens} | Out {usage.output_tokens}")
 
     async def _mount_message_widget(self, message: SessionMessage) -> None:
@@ -522,6 +546,42 @@ class LanCherTextualApp(App[int]):
     def _sync_message_widget(self, message_id: str) -> None:
         widget = self._message_widgets[message_id]
         widget.update_from_message(self._session_controller.get_message(message_id))
+
+    async def _consume_turn_event(self, event: TurnEvent) -> None:
+        self._apply_turn_event(event)
+        if event.message is not None and event.kind in {"user_message_created", "assistant_message_started"}:
+            await self._mount_message_widget(event.message)
+        elif event.message is not None:
+            self._sync_message_widget(event.message.id)
+        self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
+        self._refresh_status_bar()
+
+    def _apply_turn_event(self, event: TurnEvent) -> None:
+        if event.kind == "mode_changed":
+            self._status_hint = event.progress_message or "Mode changed"
+            self._refresh_composer_placeholder()
+            return
+        if event.kind == "progress_updated":
+            self._status_hint = event.progress_message or ("Busy" if self._is_streaming else "Ready")
+            return
+        if event.kind == "turn_cancelled":
+            self._status_hint = event.progress_message or "Cancelled"
+            return
+        if event.kind == "turn_failed":
+            self._status_hint = event.error_text or "Failed"
+            return
+        if event.kind == "assistant_message_completed":
+            self._status_hint = "Ready"
+            return
+        if event.kind in {"assistant_text_delta", "tool_call_started", "tool_result_received", "usage_updated"}:
+            self._status_hint = "Busy"
+
+    def _refresh_composer_placeholder(self) -> None:
+        composer = self.query_one("#composer-input", ComposerTextArea)
+        if self._session_controller.runtime_mode == "plan":
+            composer.placeholder = "Plan Mode：继续补充或修改计划；输入 /do 返回正常模式，Ctrl+C 取消当前请求"
+            return
+        composer.placeholder = "发送一条消息... Enter 发送，Shift+Enter 换行，/plan 进入计划模式，Ctrl+C 取消/退出，/exit 退出"
 
     def _update_composer_height(self) -> None:
         composer_input = self.query_one("#composer-input", ComposerTextArea)

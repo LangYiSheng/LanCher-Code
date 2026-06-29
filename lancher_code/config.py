@@ -95,7 +95,18 @@ def _load_ui(raw_value: dict[str, Any]) -> UIConfig:
 
 def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
     tool_loop_limit = _read_positive_int(raw_value.get("tool_loop_limit", 50), "runtime.tool_loop_limit")
-    return RuntimeConfig(tool_loop_limit=tool_loop_limit)
+    unknown_tool_streak_limit = _read_positive_int(
+        raw_value.get("unknown_tool_streak_limit", 3),
+        "runtime.unknown_tool_streak_limit",
+    )
+    plan_file_path = raw_value.get("plan_file_path", "./.lancher/plan.md")
+    if not isinstance(plan_file_path, str) or not plan_file_path.strip():
+        raise ConfigError("runtime.plan_file_path 必须是非空字符串。")
+    return RuntimeConfig(
+        tool_loop_limit=tool_loop_limit,
+        unknown_tool_streak_limit=unknown_tool_streak_limit,
+        plan_file_path=plan_file_path.strip(),
+    )
 
 
 def _require_mapping(raw_data: dict[str, Any], key: str) -> dict[str, Any]:

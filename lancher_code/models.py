@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +9,8 @@ from typing import Literal
 ProviderProtocol = Literal["openai", "claude"]
 MessageRole = Literal["system", "user", "assistant"]
 ConversationRole = Literal["system", "user", "assistant", "tool"]
-MessageStatus = Literal["streaming", "complete", "error"]
+MessageStatus = Literal["streaming", "complete", "error", "cancelled"]
+RuntimeMode = Literal["normal", "plan"]
 StreamEventKind = Literal[
     "text_delta",
     "thinking_delta",
@@ -20,7 +22,13 @@ StreamEventKind = Literal[
 TurnEventKind = Literal[
     "user_message_created",
     "assistant_message_started",
-    "assistant_trace_updated",
+    "assistant_text_delta",
+    "tool_call_started",
+    "tool_result_received",
+    "usage_updated",
+    "progress_updated",
+    "mode_changed",
+    "turn_cancelled",
     "assistant_message_completed",
     "turn_failed",
 ]
@@ -44,6 +52,8 @@ class UIConfig:
 @dataclass(slots=True)
 class RuntimeConfig:
     tool_loop_limit: int = 50
+    unknown_tool_streak_limit: int = 3
+    plan_file_path: str = "./.lancher/plan.md"
 
 
 @dataclass(slots=True)
@@ -78,6 +88,7 @@ class ToolDefinition:
     is_concurrency_safe: bool = True
     is_system_tool: bool = False
     should_defer: bool = False
+    allowed_modes: tuple[RuntimeMode, ...] = ("normal", "plan")
 
     def __init__(
         self,
@@ -88,6 +99,7 @@ class ToolDefinition:
         is_concurrency_safe: bool = True,
         is_system_tool: bool = False,
         should_defer: bool = False,
+        allowed_modes: tuple[RuntimeMode, ...] = ("normal", "plan"),
         input_schema: dict[str, object] | None = None,
     ) -> None:
         self.name = name
@@ -97,16 +109,35 @@ class ToolDefinition:
         self.is_concurrency_safe = is_concurrency_safe
         self.is_system_tool = is_system_tool
         self.should_defer = should_defer
+        self.allowed_modes = allowed_modes
 
     @property
     def input_schema(self) -> dict[str, object]:
         return self.params_model
 
 
+class CancellationToken:
+    def __init__(self) -> None:
+        self._event = asyncio.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._event.is_set()
+
+    async def wait(self) -> None:
+        await self._event.wait()
+
+
 @dataclass(slots=True)
 class ToolContext:
     cwd: Path
     timeout_seconds: float
+    mode: RuntimeMode = "normal"
+    plan_file_path: Path | None = None
+    cancellation_token: CancellationToken | None = None
     file_state_cache: "FileStateCache | None" = None
 
     def __post_init__(self) -> None:
@@ -247,6 +278,7 @@ class SessionMessage:
 @dataclass(slots=True)
 class SessionState:
     messages: list[SessionMessage] = field(default_factory=list)
+    runtime_mode: RuntimeMode = "normal"
 
     def snapshot(self) -> list[SessionMessage]:
         return list(self.messages)
@@ -259,6 +291,8 @@ class ChatRequest:
     tools: list[ToolDefinition] = field(default_factory=list)
     allow_tool_calls: bool = True
     thinking: ThinkingConfig | None = None
+    mode: RuntimeMode = "normal"
+    cancellation_token: CancellationToken | None = None
 
 
 @dataclass(slots=True)
@@ -275,3 +309,8 @@ class TurnEvent:
     message: SessionMessage | None = None
     usage: MessageUsage = field(default_factory=MessageUsage)
     error_text: str | None = None
+    text: str | None = None
+    progress_message: str | None = None
+    tool_call: ToolCall | None = None
+    tool_result: ToolExecutionResult | None = None
+    mode: RuntimeMode | None = None

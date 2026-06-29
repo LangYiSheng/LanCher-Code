@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from lancher_code.errors import ToolNotFoundError
-from lancher_code.models import ToolDefinition
+from lancher_code.models import RuntimeMode, ToolDefinition
 from lancher_code.tools.core.base import Tool
 
 
@@ -21,10 +21,17 @@ class ToolRegistry:
             raise ToolNotFoundError(f"未找到工具: {name}")
         return tool
 
-    def list_definitions(self, *, include_deferred: bool = False) -> list[ToolDefinition]:
+    def list_definitions(
+        self,
+        *,
+        include_deferred: bool = False,
+        mode: RuntimeMode | None = None,
+    ) -> list[ToolDefinition]:
         definitions: list[ToolDefinition] = []
         for tool in self._tools.values():
             if tool.definition.should_defer and not include_deferred:
+                continue
+            if mode is not None and mode not in tool.definition.allowed_modes:
                 continue
             definitions.append(tool.definition)
         return definitions

@@ -38,6 +38,7 @@ class WriteFileTool:
             },
             category="write",
             is_concurrency_safe=False,
+            allowed_modes=("normal",),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

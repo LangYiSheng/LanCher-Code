@@ -10,6 +10,7 @@ from lancher_code.models import (
     ConversationMessage,
     MessageUsage,
     ProviderConfig,
+    RuntimeMode,
     SessionMessage,
     SessionState,
     ThinkingConfig,
@@ -31,17 +32,14 @@ class SessionController:
         *,
         cwd: Path | None = None,
         current_date: date | None = None,
+        plan_file_path: Path | None = None,
     ) -> None:
         self._provider_config = provider_config
         self._state = state or SessionState()
         self._cwd = (cwd or Path.cwd()).resolve()
         self._current_date = current_date or datetime.now().astimezone().date()
-        self._transcript: list[ConversationMessage] = [
-            ConversationMessage.text_message(
-                "system",
-                build_system_prompt(cwd=self._cwd, current_date=self._current_date),
-            )
-        ]
+        self._plan_file_path = self._resolve_plan_file_path(plan_file_path)
+        self._transcript: list[ConversationMessage] = []
 
     @property
     def state(self) -> SessionState:
@@ -49,7 +47,28 @@ class SessionController:
 
     @property
     def transcript(self) -> list[ConversationMessage]:
-        return list(self._transcript)
+        return [ConversationMessage.text_message("system", self.system_prompt_text)] + list(self._transcript)
+
+    @property
+    def runtime_mode(self) -> RuntimeMode:
+        return self._state.runtime_mode
+
+    @property
+    def plan_file_path(self) -> Path:
+        return self._plan_file_path
+
+    @property
+    def system_prompt_text(self) -> str:
+        return build_system_prompt(
+            cwd=self._cwd,
+            current_date=self._current_date,
+            mode=self.runtime_mode,
+            plan_file_path=self._plan_file_path,
+        )
+
+    def set_runtime_mode(self, mode: RuntimeMode) -> RuntimeMode:
+        self._state.runtime_mode = mode
+        return mode
 
     def create_user_message(self, text: str) -> SessionMessage:
         message = SessionMessage(
@@ -77,6 +96,11 @@ class SessionController:
     def append_message_content(self, message_id: str, delta: str) -> SessionMessage:
         message = self.get_message(message_id)
         message.content += delta
+        return message
+
+    def clear_message_content(self, message_id: str) -> SessionMessage:
+        message = self.get_message(message_id)
+        message.content = ""
         return message
 
     def add_message_usage(self, message_id: str, usage: MessageUsage) -> SessionMessage:
@@ -179,25 +203,37 @@ class SessionController:
         message.trace.collapsed = True
         return message
 
+    def cancel_message(self, message_id: str, notice_text: str = "本轮已取消。") -> SessionMessage:
+        message = self.get_message(message_id)
+        message.status = "cancelled"
+        if not message.content.strip():
+            message.content = notice_text
+        message.trace.collapsed = True
+        return message
+
     def get_message(self, message_id: str) -> SessionMessage:
         for message in self._state.messages:
             if message.id == message_id:
                 return message
-        raise KeyError(f"未找到消息 {message_id}")
+        raise KeyError(f"未找到消息：{message_id}")
 
     def build_request(
         self,
         tools: list[ToolDefinition],
         *,
         allow_tool_calls: bool,
+        mode: RuntimeMode | None = None,
     ) -> ChatRequest:
+        active_mode = mode or self.runtime_mode
         thinking = self._request_thinking()
+        filtered_tools = self._filter_tools_for_mode(tools, active_mode) if allow_tool_calls else []
         return ChatRequest(
             model=self._provider_config.model,
             messages=self.transcript,
-            tools=tools if allow_tool_calls else [],
+            tools=filtered_tools,
             allow_tool_calls=allow_tool_calls,
             thinking=thinking,
+            mode=active_mode,
         )
 
     def total_usage(self) -> MessageUsage:
@@ -222,6 +258,16 @@ class SessionController:
     def _expand_trace_on_first_entry(message: SessionMessage) -> None:
         if message.role == "assistant" and message.status == "streaming" and not message.trace.entries:
             message.trace.collapsed = False
+
+    def _resolve_plan_file_path(self, plan_file_path: Path | None) -> Path:
+        raw_path = plan_file_path or Path("./.lancher/plan.md")
+        if not raw_path.is_absolute():
+            raw_path = self._cwd / raw_path
+        return raw_path.resolve()
+
+    @staticmethod
+    def _filter_tools_for_mode(tools: list[ToolDefinition], mode: RuntimeMode) -> list[ToolDefinition]:
+        return [tool for tool in tools if mode in tool.allowed_modes]
 
     @staticmethod
     def _new_message_id() -> str:
