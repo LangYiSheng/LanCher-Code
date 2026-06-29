@@ -10,7 +10,7 @@ from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolDefi
 from lancher_code.session import SessionController
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
-from lancher_code.tui import ComposerTextArea, LanCherTextualApp
+from lancher_code.tui import CommandHintBar, ComposerTextArea, LanCherTextualApp, SlashCommandMenuItem
 from lancher_code.turn_runner import TurnRunner
 
 DelayedEvent = tuple[StreamEvent, float]
@@ -81,7 +81,32 @@ async def test_plan_command_switches_mode_and_updates_placeholder(
 
         composer = app.query_one("#composer-input", ComposerTextArea)
         assert session.runtime_mode == "plan"
-        assert "/do" in (composer.placeholder or "")
+        assert composer.placeholder == "Plan Mode: 继续补充或修改计划"
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_slash_menu_only_shows_do_and_exit(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "/plan")
+        await pilot.pause(0.05)
+
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/d"
+        composer.focus()
+        await pilot.pause(0.05)
+
+        visible = [item.definition.name for item in app.query(SlashCommandMenuItem) if item.display]
+        assert session.runtime_mode == "plan"
+        assert visible == ["do"]
+
+        hint_bar = app.query_one(CommandHintBar)
+        assert "返回正常模式" in str(hint_bar.render())
 
 
 @pytest.mark.asyncio
@@ -126,7 +151,7 @@ async def test_do_command_restores_normal_mode(
 
         composer = app.query_one("#composer-input", ComposerTextArea)
         assert session.runtime_mode == "normal"
-        assert "/plan" in (composer.placeholder or "")
+        assert composer.placeholder == "发送一条消息"
 
 
 @pytest.mark.asyncio

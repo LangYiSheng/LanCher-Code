@@ -16,9 +16,12 @@ from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.tui import (
     BannerWidget,
+    CommandHintBar,
     ComposerTextArea,
     LanCherTextualApp,
     MessageWidget,
+    SlashCommandMenu,
+    SlashCommandMenuItem,
     ThinkingTraceWidget,
     _format_trace_entries,
 )
@@ -105,7 +108,7 @@ async def test_composer_shift_enter_inserts_newline(
 
 
 @pytest.mark.asyncio
-async def test_tui_composer_placeholder_mentions_plan_exit_and_ctrl_c(
+async def test_tui_composer_placeholder_is_minimal_in_normal_mode(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
@@ -114,11 +117,127 @@ async def test_tui_composer_placeholder_mentions_plan_exit_and_ctrl_c(
 
     async with app.run_test():
         composer = app.query_one("#composer-input", ComposerTextArea)
-        assert composer.placeholder is not None
-        assert "/exit" in composer.placeholder
-        assert "/plan" in composer.placeholder
-        assert "Ctrl+C" in composer.placeholder
-        assert "/quit" not in composer.placeholder
+        assert composer.placeholder == "发送一条消息"
+        hint_bar = app.query_one(CommandHintBar)
+        assert not hint_bar.display
+
+
+def _visible_slash_commands(app: LanCherTextualApp) -> list[str]:
+    return [
+        item.definition.name
+        for item in app.query(SlashCommandMenuItem)
+        if item.display
+    ]
+
+
+@pytest.mark.asyncio
+async def test_slash_menu_opens_and_filters_in_normal_mode(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, _session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/"
+        composer.focus()
+        await pilot.pause(0.05)
+
+        menu = app.query_one(SlashCommandMenu)
+        assert menu.display
+        assert _visible_slash_commands(app) == ["plan", "exit"]
+
+        composer.text = "/p"
+        await pilot.pause(0.05)
+        assert _visible_slash_commands(app) == ["plan"]
+
+        composer.text = "/d"
+        await pilot.pause(0.05)
+        assert not menu.display
+
+
+@pytest.mark.asyncio
+async def test_slash_menu_accepts_selection_without_submitting(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(responses=[])
+    app, _session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/"
+        composer.focus()
+        await pilot.pause(0.05)
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+
+        assert composer.text == "/plan "
+        assert len(provider.requests) == 0
+        assert not app.query_one(SlashCommandMenu).display
+
+
+@pytest.mark.asyncio
+async def test_slash_menu_accepts_selection_with_tab_without_submitting(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(responses=[])
+    app, _session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/"
+        composer.focus()
+        await pilot.pause(0.05)
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+
+        assert composer.text == "/plan "
+        assert len(provider.requests) == 0
+        assert not app.query_one(SlashCommandMenu).display
+
+
+@pytest.mark.asyncio
+async def test_escape_closes_slash_menu(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, _session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/"
+        composer.focus()
+        await pilot.pause(0.05)
+        await pilot.press("escape")
+        await pilot.pause(0.05)
+
+        assert not app.query_one(SlashCommandMenu).display
+
+
+@pytest.mark.asyncio
+async def test_command_hint_updates_for_selected_command(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, _session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/plan "
+        composer.focus()
+        await pilot.pause(0.05)
+
+        hint_bar = app.query_one(CommandHintBar)
+        assert hint_bar.display
+        assert "继续补充或修改计划" in str(hint_bar.render())
+        assert "参数可选：任务描述" in str(hint_bar.render())
 
 
 @pytest.mark.asyncio

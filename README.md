@@ -55,6 +55,7 @@ python -m lancher_code --config lancher.yaml
 ```
 
 进入界面后，直接输入问题即可开始对话。  
+输入 `/` 可以唤出命令菜单，查看 `/plan`、`/do`、`/exit` 等会话命令。  
 输入 `/exit`，或使用 `Ctrl+C` / `Ctrl+D` 可以退出。
 
 ## 🌱 目前进度

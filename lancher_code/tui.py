@@ -4,7 +4,7 @@ from pathlib import Path
 
 from rich.console import Group, RenderableType
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -13,6 +13,13 @@ from textual.widgets import Static, TextArea
 
 from lancher_code.models import ProviderConfig, SessionMessage, TraceEntry, TurnEvent, UIConfig
 from lancher_code.session import SessionController
+from lancher_code.slash_commands import (
+    SlashCommandDefinition,
+    SlashCommandRegistry,
+    create_default_slash_command_registry,
+    extract_exact_command_name,
+    extract_slash_menu_query,
+)
 from lancher_code.turn_runner import TurnRunner
 
 BANNER_TEXT = r"""
@@ -26,6 +33,9 @@ BANNER_TEXT = r"""
 MIN_COMPOSER_LINES = 1
 MAX_COMPOSER_LINES = 6
 COMPOSER_FRAME_HEIGHT = 2
+DEFAULT_COMMAND_HINT = ""
+NORMAL_PLACEHOLDER = "发送一条消息"
+PLAN_PLACEHOLDER = "Plan Mode: 继续补充或修改计划"
 
 
 class ComposerSubmitted(Message):
@@ -35,17 +45,120 @@ class ComposerSubmitted(Message):
         self.value = value
 
 
+class SlashMenuNavigateRequested(Message):
+    def __init__(self, direction: int) -> None:
+        super().__init__()
+        self.direction = direction
+
+
+class SlashMenuAcceptRequested(Message):
+    pass
+
+
+class SlashMenuDismissRequested(Message):
+    pass
+
+
+class SlashCommandChosen(Message):
+    def __init__(self, command_name: str) -> None:
+        super().__init__()
+        self.command_name = command_name
+
+
 class ComposerTextArea(TextArea):
     BINDINGS = [
         Binding("enter", "submit_message", "发送", show=False, priority=True),
+        Binding("tab", "accept_slash_menu_selection", "补全命令", show=False, priority=True),
         Binding("shift+enter", "insert_newline", "换行", show=False, priority=True),
     ] + TextArea.BINDINGS
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.slash_menu_active = False
+
+    def _on_key(self, event: events.Key) -> None:
+        if self.slash_menu_active:
+            if event.key == "up":
+                self.post_message(SlashMenuNavigateRequested(-1))
+                event.prevent_default()
+                return
+            if event.key == "down":
+                self.post_message(SlashMenuNavigateRequested(1))
+                event.prevent_default()
+                return
+            if event.key == "tab":
+                self.post_message(SlashMenuAcceptRequested())
+                event.prevent_default()
+                return
+            if event.key == "escape":
+                self.post_message(SlashMenuDismissRequested())
+                event.prevent_default()
+                return
+        super()._on_key(event)
+
     def action_submit_message(self) -> None:
+        if self.slash_menu_active:
+            self.post_message(SlashMenuAcceptRequested())
+            return
         self.post_message(ComposerSubmitted(self, self.text))
+
+    def action_accept_slash_menu_selection(self) -> None:
+        if self.slash_menu_active:
+            self.post_message(SlashMenuAcceptRequested())
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+
+class SlashCommandMenuItem(Static):
+    def __init__(self, definition: SlashCommandDefinition) -> None:
+        super().__init__(classes="slash-command-item")
+        self.definition = definition
+        self._active = False
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        self.set_class(active, "-active")
+        self.refresh()
+
+    def render(self) -> RenderableType:
+        text = Text()
+        text.append(self.definition.usage, style="bold #73b6ff" if not self._active else "bold #f2f2f2")
+        text.append("  ")
+        text.append(self.definition.description, style="#a8b9cc" if not self._active else "#dbe7f3")
+        return text
+
+    def on_click(self, event: Click) -> None:
+        event.stop()
+        self.post_message(SlashCommandChosen(self.definition.name))
+
+
+class SlashCommandMenu(Vertical):
+    def __init__(self, commands: list[SlashCommandDefinition]) -> None:
+        super().__init__(id="slash-command-menu")
+        self._commands = commands
+
+    def compose(self) -> ComposeResult:
+        for command in self._commands:
+            yield SlashCommandMenuItem(command)
+
+    def set_matches(self, commands: list[SlashCommandDefinition], active_name: str | None) -> None:
+        visible_names = {command.name for command in commands}
+        self.display = bool(commands)
+        for item in self.query(SlashCommandMenuItem):
+            visible = item.definition.name in visible_names
+            item.display = visible
+            item.set_active(visible and item.definition.name == active_name)
+
+
+class CommandHintBar(Static):
+    def __init__(self) -> None:
+        super().__init__("", id="command-hint")
+        self.display = False
+
+    def set_hint(self, hint: str) -> None:
+        self.update(hint)
+        self.display = bool(hint)
 
 
 class BannerWidget(Static):
@@ -341,8 +454,34 @@ class LanCherTextualApp(App[int]):
         border-left: wide #ff7b72;
     }
 
-    #composer {
+    #composer-region {
         margin: 1 1 0 1;
+        width: 1fr;
+        layout: vertical;
+        height: auto;
+    }
+
+    #slash-command-menu {
+        border: round #4b6f97;
+        background: #0f1a26;
+        padding: 0 0;
+        margin: 0 0 1 0;
+        display: none;
+        width: 1fr;
+        height: auto;
+    }
+
+    .slash-command-item {
+        padding: 0 1;
+        width: 1fr;
+        color: #c8d5e3;
+    }
+
+    .slash-command-item.-active {
+        background: #203246;
+    }
+
+    #composer {
         border: tall #4b6f97;
         height: 3;
         min-height: 3;
@@ -392,6 +531,13 @@ class LanCherTextualApp(App[int]):
         color: black;
     }
 
+    #command-hint {
+        margin: 0 0 1 0;
+        color: #7f9ab8;
+        height: 1;
+        width: 1fr;
+    }
+
     #status-bar {
         margin: 0 1 1 1;
         height: 1;
@@ -425,32 +571,39 @@ class LanCherTextualApp(App[int]):
         provider_config: ProviderConfig,
         session_controller: SessionController,
         ui_config: UIConfig,
+        slash_command_registry: SlashCommandRegistry | None = None,
     ) -> None:
         super().__init__()
         self._turn_runner = turn_runner
         self._provider_config = provider_config
         self._session_controller = session_controller
         self._ui_config = ui_config
+        self._slash_command_registry = slash_command_registry or create_default_slash_command_registry()
         self._is_streaming = False
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
         self._status_hint = "Ready"
+        self._slash_menu_matches: list[SlashCommandDefinition] = []
+        self._slash_menu_index = 0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield BannerWidget(Path.cwd())
             yield VerticalScroll(id="chat-view")
-            with Horizontal(id="composer"):
-                yield Static("✦", id="prompt-glyph")
-                yield ComposerTextArea(
-                    "",
-                    soft_wrap=True,
-                    show_line_numbers=False,
-                    compact=True,
-                    highlight_cursor_line=False,
-                    placeholder="",
-                    id="composer-input",
-                )
+            with Vertical(id="composer-region"):
+                yield SlashCommandMenu(self._slash_command_registry.list_all())
+                with Horizontal(id="composer"):
+                    yield Static("✦", id="prompt-glyph")
+                    yield ComposerTextArea(
+                        "",
+                        soft_wrap=True,
+                        show_line_numbers=False,
+                        compact=True,
+                        highlight_cursor_line=False,
+                        placeholder="",
+                        id="composer-input",
+                    )
+                yield CommandHintBar()
             with Horizontal(id="status-bar"):
                 yield Static(id="status-left")
                 yield Static(id="status-center")
@@ -460,6 +613,7 @@ class LanCherTextualApp(App[int]):
         self.query_one(ComposerTextArea).focus()
         self._update_composer_height()
         self._refresh_composer_placeholder()
+        self._refresh_command_ui()
         self._refresh_status_bar()
 
     def on_resize(self) -> None:
@@ -476,29 +630,41 @@ class LanCherTextualApp(App[int]):
     @on(TextArea.Changed, "#composer-input")
     def handle_composer_changed(self) -> None:
         self._update_composer_height()
+        self._refresh_command_ui()
+
+    @on(SlashMenuNavigateRequested)
+    def handle_slash_menu_navigation(self, event: SlashMenuNavigateRequested) -> None:
+        self._move_slash_menu(event.direction)
+
+    @on(SlashMenuAcceptRequested)
+    def handle_slash_menu_accept(self) -> None:
+        self._accept_slash_menu_selection()
+
+    @on(SlashMenuDismissRequested)
+    def handle_slash_menu_dismiss(self) -> None:
+        self._dismiss_slash_menu()
+
+    @on(SlashCommandChosen)
+    def handle_slash_command_chosen(self, event: SlashCommandChosen) -> None:
+        self._accept_slash_command(event.command_name)
 
     @on(ComposerSubmitted)
     async def handle_input_submitted(self, event: ComposerSubmitted) -> None:
         text = event.value.strip()
         event.composer.clear()
+        self._refresh_command_ui()
         if not text:
-            return
-        if text == "/exit":
-            self.exit(0)
             return
         if self._is_streaming:
             return
 
-        if text == "/do":
-            self._apply_turn_event(self._turn_runner.set_mode("normal"))
-            self._refresh_status_bar()
-            return
-
-        if text == "/plan" or text.startswith("/plan "):
-            self._apply_turn_event(self._turn_runner.set_mode("plan"))
-            self._refresh_status_bar()
-            payload = text[5:].strip()
-            if not payload:
+        slash_match = self._slash_command_registry.parse_submission(
+            text,
+            self._session_controller.runtime_mode,
+        )
+        if slash_match is not None:
+            payload = self._execute_slash_command(slash_match.definition.name, slash_match.arguments_text)
+            if payload is None:
                 return
             text = payload
 
@@ -525,6 +691,7 @@ class LanCherTextualApp(App[int]):
             input_widget.disabled = False
             input_widget.focus()
             self._refresh_composer_placeholder()
+            self._refresh_command_ui()
             self._refresh_status_bar()
             self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
 
@@ -560,6 +727,7 @@ class LanCherTextualApp(App[int]):
         if event.kind == "mode_changed":
             self._status_hint = event.progress_message or "Mode changed"
             self._refresh_composer_placeholder()
+            self._refresh_command_ui()
             return
         if event.kind == "progress_updated":
             self._status_hint = event.progress_message or ("Busy" if self._is_streaming else "Ready")
@@ -579,9 +747,113 @@ class LanCherTextualApp(App[int]):
     def _refresh_composer_placeholder(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
         if self._session_controller.runtime_mode == "plan":
-            composer.placeholder = "Plan Mode：继续补充或修改计划；输入 /do 返回正常模式，Ctrl+C 取消当前请求"
+            composer.placeholder = PLAN_PLACEHOLDER
             return
-        composer.placeholder = "发送一条消息... Enter 发送，Shift+Enter 换行，/plan 进入计划模式，Ctrl+C 取消/退出，/exit 退出"
+        composer.placeholder = NORMAL_PLACEHOLDER
+
+    def _refresh_command_ui(self) -> None:
+        composer = self.query_one("#composer-input", ComposerTextArea)
+        menu = self.query_one(SlashCommandMenu)
+        hint_bar = self.query_one(CommandHintBar)
+
+        menu_query = extract_slash_menu_query(composer.text)
+        active_name = self._current_active_slash_name()
+        if menu_query is not None:
+            matches = self._slash_command_registry.suggest(menu_query, self._session_controller.runtime_mode)
+            match_names = [command.name for command in matches]
+            if active_name in match_names:
+                self._slash_menu_index = match_names.index(active_name)
+            else:
+                self._slash_menu_index = 0
+            self._slash_menu_matches = matches
+            active_name = self._current_active_slash_name()
+            menu.set_matches(matches, active_name)
+            composer.slash_menu_active = bool(matches)
+            if matches and active_name is not None:
+                active_command = self._slash_command_registry.get(active_name)
+                hint_bar.set_hint(active_command.hint_text if active_command is not None else DEFAULT_COMMAND_HINT)
+                return
+            hint_bar.set_hint(DEFAULT_COMMAND_HINT)
+            return
+
+        self._slash_menu_matches = []
+        self._slash_menu_index = 0
+        composer.slash_menu_active = False
+        menu.set_matches([], None)
+
+        command_name = extract_exact_command_name(composer.text)
+        if command_name is not None:
+            command = self._slash_command_registry.get(command_name)
+            if command is not None:
+                hint_bar.set_hint(command.hint_text)
+                return
+
+        hint_bar.set_hint(DEFAULT_COMMAND_HINT)
+
+    def _move_slash_menu(self, direction: int) -> None:
+        if not self._slash_menu_matches:
+            return
+        self._slash_menu_index = (self._slash_menu_index + direction) % len(self._slash_menu_matches)
+        self._refresh_command_ui()
+
+    def _accept_slash_menu_selection(self) -> None:
+        command_name = self._current_active_slash_name()
+        if command_name is None:
+            return
+        self._accept_slash_command(command_name)
+
+    def _accept_slash_command(self, command_name: str) -> None:
+        command = self._slash_command_registry.get(command_name)
+        if command is None:
+            return
+
+        composer = self.query_one("#composer-input", ComposerTextArea)
+        composer.text = command.insert_text
+        composer.cursor_location = composer.document.end
+        composer.focus()
+        self._refresh_command_ui()
+
+    def _dismiss_slash_menu(self) -> None:
+        self._slash_menu_matches = []
+        self._slash_menu_index = 0
+        composer = self.query_one("#composer-input", ComposerTextArea)
+        composer.slash_menu_active = False
+        self.query_one(SlashCommandMenu).set_matches([], None)
+
+        command_name = extract_exact_command_name(composer.text)
+        if command_name is not None:
+            command = self._slash_command_registry.get(command_name)
+            if command is not None:
+                self.query_one(CommandHintBar).set_hint(command.hint_text)
+                return
+        self.query_one(CommandHintBar).set_hint(DEFAULT_COMMAND_HINT)
+
+    def _current_active_slash_name(self) -> str | None:
+        if not self._slash_menu_matches:
+            return None
+        if self._slash_menu_index >= len(self._slash_menu_matches):
+            self._slash_menu_index = 0
+        return self._slash_menu_matches[self._slash_menu_index].name
+
+    def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
+        if command_name == "exit":
+            self.exit(0)
+            return None
+
+        if command_name == "do":
+            self._apply_turn_event(self._turn_runner.set_mode("normal"))
+            self._refresh_status_bar()
+            return None
+
+        if command_name == "plan":
+            self._apply_turn_event(self._turn_runner.set_mode("plan"))
+            self._refresh_status_bar()
+            payload = arguments_text.strip()
+            if not payload:
+                return None
+            return payload
+
+        return None
 
     def _update_composer_height(self) -> None:
         composer_input = self.query_one("#composer-input", ComposerTextArea)
