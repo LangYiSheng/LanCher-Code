@@ -36,6 +36,7 @@ def test_load_config_success(tmp_path) -> None:
     assert config.provider.timeout_seconds == 30.0
     assert config.ui.show_timestamps is True
     assert config.ui.show_thinking_status is False
+    assert config.runtime.tool_loop_limit == 50
 
 
 @pytest.mark.parametrize("field_name", ["protocol", "model", "base_url", "api_key"])
@@ -105,6 +106,52 @@ def test_load_config_reads_thinking_defaults(tmp_path) -> None:
     assert config.provider.thinking is not None
     assert config.provider.thinking.enabled is True
     assert config.provider.thinking.budget_tokens is None
+    assert config.runtime.tool_loop_limit == 50
+
+
+def test_load_config_reads_runtime_tool_loop_limit(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            provider:
+              protocol: openai
+              model: gpt-4.1-mini
+              base_url: https://api.openai.com/v1
+              api_key: test-key
+            runtime:
+              tool_loop_limit: 123
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+
+    assert config.runtime.tool_loop_limit == 123
+
+
+def test_load_config_rejects_invalid_runtime_tool_loop_limit(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            provider:
+              protocol: openai
+              model: gpt-4.1-mini
+              base_url: https://api.openai.com/v1
+              api_key: test-key
+            runtime:
+              tool_loop_limit: 0
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(str(config_file))
+
+    assert "runtime.tool_loop_limit" in exc_info.value.user_message
 
 
 def test_load_config_rejects_invalid_yaml(tmp_path) -> None:

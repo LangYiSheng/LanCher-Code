@@ -33,7 +33,13 @@ async def run_app(config_path: str) -> int:
         cwd=cwd,
         timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS,
     )
-    turn_runner = TurnRunner(provider, session_controller, tool_registry, tool_executor)
+    turn_runner = TurnRunner(
+        provider,
+        session_controller,
+        tool_registry,
+        tool_executor,
+        max_tool_loops=config.runtime.tool_loop_limit,
+    )
     tui = ChatTUI(
         turn_runner=turn_runner,
         provider_config=config.provider,

@@ -11,7 +11,7 @@ from lancher_code.tool_call_parser import ToolCallAssembler
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 
-MAX_TOOL_LOOPS = 20
+MAX_TOOL_LOOPS = 50
 
 
 class TurnRunner:
@@ -21,11 +21,14 @@ class TurnRunner:
         session_controller: SessionController,
         tool_registry: ToolRegistry,
         tool_executor: ToolExecutor,
+        *,
+        max_tool_loops: int = MAX_TOOL_LOOPS,
     ) -> None:
         self._provider = provider
         self._session = session_controller
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor
+        self._max_tool_loops = max_tool_loops
 
     async def run_user_turn(self, text: str) -> AsyncIterator[TurnEvent]:
         user_message = self._session.create_user_message(text)
@@ -40,8 +43,8 @@ class TurnRunner:
         try:
             while True:
                 loop_count += 1
-                if loop_count > MAX_TOOL_LOOPS:
-                    error_text = f"本轮工具循环达到上限（{MAX_TOOL_LOOPS} 次），已停止继续执行。"
+                if loop_count > self._max_tool_loops:
+                    error_text = f"本轮工具循环达到上限（{self._max_tool_loops} 次），已停止继续执行。"
                     self._session.append_trace_notice(assistant_message.id, error_text)
                     message = self._session.fail_message(assistant_message.id, error_text)
                     yield TurnEvent(kind="turn_failed", message=message, error_text=error_text)

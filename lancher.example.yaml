@@ -13,3 +13,6 @@ provider:
 ui:
   show_timestamps: false
   show_thinking_status: true
+
+runtime:
+  tool_loop_limit: 50

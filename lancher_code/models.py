@@ -42,6 +42,11 @@ class UIConfig:
 
 
 @dataclass(slots=True)
+class RuntimeConfig:
+    tool_loop_limit: int = 50
+
+
+@dataclass(slots=True)
 class ProviderConfig:
     protocol: ProviderProtocol
     model: str
@@ -55,6 +60,7 @@ class ProviderConfig:
 class AppConfig:
     provider: ProviderConfig
     ui: UIConfig = field(default_factory=UIConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
 
 @dataclass(slots=True)

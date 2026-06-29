@@ -257,3 +257,34 @@ async def test_turn_runner_keeps_accumulated_usage_on_failed_turn(openai_provide
     assert events[-1].kind == "turn_failed"
     assert session.state.messages[-1].usage.input_tokens == 4
     assert session.state.messages[-1].usage.output_tokens == 6
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_respects_custom_loop_limit(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="echo_tool")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"value":"x"}')),
+                StreamEvent(kind="message_end"),
+            ],
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-2", name_delta="echo_tool")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"value":"x"}')),
+                StreamEvent(kind="message_end"),
+            ],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(EchoTool())
+    session = SessionController(openai_provider_config)
+    executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
+    runner = TurnRunner(provider, session, registry, executor, max_tool_loops=1)
+
+    events = [event async for event in runner.run_user_turn("限制一轮")]
+
+    assert events[-1].kind == "turn_failed"
+    assert events[-1].error_text is not None
+    assert "1 次" in events[-1].error_text

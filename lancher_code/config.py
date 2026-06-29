@@ -11,6 +11,7 @@ from lancher_code.models import (
     AppConfig,
     ProviderConfig,
     ProviderProtocol,
+    RuntimeConfig,
     ThinkingConfig,
     UIConfig,
 )
@@ -37,10 +38,16 @@ def load_config(path: str) -> AppConfig:
 
     provider_data = _require_mapping(raw_data, "provider")
     ui_data = raw_data.get("ui", {})
+    runtime_data = raw_data.get("runtime", {})
+
     if ui_data is None:
         ui_data = {}
+    if runtime_data is None:
+        runtime_data = {}
     if not isinstance(ui_data, dict):
         raise ConfigError("ui 配置必须是对象。")
+    if not isinstance(runtime_data, dict):
+        raise ConfigError("runtime 配置必须是对象。")
 
     protocol = _require_protocol(provider_data, "protocol")
     model = _require_non_empty_string(provider_data, "model")
@@ -49,6 +56,7 @@ def load_config(path: str) -> AppConfig:
     timeout_seconds = _read_positive_float(provider_data.get("timeout_seconds", 60.0), "timeout_seconds")
     thinking = _load_thinking(provider_data.get("thinking"))
     ui = _load_ui(ui_data)
+    runtime = _load_runtime(runtime_data)
 
     provider = ProviderConfig(
         protocol=protocol,
@@ -58,7 +66,7 @@ def load_config(path: str) -> AppConfig:
         timeout_seconds=timeout_seconds,
         thinking=thinking,
     )
-    return AppConfig(provider=provider, ui=ui)
+    return AppConfig(provider=provider, ui=ui, runtime=runtime)
 
 
 def _load_thinking(raw_value: Any) -> ThinkingConfig | None:
@@ -83,6 +91,11 @@ def _load_ui(raw_value: dict[str, Any]) -> UIConfig:
         show_timestamps=bool(raw_value.get("show_timestamps", False)),
         show_thinking_status=bool(raw_value.get("show_thinking_status", True)),
     )
+
+
+def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
+    tool_loop_limit = _read_positive_int(raw_value.get("tool_loop_limit", 50), "runtime.tool_loop_limit")
+    return RuntimeConfig(tool_loop_limit=tool_loop_limit)
 
 
 def _require_mapping(raw_data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -111,6 +124,12 @@ def _read_positive_float(raw_value: Any, key: str) -> float:
     if isinstance(raw_value, (int, float)) and raw_value > 0:
         return float(raw_value)
     raise ConfigError(f"{key} 必须是正数。")
+
+
+def _read_positive_int(raw_value: Any, key: str) -> int:
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
+        raise ConfigError(f"{key} 必须是正整数。")
+    return raw_value
 
 
 def _expand_env(value: str) -> str:

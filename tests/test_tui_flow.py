@@ -105,6 +105,23 @@ async def test_composer_shift_enter_inserts_newline(
 
 
 @pytest.mark.asyncio
+async def test_tui_composer_placeholder_mentions_only_exit_and_ctrl_c(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, _session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test():
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        assert composer.placeholder is not None
+        assert "/exit" in composer.placeholder
+        assert "/quit" not in composer.placeholder
+        assert "Ctrl+C" in composer.placeholder
+        assert "Ctrl+D" not in composer.placeholder
+
+
+@pytest.mark.asyncio
 async def test_composer_grows_with_multiline_input_and_shrinks_after_submit(
     openai_provider_config,
     ui_config,

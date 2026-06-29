@@ -411,7 +411,6 @@ class LanCherTextualApp(App[int]):
 
     BINDINGS = [
         ("ctrl+c", "request_quit", "退出"),
-        ("ctrl+d", "request_quit", "退出"),
     ]
 
     def __init__(
@@ -442,7 +441,7 @@ class LanCherTextualApp(App[int]):
                     show_line_numbers=False,
                     compact=True,
                     highlight_cursor_line=False,
-                    placeholder="发送一条消息... Enter发送，Shift+Enter换行，/exit 或 Ctrl+C/Ctrl+D 退出",
+                    placeholder="发送一条消息... Enter发送，Shift+Enter换行，/exit 或 Ctrl+C 退出",
                     id="composer-input",
                 )
             with Horizontal(id="status-bar"):
@@ -471,7 +470,7 @@ class LanCherTextualApp(App[int]):
         event.composer.clear()
         if not text:
             return
-        if text in {"/exit", "/quit"}:
+        if text == "/exit":
             self.exit(0)
             return
         if self._is_streaming:
