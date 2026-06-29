@@ -155,6 +155,35 @@ async def test_do_command_restores_normal_mode(
 
 
 @pytest.mark.asyncio
+async def test_do_command_can_be_submitted_after_slash_menu_accepts_it(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "/plan")
+        await pilot.pause(0.05)
+
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/do"
+        composer.focus()
+        await pilot.pause(0.05)
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+
+        assert composer.text == "/do"
+        assert not composer.slash_menu_active
+
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+
+        assert session.runtime_mode == "normal"
+        assert composer.placeholder == "发送一条消息"
+
+
+@pytest.mark.asyncio
 async def test_ctrl_c_cancels_active_turn_instead_of_exiting(
     openai_provider_config,
     ui_config,

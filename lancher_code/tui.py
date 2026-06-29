@@ -75,6 +75,7 @@ class ComposerTextArea(TextArea):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.slash_menu_active = False
+        self._accepted_slash_command_text: str | None = None
 
     def _on_key(self, event: events.Key) -> None:
         if self.slash_menu_active:
@@ -108,6 +109,16 @@ class ComposerTextArea(TextArea):
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+    def remember_accepted_slash_command(self, command_text: str) -> None:
+        self._accepted_slash_command_text = command_text
+
+    def should_suppress_slash_menu(self) -> bool:
+        return self._accepted_slash_command_text == self.text
+
+    def clear_accepted_slash_command_if_needed(self) -> None:
+        if self._accepted_slash_command_text != self.text:
+            self._accepted_slash_command_text = None
 
 
 class SlashCommandMenuItem(Static):
@@ -755,10 +766,11 @@ class LanCherTextualApp(App[int]):
         composer = self.query_one("#composer-input", ComposerTextArea)
         menu = self.query_one(SlashCommandMenu)
         hint_bar = self.query_one(CommandHintBar)
+        composer.clear_accepted_slash_command_if_needed()
 
         menu_query = extract_slash_menu_query(composer.text)
         active_name = self._current_active_slash_name()
-        if menu_query is not None:
+        if menu_query is not None and not composer.should_suppress_slash_menu():
             matches = self._slash_command_registry.suggest(menu_query, self._session_controller.runtime_mode)
             match_names = [command.name for command in matches]
             if active_name in match_names:
@@ -810,6 +822,7 @@ class LanCherTextualApp(App[int]):
         composer = self.query_one("#composer-input", ComposerTextArea)
         composer.text = command.insert_text
         composer.cursor_location = composer.document.end
+        composer.remember_accepted_slash_command(command.insert_text)
         composer.focus()
         self._refresh_command_ui()
 
