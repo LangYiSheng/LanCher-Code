@@ -67,6 +67,53 @@ async def test_claude_provider_streams_text_thinking_and_usage(claude_provider_c
     assert [event.kind for event in events] == ["message_start", "thinking_delta", "text_delta", "message_end"]
     assert "".join(event.text or "" for event in events if event.kind == "text_delta") == "你好"
     assert events[-1].usage.input_tokens == 11
+    assert events[-1].usage.cached_input_tokens == 0
+    assert events[-1].usage.output_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_claude_provider_merges_cached_input_tokens(claude_provider_config) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = _build_sse_payload(
+            [
+                "event: message_start\n"
+                + "data: "
+                + json.dumps(
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "usage": {
+                                "input_tokens": 11,
+                                "cache_creation_input_tokens": 2,
+                                "cache_read_input_tokens": 7,
+                                "output_tokens": 0,
+                            }
+                        },
+                    }
+                )
+                + "\n\n",
+                "event: message_delta\n"
+                + "data: "
+                + json.dumps({"type": "message_delta", "usage": {"output_tokens": 5}})
+                + "\n\n",
+                "event: message_stop\n"
+                + "data: "
+                + json.dumps({"type": "message_stop"})
+                + "\n\n",
+            ]
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    transport = httpx.MockTransport(handler)
+    provider = ClaudeProvider(
+        claude_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=transport, timeout=30.0),
+    )
+
+    events = [event async for event in provider.stream_chat(_request())]
+
+    assert events[-1].usage.input_tokens == 20
+    assert events[-1].usage.cached_input_tokens == 7
     assert events[-1].usage.output_tokens == 5
 
 

@@ -76,6 +76,7 @@ class AppConfig:
 @dataclass(slots=True)
 class MessageUsage:
     input_tokens: int = 0
+    cached_input_tokens: int = 0
     output_tokens: int = 0
 
 

@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Click, Message
 from textual.widgets import Static, TextArea
 
-from lancher_code.models import ProviderConfig, SessionMessage, TraceEntry, TurnEvent, UIConfig
+from lancher_code.models import MessageUsage, ProviderConfig, SessionMessage, TraceEntry, TurnEvent, UIConfig
 from lancher_code.session import SessionController
 from lancher_code.slash_commands import (
     SlashCommandDefinition,
@@ -713,7 +713,14 @@ class LanCherTextualApp(App[int]):
         self.query_one("#status-left", Static).update(f"{self._provider_config.model} ({api_type})")
         center_text = self._status_hint or ("Busy" if self._is_streaming else "Ready")
         self.query_one("#status-center", Static).update(f"{center_text} [{mode_label}]")
-        self.query_one("#status-right", Static).update(f"Tokens In {usage.input_tokens} | Out {usage.output_tokens}")
+        self.query_one("#status-right", Static).update(self._format_usage_text(usage))
+
+    @staticmethod
+    def _format_usage_text(usage: MessageUsage) -> str:
+        input_text = f"Tokens In {usage.input_tokens}"
+        if usage.cached_input_tokens > 0:
+            input_text += f" (cached {usage.cached_input_tokens})"
+        return f"{input_text} | Out {usage.output_tokens}"
 
     async def _mount_message_widget(self, message: SessionMessage) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)

@@ -57,7 +57,43 @@ async def test_openai_provider_streams_text_deltas_and_usage(openai_provider_con
     assert [event.kind for event in events] == ["message_start", "text_delta", "text_delta", "message_end"]
     assert "".join(event.text or "" for event in events if event.kind == "text_delta") == "你好"
     assert events[-1].usage.input_tokens == 3
+    assert events[-1].usage.cached_input_tokens == 0
     assert events[-1].usage.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_parses_cached_input_tokens(openai_provider_config) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = _build_sse_payload(
+            [
+                "data: "
+                + json.dumps(
+                    {
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 9,
+                            "completion_tokens": 4,
+                            "prompt_tokens_details": {"cached_tokens": 6},
+                        },
+                    }
+                )
+                + "\n\n",
+                "data: [DONE]\n\n",
+            ]
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    transport = httpx.MockTransport(handler)
+    provider = OpenAIProvider(
+        openai_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=transport, timeout=30.0),
+    )
+
+    events = [event async for event in provider.stream_chat(_request())]
+
+    assert events[-1].usage.input_tokens == 9
+    assert events[-1].usage.cached_input_tokens == 6
+    assert events[-1].usage.output_tokens == 4
 
 
 @pytest.mark.asyncio

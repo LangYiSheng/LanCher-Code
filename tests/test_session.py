@@ -23,6 +23,7 @@ def test_session_controller_creates_messages_with_metadata(openai_provider_confi
     assert assistant_message.status == "complete"
     assert assistant_message.content == "你好呀"
     assert assistant_message.usage.input_tokens == 3
+    assert assistant_message.usage.cached_input_tokens == 0
     assert assistant_message.usage.output_tokens == 2
     assert user_message.timestamp.tzinfo == timezone.utc
     assert [message.role for message in controller.transcript] == ["system", "user", "assistant"]
@@ -176,6 +177,7 @@ def test_session_controller_totals_usage(openai_provider_config) -> None:
     usage = controller.total_usage()
 
     assert usage.input_tokens == 5
+    assert usage.cached_input_tokens == 0
     assert usage.output_tokens == 7
 
 
@@ -183,22 +185,24 @@ def test_session_controller_can_accumulate_usage_before_completion(openai_provid
     controller = SessionController(openai_provider_config)
     assistant_message = controller.create_assistant_message()
 
-    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=3, output_tokens=4))
-    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=2, output_tokens=1))
+    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=3, cached_input_tokens=1, output_tokens=4))
+    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=2, cached_input_tokens=2, output_tokens=1))
 
     usage = controller.total_usage()
 
     assert usage.input_tokens == 5
+    assert usage.cached_input_tokens == 3
     assert usage.output_tokens == 5
 
 
 def test_session_controller_keeps_usage_when_message_fails(openai_provider_config) -> None:
     controller = SessionController(openai_provider_config)
     assistant_message = controller.create_assistant_message()
-    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=8, output_tokens=13))
+    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=8, cached_input_tokens=5, output_tokens=13))
 
     controller.fail_message(assistant_message.id, "网络失败")
 
     failed = controller.get_message(assistant_message.id)
     assert failed.usage.input_tokens == 8
+    assert failed.usage.cached_input_tokens == 5
     assert failed.usage.output_tokens == 13

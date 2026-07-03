@@ -47,6 +47,7 @@ class OpenAIProvider(BaseChatProvider):
                                 chunk["usage"],
                                 input_keys=("prompt_tokens", "input_tokens"),
                                 output_keys=("completion_tokens", "output_tokens"),
+                                cached_input_keys=("prompt_tokens_details.cached_tokens",),
                             )
 
                         for choice in chunk.get("choices", []):

@@ -194,8 +194,12 @@ class ClaudeProvider(BaseChatProvider):
             raw_usage,
             input_keys=("input_tokens", "prompt_tokens"),
             output_keys=("output_tokens", "completion_tokens"),
+            cached_input_keys=("cache_read_input_tokens", "cached_input_tokens"),
         )
+        cache_creation_input_tokens = ClaudeProvider._read_usage_value(raw_usage, ("cache_creation_input_tokens",))
+        total_input_tokens = incoming.input_tokens + incoming.cached_input_tokens + cache_creation_input_tokens
         return MessageUsage(
-            input_tokens=incoming.input_tokens or current.input_tokens,
+            input_tokens=total_input_tokens or current.input_tokens,
+            cached_input_tokens=incoming.cached_input_tokens or current.cached_input_tokens,
             output_tokens=incoming.output_tokens or current.output_tokens,
         )

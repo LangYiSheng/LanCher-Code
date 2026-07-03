@@ -106,6 +106,7 @@ class SessionController:
     def add_message_usage(self, message_id: str, usage: MessageUsage) -> SessionMessage:
         message = self.get_message(message_id)
         message.usage.input_tokens += usage.input_tokens
+        message.usage.cached_input_tokens += usage.cached_input_tokens
         message.usage.output_tokens += usage.output_tokens
         return message
 
@@ -240,6 +241,7 @@ class SessionController:
         total = MessageUsage()
         for message in self._state.messages:
             total.input_tokens += message.usage.input_tokens
+            total.cached_input_tokens += message.usage.cached_input_tokens
             total.output_tokens += message.usage.output_tokens
         return total
 

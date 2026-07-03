@@ -231,12 +231,12 @@ async def test_turn_runner_accumulates_usage_after_each_model_call(openai_provid
                 StreamEvent(kind="message_start"),
                 StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="echo_tool")),
                 StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"value":"a"}')),
-                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=2, output_tokens=3)),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=2, cached_input_tokens=1, output_tokens=3)),
             ],
             [
                 StreamEvent(kind="message_start"),
                 StreamEvent(kind="text_delta", text="最终回答"),
-                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=5, output_tokens=7)),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=5, cached_input_tokens=4, output_tokens=7)),
             ],
         ]
     )
@@ -246,10 +246,13 @@ async def test_turn_runner_accumulates_usage_after_each_model_call(openai_provid
 
     usage_updates = [event for event in events if event.kind == "usage_updated"]
     assert usage_updates[0].usage.input_tokens == 2
+    assert usage_updates[0].usage.cached_input_tokens == 1
     assert usage_updates[0].usage.output_tokens == 3
     assert usage_updates[1].usage.input_tokens == 7
+    assert usage_updates[1].usage.cached_input_tokens == 5
     assert usage_updates[1].usage.output_tokens == 10
     assert session.state.messages[-1].usage.input_tokens == 7
+    assert session.state.messages[-1].usage.cached_input_tokens == 5
     assert session.state.messages[-1].usage.output_tokens == 10
 
 
@@ -261,7 +264,7 @@ async def test_turn_runner_keeps_accumulated_usage_on_failed_turn(openai_provide
                 StreamEvent(kind="message_start"),
                 StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="echo_tool")),
                 StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"value":"a"}')),
-                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=4, output_tokens=6)),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=4, cached_input_tokens=3, output_tokens=6)),
             ],
             ProviderRequestError("网络失败"),
         ]
@@ -272,6 +275,7 @@ async def test_turn_runner_keeps_accumulated_usage_on_failed_turn(openai_provide
 
     assert events[-1].kind == "turn_failed"
     assert session.state.messages[-1].usage.input_tokens == 4
+    assert session.state.messages[-1].usage.cached_input_tokens == 3
     assert session.state.messages[-1].usage.output_tokens == 6
 
 

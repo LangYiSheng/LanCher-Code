@@ -311,6 +311,33 @@ async def test_tui_streams_single_turn_by_message_id(
         assert str(status_left.render()) == "gpt-test (OpenAI)"
         assert "gpt-test" not in str(status_right.render())
         assert "Tokens In 3" in str(status_right.render())
+        assert "cached" not in str(status_right.render())
+        assert "Out 2" in str(status_right.render())
+
+
+@pytest.mark.asyncio
+async def test_tui_shows_cached_input_tokens_when_present(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="text_delta", text="浣犲ソ"),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=3, cached_input_tokens=1, output_tokens=2)),
+            ]
+        ]
+    )
+    app, _session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "浣犲ソ")
+        await pilot.pause(0.1)
+
+        status_right = app.query_one("#status-right", Static)
+        assert "Tokens In 3 (cached 1)" in str(status_right.render())
         assert "Out 2" in str(status_right.render())
 
 

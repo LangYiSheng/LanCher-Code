@@ -190,6 +190,7 @@ class TurnRunner:
                     ]
 
                 total_usage.input_tokens += loop_usage.input_tokens
+                total_usage.cached_input_tokens += loop_usage.cached_input_tokens
                 total_usage.output_tokens += loop_usage.output_tokens
                 self._session.add_message_usage(assistant_message.id, loop_usage)
                 await self._emit(
@@ -326,6 +327,7 @@ class TurnRunner:
         usage = self._session.get_message(message_id).usage
         return MessageUsage(
             input_tokens=usage.input_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
             output_tokens=usage.output_tokens,
         )
 

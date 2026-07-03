@@ -38,13 +38,19 @@ class BaseChatProvider:
         *,
         input_keys: tuple[str, ...],
         output_keys: tuple[str, ...],
+        cached_input_keys: tuple[str, ...] = (),
     ) -> MessageUsage:
         if not isinstance(raw_usage, dict):
             return MessageUsage()
 
         input_tokens = BaseChatProvider._read_usage_value(raw_usage, input_keys)
         output_tokens = BaseChatProvider._read_usage_value(raw_usage, output_keys)
-        return MessageUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+        cached_input_tokens = BaseChatProvider._read_usage_value(raw_usage, cached_input_keys)
+        return MessageUsage(
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            output_tokens=output_tokens,
+        )
 
     @staticmethod
     async def iter_sse_events(response: httpx.Response) -> AsyncIterator[tuple[str, str]]:
@@ -144,7 +150,16 @@ class BaseChatProvider:
     @staticmethod
     def _read_usage_value(raw_usage: dict[str, object], keys: tuple[str, ...]) -> int:
         for key in keys:
-            value = raw_usage.get(key)
+            value = BaseChatProvider._read_nested_usage_value(raw_usage, key)
             if isinstance(value, int):
                 return value
         return 0
+
+    @staticmethod
+    def _read_nested_usage_value(raw_usage: dict[str, object], key: str) -> object:
+        current: object = raw_usage
+        for part in key.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
