@@ -35,10 +35,14 @@ def test_bash_tool_allows_readonly_command_in_plan_mode(tmp_path: Path) -> None:
     tool = BashTool()
 
     result = __import__("asyncio").run(
-        tool.execute({"command": "Get-ChildItem"}, ToolContext(cwd=tmp_path, timeout_seconds=1, mode="plan"))
+        tool.execute(
+            {"description": "查看当前目录", "command": "Get-ChildItem"},
+            ToolContext(cwd=tmp_path, timeout_seconds=1, mode="plan"),
+        )
     )
 
     assert result.ok is True
+    assert result.payload["description"] == "查看当前目录"
 
 
 def test_bash_tool_rejects_side_effect_command_in_plan_mode(tmp_path: Path) -> None:
@@ -46,13 +50,14 @@ def test_bash_tool_rejects_side_effect_command_in_plan_mode(tmp_path: Path) -> N
 
     result = __import__("asyncio").run(
         tool.execute(
-            {"command": 'Set-Content demo.txt "boom"'},
+            {"description": "尝试写入文件", "command": 'Set-Content demo.txt "boom"'},
             ToolContext(cwd=tmp_path, timeout_seconds=1, mode="plan"),
         )
     )
 
     assert result.ok is False
     assert result.error_code == "plan_mode_command_rejected"
+    assert result.payload["description"] == "尝试写入文件"
 
 
 def test_write_plan_file_tool_only_writes_configured_path(tmp_path: Path) -> None:

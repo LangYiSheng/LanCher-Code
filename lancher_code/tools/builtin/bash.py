@@ -56,10 +56,12 @@ PLAN_BLOCKED_PATTERNS = (
 )
 
 BASH_DESCRIPTION = (
-    "执行 shell 命令，是唯一直接与操作系统交互的工具。"
+    "执行 shell 命令，是唯一能直接与操作系统交互的工具。"
     "适合查看目录、运行测试、读取 git 状态、调用现有 CLI。"
-    "能用 read_file、glob、grep、edit_file、write_file 完成时，不要优先用它。"
-    "参数只有 command，必须是一条可直接在当前工作目录执行的命令。"
+    "如果 read_file、glob、grep、edit_file、write_file 能完成任务，就不要优先使用它。"
+    "调用时必须同时提供 description 和 command："
+    "description 用一句简短的话说明这条命令是在做什么，"
+    "command 则是实际要在当前工作目录执行的命令。"
 )
 
 
@@ -72,12 +74,16 @@ class BashTool:
             params_model={
                 "type": "object",
                 "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "简单一小句话，描述这条命令是在做什么。",
+                    },
                     "command": {
                         "type": "string",
                         "description": "要执行的 shell 命令。",
-                    }
+                    },
                 },
-                "required": ["command"],
+                "required": ["description", "command"],
                 "additionalProperties": False,
             },
             category="command",
@@ -87,7 +93,16 @@ class BashTool:
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
+        description = arguments.get("description")
         command = arguments.get("command")
+
+        if not isinstance(description, str) or not description.strip():
+            return build_tool_error(
+                summary="执行命令失败",
+                error_code="invalid_arguments",
+                error_message="description 必须是非空字符串，用一句短话说明命令用途。",
+                tool_name=self.definition.name,
+            )
         if not isinstance(command, str) or not command.strip():
             return build_tool_error(
                 summary="执行命令失败",
@@ -96,6 +111,7 @@ class BashTool:
                 tool_name=self.definition.name,
             )
 
+        description = description.strip()
         command = command.strip()
         if context.mode == "plan":
             plan_rejection = _validate_plan_command(command)
@@ -104,7 +120,7 @@ class BashTool:
                     summary="Plan 模式禁止该命令",
                     error_code="plan_mode_command_rejected",
                     error_message=plan_rejection,
-                    metadata={"command": command, "mode": context.mode},
+                    metadata={"description": description, "command": command, "mode": context.mode},
                     tool_name=self.definition.name,
                 )
 
@@ -123,7 +139,7 @@ class BashTool:
                 summary="执行命令失败",
                 error_code="spawn_error",
                 error_message=str(exc),
-                metadata={"command": command},
+                metadata={"description": description, "command": command},
                 tool_name=self.definition.name,
             )
 
@@ -148,7 +164,7 @@ class BashTool:
                         summary="命令执行超时",
                         error_code="command_timeout",
                         error_message=f"命令在 {context.timeout_seconds} 秒内没有完成，已被终止。",
-                        metadata={"command": command},
+                        metadata={"description": description, "command": command},
                         tool_name=self.definition.name,
                     )
                 stdout, stderr = communicate_task.result()
@@ -162,7 +178,7 @@ class BashTool:
                         summary="命令执行超时",
                         error_code="command_timeout",
                         error_message=f"命令在 {context.timeout_seconds} 秒内没有完成，已被终止。",
-                        metadata={"command": command},
+                        metadata={"description": description, "command": command},
                         tool_name=self.definition.name,
                     )
         except asyncio.CancelledError:
@@ -178,13 +194,14 @@ class BashTool:
         stderr_text, stderr_truncated = _truncate_output(stderr.decode("utf-8", errors="replace"))
         exit_code = process.returncode or 0
         payload = {
+            "description": description,
             "command": command,
             "stdout": stdout_text,
             "stderr": stderr_text,
             "exit_code": exit_code,
             "truncated": stdout_truncated or stderr_truncated,
         }
-        content = _format_command_content(command, exit_code, stdout_text, stderr_text)
+        content = _format_command_content(description, command, exit_code, stdout_text, stderr_text)
         is_error = _is_error_exit(command, exit_code)
 
         if is_error:
@@ -211,8 +228,9 @@ def _truncate_output(text: str) -> tuple[str, bool]:
     return text[:MAX_OUTPUT_CHARS] + "\n... [输出已截断]", True
 
 
-def _format_command_content(command: str, exit_code: int, stdout: str, stderr: str) -> str:
+def _format_command_content(description: str, command: str, exit_code: int, stdout: str, stderr: str) -> str:
     return (
+        f"描述: {description}\n"
         f"命令: {command}\n"
         f"退出码: {exit_code}\n"
         f"stdout:\n{stdout or '(空)'}\n"
@@ -245,7 +263,7 @@ def _validate_plan_command(command: str) -> str | None:
             return "Plan 模式下只允许只读命令，当前命令包含潜在副作用或旁路写入能力。"
     if any(lowered.startswith(prefix) for prefix in PLAN_ALLOWED_PREFIXES):
         return None
-    return "Plan 模式下仅允许目录查看、文本搜索、git 状态/差异和解释器版本查询等只读命令。"
+    return "Plan 模式下仅允许目录查看、文本搜索、git 状态或差异、解释器版本查询等只读命令。"
 
 
 RunCommandTool = BashTool
