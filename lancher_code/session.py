@@ -10,6 +10,7 @@ from lancher_code.models import (
     ConversationMessage,
     MessageUsage,
     ProviderConfig,
+    PromptContext,
     RuntimeMode,
     SessionMessage,
     SessionState,
