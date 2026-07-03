@@ -6,61 +6,90 @@
 /_____/\__,_/_/ /_/\____/_/ /_/\___/_/      \____/\____/\__,_/\___/
 ```
 
-> 基于 Python 的终端 AI 编程助手，目标是不只能编程，而是帮你从重复的工作中解放出来。  
-> 聊天、整理文件、参与开发、理解代码、协助工作的 coding agent。
+> 基于 Python 的终端 AI 编程助手，目标是不只“能聊天”，而是真的能陪你一起理解代码、整理上下文、读改文件、执行命令，把想法推进成结果。
 
-## 🎯 目标
+## 目标
 
 LanCher Code 想做的是一位常驻终端的 AI 搭子。
 
 它应该能用自然语言和你协作，理解当前工作目录，结合上下文连续对话，并在需要时读取文件、搜索代码、修改内容、执行命令，帮助你把“想法”推进成“结果”。
 
-## ✨ 功能
+## 功能
 
 - 终端内交互式对话界面，开箱即可进入持续多轮会话
-- 支持流式输出，回复过程可实时看到
+- 支持流式输出，回复过程可以实时看到
 - 支持会话上下文记忆，在同一次运行中连续追踪对话
-- 支持通过 YAML 配置切换模型提供商
+- 支持通过全局 YAML 配置切换模型提供商
 - 已接入 `OpenAI` 与 `Claude` 两类协议后端
-- 内置基础工具链：
-  `read_file`、`write_file`、`edit_file`、`glob`、`grep`、`bash`
+- 内置基础工具链：`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`bash`
 - 支持显示思考过程状态与工具调用轨迹，便于观察代理行为
 
-## 🚀 使用方式
+## 使用方式
 
 推荐使用 `uv`：
 
 ```bash
 uv sync
-Copy-Item lancher.example.yaml lancher.yaml
+uv run lancher-code
 ```
 
-然后编辑 `lancher.yaml`，填写你自己的模型配置，例如：
+程序会优先读取用户目录下的全局配置文件：
+
+```text
+~/.lancher/lancher.yaml
+```
+
+首次启动如果没有这个配置文件，会自动进入一个 Textual 表单界面，要求你填写：
 
 - `protocol`
 - `model`
 - `base_url`
 - `api_key`
 
-启动程序：
-
-```bash
-uv run lancher-code --config lancher.yaml
-```
+保存成功后会自动写入 `~/.lancher/lancher.yaml`，随后直接进入聊天界面。
 
 也可以直接用模块方式运行：
 
 ```bash
-python -m lancher_code --config lancher.yaml
+python -m lancher_code
 ```
 
-进入界面后，直接输入问题即可开始对话。  
-输入 `/` 可以唤出命令菜单，查看 `/plan`、`/do`、`/exit` 等会话命令。  
+进入界面后，直接输入问题即可开始对话。
+
+输入 `/` 可以唤出命令菜单，查看 `/plan`、`/do`、`/exit` 等会话命令。
+
 输入 `/exit`，或使用 `Ctrl+C` / `Ctrl+D` 可以退出。
 
-## 🌱 目前进度
+## 配置目录说明
+
+LanCher Code 现在区分两类 `.lancher` 目录：
+
+- `~/.lancher`
+  用于全局配置、未来的设置、聊天记录、全局 skills / MCP 等
+- `./.lancher`
+  用于当前项目私有内容，例如 `plan.md`、未来项目级 skills / MCP 等
+
+当前版本里：
+
+- 主配置文件位于 `~/.lancher/lancher.yaml`
+- Plan Mode 计划文件默认位于 `./.lancher/plan.md`
+
+项目根目录下旧的 `lancher.yaml` 已不再作为启动配置入口。
+
+## 示例配置
+
+仓库里仍然保留了一个示例文件：
+
+```text
+lancher.example.yaml
+```
+
+它只是结构参考，不再需要复制到项目根目录使用。
+
+## 当前进度
 
 - 核心终端对话链路已经跑通
 - Provider 抽象、会话管理、流式响应、工具循环、TUI 界面都已落地
+- 首次启动全局配置引导已接入
 - 基础代码工具已经可用，程序已经具备“读、查、改、跑”的第一版能力
 - 项目仍处于早期阶段，重点在把核心体验做稳、把代理边界做清楚

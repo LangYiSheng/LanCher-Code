@@ -4,22 +4,29 @@ from pathlib import Path
 
 from rich.console import Console
 
-from lancher_code.config import load_config
+from lancher_code.config import load_config, resolve_config_bootstrap_state
 from lancher_code.errors import ConfigError
 from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.core.executor import ToolExecutor
+from lancher_code.tui_views.bootstrap import ConfigBootstrapTUI
+from lancher_code.tui_views.chat import ChatTUI
 from lancher_code.turn_runner import TurnRunner
-from lancher_code.tui import ChatTUI
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10.0
 
 
-async def run_app(config_path: str) -> int:
+async def run_app() -> int:
     console = Console()
+    bootstrap_state = resolve_config_bootstrap_state()
+    if bootstrap_state.needs_setup:
+        setup_completed = await ConfigBootstrapTUI(bootstrap_state.config_path).run()
+        if not setup_completed:
+            return 0
+
     try:
-        config = load_config(config_path)
+        config = load_config(bootstrap_state.config_path)
     except ConfigError as exc:
         console.print(f"[错误] {exc.user_message}", style="bold red")
         return 1

@@ -6,25 +6,19 @@ from collections.abc import Sequence
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    return argparse.ArgumentParser(
         prog="lancher-code",
-        description="LanCher Code 交互式对话终端。",
+        description="LanCher Code 终端 AI 对话界面。",
     )
-    parser.add_argument(
-        "--config",
-        default="lancher.yaml",
-        help="YAML 配置文件路径，默认使用当前目录下的 lancher.yaml。",
-    )
-    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    parser.parse_args(argv)
 
     from lancher_code.app import run_app
 
     try:
-        return asyncio.run(run_app(args.config))
+        return asyncio.run(run_app())
     except KeyboardInterrupt:
         return 130
