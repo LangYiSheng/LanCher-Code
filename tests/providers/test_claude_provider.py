@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from lancher_code.errors import ProviderResponseError
-from lancher_code.models import ChatRequest, ConversationMessage, ThinkingConfig, ToolDefinition
+from lancher_code.models import ChatRequest, ContentBlock, ConversationMessage, ThinkingConfig, ToolDefinition
 from lancher_code.providers.claude import ClaudeProvider
 
 
@@ -17,6 +17,7 @@ def _build_sse_payload(chunks: list[str]) -> bytes:
 def _request(*, thinking: ThinkingConfig | None = None, allow_tool_calls: bool = True) -> ChatRequest:
     return ChatRequest(
         model="claude-test",
+        system=["稳定系统提示词", "环境提示词"],
         messages=[ConversationMessage.text_message("user", "你好")],
         tools=[ToolDefinition(name="read_file", description="读取文件", input_schema={"type": "object"})],
         allow_tool_calls=allow_tool_calls,
@@ -29,6 +30,7 @@ async def test_claude_provider_streams_text_thinking_and_usage(claude_provider_c
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
         assert payload["thinking"]["type"] == "enabled"
+        assert payload["system"] == "稳定系统提示词\n\n环境提示词"
         assert payload["tools"][0]["name"] == "read_file"
         body = _build_sse_payload(
             [
@@ -168,6 +170,59 @@ async def test_claude_provider_parses_tool_call_deltas(claude_provider_config) -
     assert tool_events[0].tool_call_chunk.provider_call_id == "toolu_1"
     assert tool_events[0].tool_call_chunk.name_delta == "read_file"
     assert tool_events[1].tool_call_chunk.arguments_delta == '{"path":"demo.txt"}'
+
+
+@pytest.mark.asyncio
+async def test_claude_provider_serializes_multi_block_user_content(claude_provider_config) -> None:
+    request = ChatRequest(
+        model="claude-test",
+        system=["稳定系统提示词"],
+        messages=[
+            ConversationMessage(
+                role="user",
+                blocks=[
+                    ContentBlock.text_block("<system-reminder>\n用户启用了 Plan Mode\n</system-reminder>"),
+                    ContentBlock.text_block("计划一下"),
+                ],
+            )
+        ],
+    )
+
+    def handler(raw_request: httpx.Request) -> httpx.Response:
+        payload = json.loads(raw_request.content.decode("utf-8"))
+        assert payload["messages"][0] == {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<system-reminder>\n用户启用了 Plan Mode\n</system-reminder>"},
+                {"type": "text", "text": "计划一下"},
+            ],
+        }
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_build_sse_payload(
+                [
+                    "event: message_start\n"
+                    + "data: "
+                    + json.dumps({"type": "message_start"})
+                    + "\n\n",
+                    "event: message_stop\n"
+                    + "data: "
+                    + json.dumps({"type": "message_stop"})
+                    + "\n\n",
+                ]
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    provider = ClaudeProvider(
+        claude_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=transport, timeout=30.0),
+    )
+
+    events = [event async for event in provider.stream_chat(request)]
+
+    assert [event.kind for event in events] == ["message_start", "message_end"]
 
 
 @pytest.mark.asyncio

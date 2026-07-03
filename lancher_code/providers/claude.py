@@ -121,16 +121,15 @@ class ClaudeProvider(BaseChatProvider):
             raise
 
     def _build_payload(self, request: ChatRequest) -> dict[str, object]:
-        system_messages, chat_messages = self.split_system_and_chat_messages(request.messages)
         payload: dict[str, object] = {
             "model": request.model,
-            "messages": [self._serialize_message(message) for message in chat_messages],
+            "messages": [self._serialize_message(message) for message in request.messages],
             "max_tokens": DEFAULT_MAX_TOKENS,
             "stream": True,
             "thinking": self._build_thinking_payload(request),
         }
-        if system_messages:
-            payload["system"] = "\n\n".join(self.text_from_blocks(message.blocks) for message in system_messages)
+        if request.system:
+            payload["system"] = "\n\n".join(request.system)
         if request.allow_tool_calls and request.tools:
             payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
         return payload

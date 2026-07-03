@@ -133,6 +133,7 @@ async def test_plan_with_payload_submits_request_in_plan_mode(
         assert session.runtime_mode == "plan"
         assert len(provider.requests) == 1
         assert provider.requests[0].mode == "plan"
+        assert "用户刚进入 Plan Mode" in provider.requests[0].messages[0].blocks[0].text
 
 
 @pytest.mark.asyncio
@@ -152,6 +153,41 @@ async def test_do_command_restores_normal_mode(
         composer = app.query_one("#composer-input", ComposerTextArea)
         assert session.runtime_mode == "normal"
         assert composer.placeholder == "发送一条消息"
+
+
+@pytest.mark.asyncio
+async def test_first_normal_message_after_do_carries_exit_prompt(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="text_delta", text="计划已生成"),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=1, output_tokens=1)),
+            ],
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="text_delta", text="开始实现"),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=1, output_tokens=1)),
+            ],
+        ]
+    )
+    app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "/plan 为搜索功能写计划")
+        await pilot.pause(0.1)
+        await _submit_message(app, pilot, "/do")
+        await pilot.pause(0.05)
+        await _submit_message(app, pilot, "开始实现")
+        await pilot.pause(0.1)
+
+        assert session.runtime_mode == "normal"
+        assert len(provider.requests) == 2
+        assert "规划模式已结束" in provider.requests[1].messages[-1].blocks[0].text
 
 
 @pytest.mark.asyncio

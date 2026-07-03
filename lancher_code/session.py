@@ -19,7 +19,12 @@ from lancher_code.models import (
     ToolExecutionResult,
     TraceEntry,
 )
-from lancher_code.prompting import build_system_prompt
+from lancher_code.prompting import (
+    build_chat_request_payload,
+    build_dynamic_context_prompt,
+    build_prompt_context,
+    build_user_message,
+)
 
 
 class SessionController:
@@ -47,7 +52,7 @@ class SessionController:
 
     @property
     def transcript(self) -> list[ConversationMessage]:
-        return [ConversationMessage.text_message("system", self.system_prompt_text)] + list(self._transcript)
+        return list(self._transcript)
 
     @property
     def runtime_mode(self) -> RuntimeMode:
@@ -57,16 +62,20 @@ class SessionController:
     def plan_file_path(self) -> Path:
         return self._plan_file_path
 
-    @property
-    def system_prompt_text(self) -> str:
-        return build_system_prompt(
-            cwd=self._cwd,
-            current_date=self._current_date,
-            mode=self.runtime_mode,
-            plan_file_path=self._plan_file_path,
-        )
-
     def set_runtime_mode(self, mode: RuntimeMode) -> RuntimeMode:
+        previous_mode = self._state.runtime_mode
+        if mode == previous_mode:
+            return mode
+
+        self._state.previous_runtime_mode = previous_mode
+        if previous_mode == "normal" and mode == "plan":
+            self._state.pending_plan_entry_kind = "reentry" if self._plan_file_path.exists() else "initial"
+            self._state.pending_plan_exit_notice = False
+            self._state.plan_mode_turn_count = 0
+        elif previous_mode == "plan" and mode == "normal":
+            self._state.pending_plan_exit_notice = self._state.plan_mode_turn_count > 0
+            self._state.pending_plan_entry_kind = None
+
         self._state.runtime_mode = mode
         return mode
 
@@ -79,7 +88,9 @@ class SessionController:
             timestamp=self._now(),
         )
         self._state.messages.append(message)
-        self._transcript.append(ConversationMessage.text_message("user", text))
+        dynamic_context = build_dynamic_context_prompt(self._prompt_context(self.runtime_mode))
+        self._transcript.append(build_user_message(text=text, dynamic_context=dynamic_context))
+        self._advance_dynamic_prompt_state_after_user_turn()
         return message
 
     def create_assistant_message(self) -> SessionMessage:
@@ -228,10 +239,16 @@ class SessionController:
         active_mode = mode or self.runtime_mode
         thinking = self._request_thinking()
         filtered_tools = self._filter_tools_for_mode(tools, active_mode) if allow_tool_calls else []
+        payload = build_chat_request_payload(
+            context=self._prompt_context(active_mode),
+            transcript=self.transcript,
+            tools=filtered_tools,
+        )
         return ChatRequest(
             model=self._provider_config.model,
-            messages=self.transcript,
-            tools=filtered_tools,
+            system=payload.system,
+            messages=payload.messages,
+            tools=payload.tools,
             allow_tool_calls=allow_tool_calls,
             thinking=thinking,
             mode=active_mode,
@@ -266,6 +283,26 @@ class SessionController:
         if not raw_path.is_absolute():
             raw_path = self._cwd / raw_path
         return raw_path.resolve()
+
+    def _prompt_context(self, mode: RuntimeMode) -> "PromptContext":
+        return build_prompt_context(
+            cwd=self._cwd,
+            current_date=self._current_date,
+            runtime_mode=mode,
+            plan_file_path=self._plan_file_path,
+            previous_runtime_mode=self._state.previous_runtime_mode,
+            plan_mode_turn_count=self._state.plan_mode_turn_count,
+            pending_plan_entry_kind=self._state.pending_plan_entry_kind,
+            pending_plan_exit_notice=self._state.pending_plan_exit_notice,
+        )
+
+    def _advance_dynamic_prompt_state_after_user_turn(self) -> None:
+        if self._state.runtime_mode == "plan":
+            self._state.plan_mode_turn_count += 1
+            self._state.pending_plan_entry_kind = None
+            return
+
+        self._state.pending_plan_exit_notice = False
 
     @staticmethod
     def _filter_tools_for_mode(tools: list[ToolDefinition], mode: RuntimeMode) -> list[ToolDefinition]:

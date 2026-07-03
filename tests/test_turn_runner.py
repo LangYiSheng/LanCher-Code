@@ -86,7 +86,7 @@ async def test_turn_runner_completes_plain_text_turn(openai_provider_config, tmp
     assert events[-1].message is not None
     assert events[-1].message.content == "直接回答"
     assert len(provider.requests) == 1
-    assert [message.role for message in session.transcript] == ["system", "user", "assistant"]
+    assert [message.role for message in session.transcript] == ["user", "assistant"]
 
 
 @pytest.mark.asyncio

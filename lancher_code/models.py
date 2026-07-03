@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +11,7 @@ MessageRole = Literal["system", "user", "assistant"]
 ConversationRole = Literal["system", "user", "assistant", "tool"]
 MessageStatus = Literal["streaming", "complete", "error", "cancelled"]
 RuntimeMode = Literal["normal", "plan"]
+PlanModeEntryKind = Literal["initial", "reentry"]
 StreamEventKind = Literal[
     "text_delta",
     "thinking_delta",
@@ -264,6 +265,10 @@ class ConversationMessage:
     def text_message(cls, role: ConversationRole, text: str) -> ConversationMessage:
         return cls(role=role, blocks=[ContentBlock.text_block(text)])
 
+    @classmethod
+    def text_blocks_message(cls, role: ConversationRole, texts: list[str]) -> ConversationMessage:
+        return cls(role=role, blocks=[ContentBlock.text_block(text) for text in texts])
+
 
 @dataclass(slots=True)
 class SessionMessage:
@@ -280,15 +285,41 @@ class SessionMessage:
 class SessionState:
     messages: list[SessionMessage] = field(default_factory=list)
     runtime_mode: RuntimeMode = "normal"
+    previous_runtime_mode: RuntimeMode | None = None
+    plan_mode_turn_count: int = 0
+    pending_plan_exit_notice: bool = False
+    pending_plan_entry_kind: PlanModeEntryKind | None = None
 
     def snapshot(self) -> list[SessionMessage]:
         return list(self.messages)
 
 
 @dataclass(slots=True)
+class PromptContext:
+    cwd: Path
+    current_date: date
+    runtime_mode: RuntimeMode
+    plan_file_path: Path
+    os_label: str
+    previous_runtime_mode: RuntimeMode | None = None
+    plan_mode_turn_count: int = 0
+    pending_plan_entry_kind: PlanModeEntryKind | None = None
+    pending_plan_exit_notice: bool = False
+    plan_exists: bool = False
+
+
+@dataclass(slots=True)
+class PromptPayload:
+    system: list[str] = field(default_factory=list)
+    messages: list[ConversationMessage] = field(default_factory=list)
+    tools: list[ToolDefinition] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ChatRequest:
     model: str
-    messages: list[ConversationMessage]
+    system: list[str] = field(default_factory=list)
+    messages: list[ConversationMessage] = field(default_factory=list)
     tools: list[ToolDefinition] = field(default_factory=list)
     allow_tool_calls: bool = True
     thinking: ThinkingConfig | None = None

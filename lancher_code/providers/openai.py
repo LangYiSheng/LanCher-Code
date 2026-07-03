@@ -101,13 +101,21 @@ class OpenAIProvider(BaseChatProvider):
     def _build_payload(self, request: ChatRequest) -> dict[str, object]:
         payload: dict[str, object] = {
             "model": request.model,
-            "messages": [self._serialize_message(message) for message in request.messages],
+            "messages": [self._serialize_system_message(text) for text in request.system]
+            + [self._serialize_message(message) for message in request.messages],
             "stream": True,
             "stream_options": {"include_usage": True},
         }
         if request.allow_tool_calls and request.tools:
             payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
         return payload
+
+    @staticmethod
+    def _serialize_system_message(text: str) -> dict[str, object]:
+        return {
+            "role": "system",
+            "content": text,
+        }
 
     def _serialize_message(self, message) -> dict[str, object]:
         if message.role == "tool":
@@ -123,7 +131,7 @@ class OpenAIProvider(BaseChatProvider):
         if message.role == "assistant" and tool_use_blocks:
             return {
                 "role": "assistant",
-                "content": text_content or "",
+                "content": self._serialize_text_content(message.blocks),
                 "tool_calls": [
                     {
                         "id": block.call_id,
@@ -139,8 +147,17 @@ class OpenAIProvider(BaseChatProvider):
 
         return {
             "role": message.role,
-            "content": text_content,
+            "content": self._serialize_text_content(message.blocks),
         }
+
+    @staticmethod
+    def _serialize_text_content(blocks) -> str | list[dict[str, str]]:
+        text_blocks = [block for block in blocks if block.kind == "text"]
+        if not text_blocks:
+            return ""
+        if len(text_blocks) == 1:
+            return text_blocks[0].text
+        return [{"type": "text", "text": block.text} for block in text_blocks]
 
     @staticmethod
     def _serialize_tool(tool) -> dict[str, object]:

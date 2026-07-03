@@ -17,6 +17,7 @@ def _build_sse_payload(chunks: list[str]) -> bytes:
 def _request(*, allow_tool_calls: bool = True) -> ChatRequest:
     return ChatRequest(
         model="gpt-test",
+        system=["稳定系统提示词", "环境提示词"],
         messages=[ConversationMessage.text_message("user", "你好")],
         tools=[ToolDefinition(name="read_file", description="读取文件", input_schema={"type": "object"})],
         allow_tool_calls=allow_tool_calls,
@@ -29,6 +30,8 @@ async def test_openai_provider_streams_text_deltas_and_usage(openai_provider_con
         assert request.url.path == "/v1/chat/completions"
         payload = json.loads(request.content.decode("utf-8"))
         assert payload["stream_options"]["include_usage"] is True
+        assert payload["messages"][0] == {"role": "system", "content": "稳定系统提示词"}
+        assert payload["messages"][1] == {"role": "system", "content": "环境提示词"}
         assert payload["tools"][0]["function"]["name"] == "read_file"
         body = _build_sse_payload(
             [
@@ -157,6 +160,48 @@ async def test_openai_provider_parses_tool_call_deltas(openai_provider_config) -
     assert tool_events[0].tool_call_chunk.provider_call_id == "call-1"
     assert tool_events[0].tool_call_chunk.name_delta == "read_file"
     assert tool_events[1].tool_call_chunk.arguments_delta == 'demo.txt"}'
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_serializes_multi_block_user_content(openai_provider_config) -> None:
+    request = ChatRequest(
+        model="gpt-test",
+        system=["稳定系统提示词"],
+        messages=[
+            ConversationMessage(
+                role="user",
+                blocks=[
+                    ContentBlock.text_block("<system-reminder>\n用户启用了 Plan Mode\n</system-reminder>"),
+                    ContentBlock.text_block("计划一下"),
+                ],
+            )
+        ],
+    )
+
+    def handler(raw_request: httpx.Request) -> httpx.Response:
+        payload = json.loads(raw_request.content.decode("utf-8"))
+        assert payload["messages"][1] == {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<system-reminder>\n用户启用了 Plan Mode\n</system-reminder>"},
+                {"type": "text", "text": "计划一下"},
+            ],
+        }
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_build_sse_payload(["data: [DONE]\n\n"]),
+        )
+
+    transport = httpx.MockTransport(handler)
+    provider = OpenAIProvider(
+        openai_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=transport, timeout=30.0),
+    )
+
+    events = [event async for event in provider.stream_chat(request)]
+
+    assert [event.kind for event in events] == ["message_start", "message_end"]
 
 
 @pytest.mark.asyncio

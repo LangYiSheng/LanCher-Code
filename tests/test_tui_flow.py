@@ -362,7 +362,7 @@ async def test_tui_keeps_multi_turn_context_without_replacing_system_prompt(
         await pilot.pause(0.1)
 
         assert len(provider.requests) == 2
-        assert provider.requests[0].messages[0].blocks[0].text == provider.requests[1].messages[0].blocks[0].text
+        assert provider.requests[0].system == provider.requests[1].system
 
 
 @pytest.mark.asyncio
