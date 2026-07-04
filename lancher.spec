@@ -1,7 +1,8 @@
 from pathlib import Path
 
 
-project_root = Path(SPECPATH).resolve().parent
+project_root = Path.cwd().resolve()
+icon_path = project_root / "assets" / "lancher_code.ico"
 
 
 a = Analysis(
@@ -30,6 +31,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=True,
+    icon=str(icon_path),
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
