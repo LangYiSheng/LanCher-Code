@@ -53,6 +53,16 @@ async def test_config_bootstrap_app_saves_minimal_required_fields(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_config_bootstrap_app_renders_updated_welcome_copy(tmp_path) -> None:
+    config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
+    app = ConfigBootstrapApp(config_path)
+
+    async with app.run_test():
+        assert str(app.query_one("#bootstrap-title", Static).render()) == "欢迎使用 LanCher Code"
+        assert str(app.query_one("#bootstrap-copy", Static).render()) == "首次启动配置，请填写模型供应商信息。"
+
+
+@pytest.mark.asyncio
 async def test_config_bootstrap_app_can_save_claude_thinking_settings(tmp_path) -> None:
     config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
     app = ConfigBootstrapApp(config_path)

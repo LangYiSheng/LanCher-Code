@@ -27,7 +27,6 @@ class ConfigBootstrapApp(App[int]):
     Screen {
         layout: vertical;
         align: center middle;
-        background: #09111b;
         color: #f2f2f2;
     }
 
@@ -101,8 +100,8 @@ class ConfigBootstrapApp(App[int]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="bootstrap-root"):
-            yield Static("LanCher Code 首次启动配置", id="bootstrap-title")
-            yield Static("还没有找到全局配置文件，请先填写模型提供商信息。", id="bootstrap-copy")
+            yield Static("欢迎使用 LanCher Code", id="bootstrap-title")
+            yield Static("首次启动配置，请填写模型供应商信息。", id="bootstrap-copy")
             yield Static(f"配置保存位置：{self._config_path}", id="bootstrap-path")
             yield Static("", id="bootstrap-error")
 
