@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 def build_arg_parser() -> argparse.ArgumentParser:
     return argparse.ArgumentParser(
-        prog="lancher-code",
+        prog="lancher",
         description="LanCher Code 终端 AI 对话界面。",
     )
 
