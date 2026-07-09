@@ -7,7 +7,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static, TextArea
 
-from lancher_code.models import MessageUsage, ProviderConfig, SessionMessage, TurnEvent, UIConfig
+from lancher_code.models import MessageUsage, ProviderConfig, RuntimeMode, SessionMessage, TurnEvent, UIConfig
 from lancher_code.session import SessionController
 from lancher_code.slash_commands import (
     SlashCommandDefinition,
@@ -20,6 +20,7 @@ from lancher_code.tui_views.composer import (
     CommandHintBar,
     ComposerSubmitted,
     ComposerTextArea,
+    PermissionModeCycleRequested,
     SlashCommandChosen,
     SlashCommandMenu,
     SlashMenuAcceptRequested,
@@ -36,6 +37,19 @@ COMPOSER_FRAME_HEIGHT = 2
 DEFAULT_COMMAND_HINT = ""
 DEFAULT_PLACEHOLDER = "发送一条消息"
 PLAN_PLACEHOLDER = "Plan Mode: 继续补充或修改计划"
+MODE_SEQUENCE: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
+MODE_GLYPHS: dict[RuntimeMode, str] = {
+    "default": ">",
+    "plan": "#",
+    "acceptEdits": "+",
+    "bypass": "!",
+}
+MODE_STATUS_LABELS: dict[RuntimeMode, str] = {
+    "default": "",
+    "plan": "计划模式",
+    "acceptEdits": "允许编辑",
+    "bypass": "完全访问",
+}
 
 
 class LanCherTextualApp(App[int]):
@@ -164,6 +178,22 @@ class LanCherTextualApp(App[int]):
         text-style: bold;
     }
 
+    #prompt-glyph.-default {
+        color: #73b6ff;
+    }
+
+    #prompt-glyph.-plan {
+        color: #f5c451;
+    }
+
+    #prompt-glyph.-acceptEdits {
+        color: #78d98a;
+    }
+
+    #prompt-glyph.-bypass {
+        color: #ff9b6b;
+    }
+
     #composer-input {
         width: 1fr;
         height: 100%;
@@ -212,6 +242,18 @@ class LanCherTextualApp(App[int]):
         width: 1fr;
     }
 
+    #status-left.-plan {
+        color: #f5c451;
+    }
+
+    #status-left.-acceptEdits {
+        color: #78d98a;
+    }
+
+    #status-left.-bypass {
+        color: #ff9b6b;
+    }
+
     #status-center {
         width: auto;
         text-align: center;
@@ -255,7 +297,7 @@ class LanCherTextualApp(App[int]):
             with Vertical(id="composer-region"):
                 yield SlashCommandMenu(self._slash_command_registry.list_all())
                 with Horizontal(id="composer"):
-                    yield Static(">", id="prompt-glyph")
+                    yield Static(MODE_GLYPHS["default"], id="prompt-glyph")
                     yield ComposerTextArea(
                         "",
                         soft_wrap=True,
@@ -274,6 +316,7 @@ class LanCherTextualApp(App[int]):
     def on_mount(self) -> None:
         self.query_one(ComposerTextArea).focus()
         self._update_composer_height()
+        self._refresh_mode_chrome()
         self._refresh_composer_placeholder()
         self._refresh_command_ui()
         self._refresh_status_bar()
@@ -309,6 +352,15 @@ class LanCherTextualApp(App[int]):
     @on(SlashCommandChosen)
     def handle_slash_command_chosen(self, event: SlashCommandChosen) -> None:
         self._accept_slash_command(event.command_name)
+
+    @on(PermissionModeCycleRequested)
+    def handle_permission_mode_cycle_requested(self) -> None:
+        if self._is_streaming:
+            return
+        next_mode = _next_runtime_mode(self._session_controller.runtime_mode)
+        self._apply_turn_event(self._turn_runner.set_mode(next_mode))
+        self._refresh_status_bar()
+        self.query_one("#composer-input", ComposerTextArea).focus()
 
     @on(ComposerSubmitted)
     async def handle_input_submitted(self, event: ComposerSubmitted) -> None:
@@ -350,6 +402,7 @@ class LanCherTextualApp(App[int]):
             input_widget = self.query_one("#composer-input", ComposerTextArea)
             input_widget.disabled = False
             input_widget.focus()
+            self._refresh_mode_chrome()
             self._refresh_composer_placeholder()
             self._refresh_command_ui()
             self._refresh_status_bar()
@@ -357,12 +410,24 @@ class LanCherTextualApp(App[int]):
 
     def _refresh_status_bar(self) -> None:
         usage = self._session_controller.total_usage()
-        api_type = "OpenAI" if self._provider_config.protocol == "openai" else "Claude"
-        mode_label = self._session_controller.runtime_mode.upper()
-        self.query_one("#status-left", Static).update(f"{self._provider_config.model} ({api_type})")
         center_text = self._status_hint or ("Busy" if self._is_streaming else "Ready")
-        self.query_one("#status-center", Static).update(f"{center_text} [{mode_label}]")
-        self.query_one("#status-right", Static).update(self._format_usage_text(usage))
+        status_left = self.query_one("#status-left", Static)
+        status_center = self.query_one("#status-center", Static)
+        status_right = self.query_one("#status-right", Static)
+
+        status_left.update(self._status_left_text())
+        for candidate in MODE_SEQUENCE:
+            status_left.set_class(candidate != "default" and candidate == self._session_controller.runtime_mode, f"-{candidate}")
+
+        status_center.update(center_text)
+        status_right.update(self._format_usage_text(usage))
+
+    def _status_left_text(self) -> str:
+        mode = self._session_controller.runtime_mode
+        if mode == "default":
+            api_type = "OpenAI" if self._provider_config.protocol == "openai" else "Claude"
+            return f"{self._provider_config.model} ({api_type})"
+        return MODE_STATUS_LABELS[mode]
 
     @staticmethod
     def _format_usage_text(usage: MessageUsage) -> str:
@@ -397,6 +462,7 @@ class LanCherTextualApp(App[int]):
     def _apply_turn_event(self, event: TurnEvent) -> None:
         if event.kind == "mode_changed":
             self._status_hint = event.progress_message or "Mode changed"
+            self._refresh_mode_chrome()
             self._refresh_composer_placeholder()
             self._refresh_command_ui()
             return
@@ -420,6 +486,13 @@ class LanCherTextualApp(App[int]):
             return
         if event.kind in {"assistant_text_delta", "tool_call_started", "tool_result_received", "usage_updated"}:
             self._status_hint = "Busy"
+
+    def _refresh_mode_chrome(self) -> None:
+        mode = self._session_controller.runtime_mode
+        glyph = self.query_one("#prompt-glyph", Static)
+        glyph.update(MODE_GLYPHS[mode])
+        for candidate in MODE_SEQUENCE:
+            glyph.set_class(candidate == mode, f"-{candidate}")
 
     def _refresh_composer_placeholder(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
@@ -534,7 +607,7 @@ class LanCherTextualApp(App[int]):
 
         if command_name == "mode":
             requested_mode = arguments_text.strip()
-            if requested_mode not in {"default", "plan", "acceptEdits", "bypass"}:
+            if requested_mode not in set(MODE_SEQUENCE):
                 self._status_hint = "Unknown mode"
                 self._refresh_status_bar()
                 return None
@@ -554,6 +627,11 @@ class LanCherTextualApp(App[int]):
         )
         composer_input.styles.height = str(visible_lines)
         composer.styles.height = str(visible_lines + COMPOSER_FRAME_HEIGHT)
+
+
+def _next_runtime_mode(current_mode: RuntimeMode) -> RuntimeMode:
+    current_index = MODE_SEQUENCE.index(current_mode)
+    return MODE_SEQUENCE[(current_index + 1) % len(MODE_SEQUENCE)]
 
 
 class ChatTUI:

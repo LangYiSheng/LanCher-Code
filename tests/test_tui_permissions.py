@@ -11,7 +11,7 @@ from lancher_code.session import SessionController
 from lancher_code.tools.builtin.bash import BashTool
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
-from lancher_code.tui import LanCherTextualApp
+from lancher_code.tui import LanCherTextualApp, PermissionRequestScreen
 from lancher_code.turn_runner import TurnRunner
 
 
@@ -48,29 +48,31 @@ async def _submit_message(app: LanCherTextualApp, pilot, value: str) -> None:
     await pilot.press("enter")
 
 
+def _permission_request_responses() -> list[list[StreamEvent]]:
+    return [
+        [
+            StreamEvent(kind="message_start"),
+            StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="bash")),
+            StreamEvent(
+                kind="tool_call_delta",
+                tool_call_chunk=ToolCallChunk(
+                    call_index=0,
+                    arguments_delta='{"description":"查看 git 状态","command":"git status"}',
+                ),
+            ),
+            StreamEvent(kind="message_end"),
+        ],
+        [
+            StreamEvent(kind="message_start"),
+            StreamEvent(kind="text_delta", text="已改用无需执行命令的策略"),
+            StreamEvent(kind="message_end"),
+        ],
+    ]
+
+
 @pytest.mark.asyncio
 async def test_permission_denial_does_not_break_turn(openai_provider_config, ui_config, tmp_path: Path) -> None:
-    provider = FakeProvider(
-        responses=[
-            [
-                StreamEvent(kind="message_start"),
-                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="bash")),
-                StreamEvent(
-                    kind="tool_call_delta",
-                    tool_call_chunk=ToolCallChunk(
-                        call_index=0,
-                        arguments_delta='{"description":"查看 git 状态","command":"git status"}',
-                    ),
-                ),
-                StreamEvent(kind="message_end"),
-            ],
-            [
-                StreamEvent(kind="message_start"),
-                StreamEvent(kind="text_delta", text="已改用无需执行命令的策略"),
-                StreamEvent(kind="message_end"),
-            ],
-        ]
-    )
+    provider = FakeProvider(responses=_permission_request_responses())
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
 
     async with app.run_test() as pilot:
@@ -84,3 +86,42 @@ async def test_permission_denial_does_not_break_turn(openai_provider_config, ui_
         assert session.state.messages[-1].status == "complete"
         assert session.state.messages[-1].content == "已改用无需执行命令的策略"
         assert any(entry.kind == "tool_result" and entry.ok is False for entry in session.state.messages[-1].trace.entries)
+
+
+@pytest.mark.asyncio
+async def test_permission_request_screen_supports_keyboard_navigation(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(responses=_permission_request_responses())
+    app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "看看仓库状态")
+        await pilot.pause(0.1)
+
+        assert isinstance(app.screen, PermissionRequestScreen)
+        assert isinstance(app.screen.focused, Button)
+        assert app.screen.focused.id == "permission-allow_once"
+
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+        assert isinstance(app.screen.focused, Button)
+        assert app.screen.focused.id == "permission-allow_session"
+
+        await pilot.press("shift+tab")
+        await pilot.pause(0.05)
+        assert isinstance(app.screen.focused, Button)
+        assert app.screen.focused.id == "permission-allow_once"
+
+        await pilot.press("left")
+        await pilot.pause(0.05)
+        assert isinstance(app.screen.focused, Button)
+        assert app.screen.focused.id == "permission-deny"
+
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        assert session.state.messages[-1].status == "complete"
+        assert session.state.messages[-1].content == "已改用无需执行命令的策略"

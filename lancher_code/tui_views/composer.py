@@ -39,10 +39,15 @@ class SlashCommandChosen(Message):
         self.command_name = command_name
 
 
+class PermissionModeCycleRequested(Message):
+    pass
+
+
 class ComposerTextArea(TextArea):
     BINDINGS = [
         Binding("enter", "submit_message", "发送", show=False, priority=True),
         Binding("tab", "accept_slash_menu_selection", "补全命令", show=False, priority=True),
+        Binding("shift+tab", "cycle_permission_mode", "切换模式", show=False, priority=True),
         Binding("shift+enter", "insert_newline", "换行", show=False, priority=True),
     ] + TextArea.BINDINGS
 
@@ -80,6 +85,9 @@ class ComposerTextArea(TextArea):
     def action_accept_slash_menu_selection(self) -> None:
         if self.slash_menu_active:
             self.post_message(SlashMenuAcceptRequested())
+
+    def action_cycle_permission_mode(self) -> None:
+        self.post_message(PermissionModeCycleRequested())
 
     def action_insert_newline(self) -> None:
         self.insert("\n")

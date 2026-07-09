@@ -117,9 +117,58 @@ async def test_tui_composer_placeholder_is_minimal_in_normal_mode(
 
     async with app.run_test():
         composer = app.query_one("#composer-input", ComposerTextArea)
+        status_left = app.query_one("#status-left", Static)
         assert composer.placeholder == "发送一条消息"
+        assert str(status_left.render()) == "gpt-test (OpenAI)"
         hint_bar = app.query_one(CommandHintBar)
         assert not hint_bar.display
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_cycles_permission_mode_and_updates_status_left(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        status_left = app.query_one("#status-left", Static)
+        prompt_glyph = app.query_one("#prompt-glyph", Static)
+
+        composer.focus()
+        await pilot.press("shift+tab")
+        await pilot.pause(0.05)
+        assert session.runtime_mode == "plan"
+        assert composer.placeholder == "Plan Mode: 继续补充或修改计划"
+        assert str(status_left.render()) == "计划模式"
+        assert status_left.has_class("-plan")
+        assert str(prompt_glyph.render()) == "#"
+
+        await pilot.press("shift+tab")
+        await pilot.pause(0.05)
+        assert session.runtime_mode == "acceptEdits"
+        assert str(status_left.render()) == "允许编辑"
+        assert status_left.has_class("-acceptEdits")
+        assert str(prompt_glyph.render()) == "+"
+
+        await pilot.press("shift+tab")
+        await pilot.pause(0.05)
+        assert session.runtime_mode == "bypass"
+        assert str(status_left.render()) == "完全访问"
+        assert status_left.has_class("-bypass")
+        assert str(prompt_glyph.render()) == "!"
+
+        await pilot.press("shift+tab")
+        await pilot.pause(0.05)
+        assert session.runtime_mode == "default"
+        assert composer.placeholder == "发送一条消息"
+        assert str(status_left.render()) == "gpt-test (OpenAI)"
+        assert not status_left.has_class("-plan")
+        assert not status_left.has_class("-acceptEdits")
+        assert not status_left.has_class("-bypass")
+        assert str(prompt_glyph.render()) == ">"
 
 
 def _visible_slash_commands(app: LanCherTextualApp) -> list[str]:
@@ -521,6 +570,7 @@ async def test_tui_renders_tool_flow_inside_thinking_trace(
         assert ("● echo_tool(value=hello)", "#73b6ff") in segments
         assert ("✓ 执行成功: hello", "#78d98a") in segments
         assert ("再整理一下", "#a8b9cc") in segments
+
 
 @pytest.mark.asyncio
 async def test_thinking_trace_expands_while_streaming_and_auto_collapses_when_done(

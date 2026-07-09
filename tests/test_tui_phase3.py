@@ -80,8 +80,11 @@ async def test_plan_command_switches_mode_and_updates_placeholder(
         await pilot.pause(0.05)
 
         composer = app.query_one("#composer-input", ComposerTextArea)
+        status_left = app.query_one("#status-left")
         assert session.runtime_mode == "plan"
         assert composer.placeholder == "Plan Mode: 继续补充或修改计划"
+        assert str(status_left.render()) == "计划模式"
+        assert status_left.has_class("-plan")
 
 
 @pytest.mark.asyncio
@@ -151,8 +154,13 @@ async def test_do_command_restores_normal_mode(
         await pilot.pause(0.05)
 
         composer = app.query_one("#composer-input", ComposerTextArea)
+        status_left = app.query_one("#status-left")
         assert session.runtime_mode == "default"
         assert composer.placeholder == "发送一条消息"
+        assert str(status_left.render()) == "gpt-test (OpenAI)"
+        assert not status_left.has_class("-plan")
+        assert not status_left.has_class("-acceptEdits")
+        assert not status_left.has_class("-bypass")
 
 
 @pytest.mark.asyncio
