@@ -4,56 +4,11 @@ import asyncio
 import re
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.permission_engine import validate_plan_command
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
 
 MAX_OUTPUT_CHARS = 12000
 POWERSHELL = "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-PLAN_ALLOWED_PREFIXES = (
-    "get-childitem",
-    "ls",
-    "dir",
-    "pwd",
-    "get-location",
-    "get-content",
-    "type",
-    "cat",
-    "rg",
-    "select-string",
-    "git status",
-    "git diff",
-    "where",
-    "python --version",
-    "python -v",
-    "uv --version",
-)
-PLAN_BLOCKED_PATTERNS = (
-    ">>",
-    ">",
-    "<",
-    "|",
-    "&&",
-    "||",
-    ";",
-    "set-content",
-    "add-content",
-    "out-file",
-    "remove-item",
-    "move-item",
-    "copy-item",
-    "new-item",
-    "rename-item",
-    "start-process",
-    "git checkout",
-    "git commit",
-    "git apply",
-    "git cherry-pick",
-    "npm ",
-    "pnpm ",
-    "yarn ",
-    "pip ",
-    "uv run",
-    "uv sync",
-)
 
 BASH_DESCRIPTION = (
     "执行 shell 命令，是唯一能直接与操作系统交互的工具。"
@@ -63,7 +18,7 @@ BASH_DESCRIPTION = (
     "description 用一句简短的话说明这条命令是在做什么，"
     "command 则是实际要在当前工作目录执行的命令。"
 )
-
+ 
 
 class BashTool:
     @property
@@ -76,7 +31,7 @@ class BashTool:
                 "properties": {
                     "description": {
                         "type": "string",
-                        "description": "简单一小句话，描述这条命令是在做什么。",
+                        "description": "简单一句话，描述这条命令是在做什么。",
                     },
                     "command": {
                         "type": "string",
@@ -89,7 +44,7 @@ class BashTool:
             category="command",
             is_concurrency_safe=False,
             is_system_tool=True,
-            allowed_modes=("normal", "plan"),
+            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
@@ -100,7 +55,7 @@ class BashTool:
             return build_tool_error(
                 summary="执行命令失败",
                 error_code="invalid_arguments",
-                error_message="description 必须是非空字符串，用一句短话说明命令用途。",
+                error_message="description 必须是非空字符串，用一句短语说明命令用途。",
                 tool_name=self.definition.name,
             )
         if not isinstance(command, str) or not command.strip():
@@ -114,7 +69,7 @@ class BashTool:
         description = description.strip()
         command = command.strip()
         if context.mode == "plan":
-            plan_rejection = _validate_plan_command(command)
+            plan_rejection = validate_plan_command(command)
             if plan_rejection is not None:
                 return build_tool_error(
                     summary="Plan 模式禁止该命令",
@@ -254,16 +209,6 @@ def _is_special_non_zero_command(command: str) -> bool:
     if tokens[0] in {"grep", "find", "diff", "rg", "fc", "select-string"}:
         return True
     return len(tokens) >= 2 and tokens[0] == "git" and tokens[1] == "diff"
-
-
-def _validate_plan_command(command: str) -> str | None:
-    lowered = re.sub(r"\s+", " ", command.strip().lower())
-    for pattern in PLAN_BLOCKED_PATTERNS:
-        if pattern in lowered:
-            return "Plan 模式下只允许只读命令，当前命令包含潜在副作用或旁路写入能力。"
-    if any(lowered.startswith(prefix) for prefix in PLAN_ALLOWED_PREFIXES):
-        return None
-    return "Plan 模式下仅允许目录查看、文本搜索、git 状态或差异、解释器版本查询等只读命令。"
 
 
 RunCommandTool = BashTool

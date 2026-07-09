@@ -10,7 +10,7 @@ from lancher_code import prompting as prompting_module
 def _context(
     tmp_path: Path,
     *,
-    runtime_mode: str = "normal",
+    runtime_mode: str = "default",
     previous_runtime_mode: str | None = None,
     plan_mode_turn_count: int = 0,
     pending_plan_entry_kind: str | None = None,

@@ -25,15 +25,15 @@ def test_extract_exact_command_name_can_keep_argument_hint_state() -> None:
 def test_registry_suggests_commands_by_mode() -> None:
     registry = create_default_slash_command_registry()
 
-    assert [command.name for command in registry.suggest("", "normal")] == ["plan", "exit"]
-    assert [command.name for command in registry.suggest("d", "normal")] == []
+    assert [command.name for command in registry.suggest("", "default")] == ["plan", "mode", "exit"]
+    assert [command.name for command in registry.suggest("d", "default")] == []
     assert [command.name for command in registry.suggest("d", "plan")] == ["do"]
 
 
 def test_registry_parses_submission_and_keeps_payload() -> None:
     registry = create_default_slash_command_registry()
 
-    match = registry.parse_submission("/plan 为搜索写计划", "normal")
+    match = registry.parse_submission("/plan 为搜索写计划", "default")
 
     assert match is not None
     assert match.definition.name == "plan"
@@ -43,4 +43,4 @@ def test_registry_parses_submission_and_keeps_payload() -> None:
 def test_registry_ignores_unknown_commands() -> None:
     registry = create_default_slash_command_registry()
 
-    assert registry.parse_submission("/unknown", "normal") is None
+    assert registry.parse_submission("/unknown", "default") is None

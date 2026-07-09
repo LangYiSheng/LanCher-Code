@@ -39,6 +39,7 @@ class SessionController:
         cwd: Path | None = None,
         current_date: date | None = None,
         plan_file_path: Path | None = None,
+        initial_runtime_mode: RuntimeMode = "default",
     ) -> None:
         self._provider_config = provider_config
         self._state = state or SessionState()
@@ -46,6 +47,8 @@ class SessionController:
         self._current_date = current_date or datetime.now().astimezone().date()
         self._plan_file_path = self._resolve_plan_file_path(plan_file_path)
         self._transcript: list[ConversationMessage] = []
+        if initial_runtime_mode != self._state.runtime_mode:
+            self.set_runtime_mode(initial_runtime_mode)
 
     @property
     def state(self) -> SessionState:
@@ -69,16 +72,22 @@ class SessionController:
             return mode
 
         self._state.previous_runtime_mode = previous_mode
-        if previous_mode == "normal" and mode == "plan":
+        if mode == "plan" and previous_mode != "plan":
+            self._state.plan_restore_mode = previous_mode
             self._state.pending_plan_entry_kind = "reentry" if self._plan_file_path.exists() else "initial"
             self._state.pending_plan_exit_notice = False
             self._state.plan_mode_turn_count = 0
-        elif previous_mode == "plan" and mode == "normal":
+        elif previous_mode == "plan" and mode != "plan":
             self._state.pending_plan_exit_notice = self._state.plan_mode_turn_count > 0
             self._state.pending_plan_entry_kind = None
 
         self._state.runtime_mode = mode
         return mode
+
+    def restore_mode_after_plan(self) -> RuntimeMode:
+        restore_mode = self._state.plan_restore_mode
+        self.set_runtime_mode(restore_mode)
+        return restore_mode
 
     def create_user_message(self, text: str) -> SessionMessage:
         message = SessionMessage(

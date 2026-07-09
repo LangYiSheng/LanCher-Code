@@ -4,8 +4,14 @@ from pathlib import Path
 
 from rich.console import Console
 
-from lancher_code.config import load_config, resolve_config_bootstrap_state
+from lancher_code.config import (
+    get_global_permissions_path,
+    get_project_permissions_path,
+    load_config,
+    resolve_config_bootstrap_state,
+)
 from lancher_code.errors import ConfigError
+from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
 from lancher_code.tools import create_default_tool_registry
@@ -37,12 +43,20 @@ async def run_app() -> int:
         config.provider,
         cwd=cwd,
         plan_file_path=Path(config.runtime.plan_file_path),
+        initial_runtime_mode=config.runtime.permission_mode,
     )
     tool_registry = create_default_tool_registry()
+    permission_engine = PermissionEngine(
+        PermissionStorage(
+            project_rules_path=get_project_permissions_path(cwd),
+            user_rules_path=get_global_permissions_path(),
+        )
+    )
     tool_executor = ToolExecutor(
         tool_registry,
         cwd=cwd,
         timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS,
+        permission_engine=permission_engine,
     )
     turn_runner = TurnRunner(
         provider,

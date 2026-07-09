@@ -106,7 +106,7 @@ async def test_plan_mode_slash_menu_only_shows_do_and_exit(
         assert visible == ["do"]
 
         hint_bar = app.query_one(CommandHintBar)
-        assert "返回正常模式" in str(hint_bar.render())
+        assert "回到进入 plan 前的模式" in str(hint_bar.render())
 
 
 @pytest.mark.asyncio
@@ -151,7 +151,7 @@ async def test_do_command_restores_normal_mode(
         await pilot.pause(0.05)
 
         composer = app.query_one("#composer-input", ComposerTextArea)
-        assert session.runtime_mode == "normal"
+        assert session.runtime_mode == "default"
         assert composer.placeholder == "发送一条消息"
 
 
@@ -185,7 +185,7 @@ async def test_first_normal_message_after_do_carries_exit_prompt(
         await _submit_message(app, pilot, "开始实现")
         await pilot.pause(0.1)
 
-        assert session.runtime_mode == "normal"
+        assert session.runtime_mode == "default"
         assert len(provider.requests) == 2
         assert "规划模式已结束" in provider.requests[1].messages[-1].blocks[0].text
 
@@ -215,7 +215,7 @@ async def test_do_command_can_be_submitted_after_slash_menu_accepts_it(
         await pilot.press("enter")
         await pilot.pause(0.05)
 
-        assert session.runtime_mode == "normal"
+        assert session.runtime_mode == "default"
         assert composer.placeholder == "发送一条消息"
 
 

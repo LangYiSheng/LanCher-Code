@@ -77,8 +77,8 @@ def test_session_controller_system_and_environment_prompt_are_split(openai_provi
     assert "当前系统：" in environment_prompt
 
 
-def test_session_controller_tracks_initial_plan_mode_prompt_and_turn_count(openai_provider_config) -> None:
-    controller = SessionController(openai_provider_config)
+def test_session_controller_tracks_initial_plan_mode_prompt_and_turn_count(openai_provider_config, tmp_path: Path) -> None:
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
     controller.set_runtime_mode("plan")
 
     controller.create_user_message("计划一下")
@@ -89,8 +89,8 @@ def test_session_controller_tracks_initial_plan_mode_prompt_and_turn_count(opena
     assert "用户刚进入 Plan Mode" in controller.transcript[0].blocks[0].text
 
 
-def test_session_controller_refreshes_full_plan_prompt_every_five_turns(openai_provider_config) -> None:
-    controller = SessionController(openai_provider_config)
+def test_session_controller_refreshes_full_plan_prompt_every_five_turns(openai_provider_config, tmp_path: Path) -> None:
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
     controller.set_runtime_mode("plan")
 
     for index in range(6):
@@ -100,12 +100,12 @@ def test_session_controller_refreshes_full_plan_prompt_every_five_turns(openai_p
     assert "Plan Mode 已持续多轮" in controller.transcript[-1].blocks[0].text
 
 
-def test_session_controller_injects_exit_prompt_on_first_normal_turn_after_plan_mode(openai_provider_config) -> None:
-    controller = SessionController(openai_provider_config)
+def test_session_controller_injects_exit_prompt_on_first_normal_turn_after_plan_mode(openai_provider_config, tmp_path: Path) -> None:
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
     controller.set_runtime_mode("plan")
     controller.create_user_message("计划一下")
 
-    controller.set_runtime_mode("normal")
+    controller.set_runtime_mode("default")
     assert controller.state.pending_plan_exit_notice is True
 
     controller.create_user_message("开始实现")

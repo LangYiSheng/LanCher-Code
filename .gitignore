@@ -26,6 +26,7 @@ venv/
 .vscode/
 .codex/
 .agents/
+.lancher/
 
 # 本地运行配置
 lancher.yaml

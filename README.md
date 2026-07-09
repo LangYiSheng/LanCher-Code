@@ -6,25 +6,23 @@
 /_____/\__,_/_/ /_/\____/_/ /_/\___/_/      \____/\____/\__,_/\___/
 ```
 
-> 基于 Python 的终端 AI 编程助手，目标是不只“能聊天”，而是真的能陪你一起理解代码、整理上下文、读改文件、执行命令，把想法推进成结果。
+> 基于 Python 的终端 AI 编程助手。目标不是只会聊天，而是真能在终端里和你一起读代码、查文件、改文件、跑命令、写计划，并且把危险操作拦在权限系统里。
 
-## 目标
+## 当前能力
 
-LanCher Code 想做的是一位常驻终端的 AI 搭子。
+- 终端内多轮对话，支持流式输出。
+- 支持 `OpenAI` 与 `Claude` 两类协议后端。
+- 内置工具：`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`bash`、`write_plan_file`。
+- 支持 ReAct 式多轮工具循环、工具轨迹展示、Token 用量展示。
+- 支持 `Plan Mode`、`/do` 恢复、`/mode` 模式切换。
+- 内置五层权限系统：
+  - 危险命令黑名单
+  - 项目路径沙箱
+  - 用户级 / 项目级 / 会话级规则
+  - 四档权限模式
+  - 人在回路确认弹窗
 
-它应该能用自然语言和你协作，理解当前工作目录，结合上下文连续对话，并在需要时读取文件、搜索代码、修改内容、执行命令，帮助你把“想法”推进成“结果”。
-
-## 功能
-
-- 终端内交互式对话界面，开箱即可进入持续多轮会话
-- 支持流式输出，回复过程可以实时看到
-- 支持会话上下文记忆，在同一次运行中连续追踪对话
-- 支持通过全局 YAML 配置切换模型提供商
-- 已接入 `OpenAI` 与 `Claude` 两类协议后端
-- 内置基础工具链：`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`bash`
-- 支持显示思考过程状态与工具调用轨迹，便于观察代理行为
-
-## 使用方式
+## 安装与启动
 
 推荐使用 `uv`：
 
@@ -33,63 +31,119 @@ uv sync
 uv run lancher-code
 ```
 
-程序会优先读取用户目录下的全局配置文件：
+也可以直接运行：
+
+```bash
+python -m lancher_code
+```
+
+## 配置文件
+
+程序优先读取全局配置：
 
 ```text
 ~/.lancher/lancher.yaml
 ```
 
-首次启动如果没有这个配置文件，会自动进入一个 Textual 表单界面，要求你填写：
+首次启动如果不存在该文件，会自动进入 Textual 引导界面，要求填写：
 
 - `protocol`
 - `model`
 - `base_url`
 - `api_key`
 
-保存成功后会自动写入 `~/.lancher/lancher.yaml`，随后直接进入聊天界面。
-
-也可以直接用模块方式运行：
-
-```bash
-python -m lancher_code
-```
-
-进入界面后，直接输入问题即可开始对话。
-
-输入 `/` 可以唤出命令菜单，查看 `/plan`、`/do`、`/exit` 等会话命令。
-
-输入 `/exit`，或使用 `Ctrl+C` / `Ctrl+D` 可以退出。
-
-## 配置目录说明
-
-LanCher Code 现在区分两类 `.lancher` 目录：
-
-- `~/.lancher`
-  用于全局配置、未来的设置、聊天记录、全局 skills / MCP 等
-- `./.lancher`
-  用于当前项目私有内容，例如 `plan.md`、未来项目级 skills / MCP 等
-
-当前版本里：
-
-- 主配置文件位于 `~/.lancher/lancher.yaml`
-- Plan Mode 计划文件默认位于 `./.lancher/plan.md`
-
-项目根目录下旧的 `lancher.yaml` 已不再作为启动配置入口。
-
-## 示例配置
-
-仓库里仍然保留了一个示例文件：
+仓库中保留了一个结构示例：
 
 ```text
 lancher.example.yaml
 ```
 
-它只是结构参考，不再需要复制到项目根目录使用。
+### 运行时配置
 
-## 当前进度
+`runtime.permission_mode` 支持四档：
 
-- 核心终端对话链路已经跑通
-- Provider 抽象、会话管理、流式响应、工具循环、TUI 界面都已落地
-- 首次启动全局配置引导已接入
-- 基础代码工具已经可用，程序已经具备“读、查、改、跑”的第一版能力
-- 项目仍处于早期阶段，重点在把核心体验做稳、把代理边界做清楚
+- `default`
+  读工具自动放行；文件写入和命令执行需要确认。
+- `plan`
+  权限语义与 `default` 相同，但额外受 Plan Mode prompt 与工具集限制。
+- `acceptEdits`
+  读工具和文件写工具自动放行；命令执行需要确认。
+- `bypass`
+  默认全部放行，但显式 `deny` 规则和危险命令黑名单仍然生效。
+
+### 权限规则文件
+
+LanCher Code 现在区分三层权限规则：
+
+- 会话级：仅内存生效，不落盘
+- 项目级：`./.lancher/permissions.yaml`
+- 用户级：`~/.lancher/permissions.yaml`
+
+优先级：
+
+```text
+session > project > user
+```
+
+规则格式：
+
+```yaml
+rules:
+  - match: "Bash(git *)"
+    result: allow
+  - match: "WriteFile(.env)"
+    result: deny
+```
+
+说明：
+
+- `Bash(...)` 匹配规范化后的命令文本。
+- `ReadFile/WriteFile/EditFile(...)` 匹配项目相对路径。
+- `Glob(...)` 匹配 glob 模式本身。
+- `Grep(...)` 匹配搜索范围路径。
+
+## 交互命令
+
+- `/plan [任务]`
+  进入 Plan Mode；带参数时立即把参数作为本轮用户请求提交。
+- `/do`
+  退出 Plan Mode，恢复到进入 `plan` 前的最近一个非 `plan` 模式。
+- `/mode <default|plan|acceptEdits|bypass>`
+  直接切换权限模式。
+- `/exit`
+  退出当前会话。
+
+## 权限确认
+
+当规则和模式都没有明确放行时，TUI 会弹出确认框：
+
+- 命令执行支持：
+  - 允许执行本次命令
+  - 本会话永久放行
+  - 本项目永久放行
+  - 拒绝执行
+- 文件编辑支持：
+  - 允许本次编辑
+  - 拒绝本次编辑
+
+如果用户拒绝，Agent Loop 不会被打断；模型会收到结构化错误结果，再尝试调整策略。
+
+## `.lancher` 目录说明
+
+- `~/.lancher`
+  存放全局配置、用户级权限规则，以及后续全局能力。
+- `./.lancher`
+  存放当前项目私有内容，例如 `plan.md`、项目级权限规则等。
+
+当前默认文件：
+
+- 全局配置：`~/.lancher/lancher.yaml`
+- 用户级权限规则：`~/.lancher/permissions.yaml`
+- 项目级权限规则：`./.lancher/permissions.yaml`
+- Plan 文件：`./.lancher/plan.md`
+
+## 当前状态
+
+- Provider、会话层、工具系统、TurnRunner、TUI 已全部打通。
+- 五层权限系统已落地，并覆盖命令执行与文件操作。
+- 全量测试当前通过。

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from lancher_code.tools.builtin import (
-    BashTool,
-    EditFileTool,
-    GlobTool,
-    GrepTool,
-    ReadFileTool,
-    WriteFileTool,
-    WritePlanFileTool,
-)
 from lancher_code.tools.core.registry import ToolRegistry
 
 
 def create_default_tool_registry() -> ToolRegistry:
+    from lancher_code.tools.builtin import (
+        BashTool,
+        EditFileTool,
+        GlobTool,
+        GrepTool,
+        ReadFileTool,
+        WriteFileTool,
+        WritePlanFileTool,
+    )
+
     registry = ToolRegistry()
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())

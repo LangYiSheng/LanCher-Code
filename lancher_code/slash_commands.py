@@ -11,8 +11,8 @@ class SlashCommandDefinition:
     description: str
     usage: str
     argument_hint: str = ""
-    visible_modes: tuple[RuntimeMode, ...] = ("normal", "plan")
-    executable_modes: tuple[RuntimeMode, ...] = ("normal", "plan")
+    visible_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
+    executable_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
     insert_trailing_space: bool = False
 
     @property
@@ -114,18 +114,29 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
             description="继续补充或修改计划",
             usage="/plan [任务]",
             argument_hint="任务描述",
-            visible_modes=("normal",),
-            executable_modes=("normal", "plan"),
+            visible_modes=("default", "acceptEdits", "bypass"),
+            executable_modes=("default", "plan", "acceptEdits", "bypass"),
             insert_trailing_space=True,
         )
     )
     registry.register(
         SlashCommandDefinition(
             name="do",
-            description="返回正常模式",
+            description="回到进入 plan 前的模式",
             usage="/do",
             visible_modes=("plan",),
-            executable_modes=("normal", "plan"),
+            executable_modes=("default", "plan", "acceptEdits", "bypass"),
+        )
+    )
+    registry.register(
+        SlashCommandDefinition(
+            name="mode",
+            description="切换权限模式",
+            usage="/mode <default|plan|acceptEdits|bypass>",
+            argument_hint="default | plan | acceptEdits | bypass",
+            visible_modes=("default", "plan", "acceptEdits", "bypass"),
+            executable_modes=("default", "plan", "acceptEdits", "bypass"),
+            insert_trailing_space=True,
         )
     )
     registry.register(
@@ -133,8 +144,8 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
             name="exit",
             description="退出当前会话",
             usage="/exit",
-            visible_modes=("normal", "plan"),
-            executable_modes=("normal", "plan"),
+            visible_modes=("default", "plan", "acceptEdits", "bypass"),
+            executable_modes=("default", "plan", "acceptEdits", "bypass"),
         )
     )
     return registry

@@ -12,11 +12,13 @@ from lancher_code.models import (
     ProviderConfig,
     ProviderProtocol,
     RuntimeConfig,
+    RuntimeMode,
     ThinkingConfig,
     UIConfig,
 )
 
 SUPPORTED_PROTOCOLS: tuple[ProviderProtocol, ...] = ("openai", "claude")
+SUPPORTED_RUNTIME_MODES: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -104,12 +106,14 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         "runtime.unknown_tool_streak_limit",
     )
     plan_file_path = raw_value.get("plan_file_path", "./.lancher/plan.md")
+    permission_mode = _read_runtime_mode(raw_value.get("permission_mode", "default"), "runtime.permission_mode")
     if not isinstance(plan_file_path, str) or not plan_file_path.strip():
         raise ConfigError("runtime.plan_file_path 必须是非空字符串。")
     return RuntimeConfig(
         tool_loop_limit=tool_loop_limit,
         unknown_tool_streak_limit=unknown_tool_streak_limit,
         plan_file_path=plan_file_path.strip(),
+        permission_mode=permission_mode,
     )
 
 
@@ -145,6 +149,16 @@ def _read_positive_int(raw_value: Any, key: str) -> int:
     if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value <= 0:
         raise ConfigError(f"{key} 必须是正整数。")
     return raw_value
+
+
+def _read_runtime_mode(raw_value: Any, key: str) -> RuntimeMode:
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        raise ConfigError(f"{key} 必须是非空字符串。")
+    normalized = raw_value.strip()
+    if normalized not in SUPPORTED_RUNTIME_MODES:
+        supported = ", ".join(SUPPORTED_RUNTIME_MODES)
+        raise ConfigError(f"{key} 必须是以下值之一: {supported}")
+    return normalized
 
 
 def _expand_env(value: str) -> str:

@@ -4,14 +4,12 @@ from pathlib import Path
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import relative_display_path, resolve_path
+from lancher_code.tools.core.common import relative_display_path, resolve_path_in_root
 
 EDIT_FILE_DESCRIPTION = (
     "在文件中按原文做唯一匹配替换，适合局部修改代码或配置。"
     "应该在已经读过目标文件、并且确认文件没有被外部改动后使用。"
     "不要拿它做整文件重写；整文件改写请使用 write_file。"
-    "old_text 必须在文件中恰好出现一次：出现 0 次会报找不到，出现多次会报不唯一。"
-    "返回给模型的 content 会说明命中次数和修改位置；metadata 会附带 UI 可直接展示的 +/- 行号\\t代码 预览。"
 )
 
 
@@ -42,7 +40,7 @@ class EditFileTool:
             },
             category="write",
             is_concurrency_safe=False,
-            allowed_modes=("normal",),
+            allowed_modes=("default", "acceptEdits", "bypass"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
@@ -64,7 +62,15 @@ class EditFileTool:
                 tool_name=self.definition.name,
             )
 
-        path = resolve_path(context.cwd, raw_path)
+        try:
+            path = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+        except ValueError as exc:
+            return build_tool_error(
+                summary="改文件失败",
+                error_code="path_outside_project",
+                error_message=str(exc),
+                tool_name=self.definition.name,
+            )
         if not path.exists():
             return build_tool_error(
                 summary=f"文件不存在: {path}",
@@ -121,7 +127,7 @@ class EditFileTool:
         return build_tool_success(
             summary=f"已修改文件 {path.name}",
             content=(
-                f"已修改文件: {path}\n"
+                f"已修改文件 {path}\n"
                 f"命中次数: {match_count}\n"
                 f"起始行号: {line_start}"
             ),

@@ -131,6 +131,28 @@ def test_load_config_reads_runtime_tool_loop_limit(tmp_path) -> None:
     assert config.runtime.tool_loop_limit == 123
 
 
+def test_load_config_reads_runtime_permission_mode(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            provider:
+              protocol: openai
+              model: gpt-4.1-mini
+              base_url: https://api.openai.com/v1
+              api_key: test-key
+            runtime:
+              permission_mode: acceptEdits
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+
+    assert config.runtime.permission_mode == "acceptEdits"
+
+
 def test_load_config_rejects_invalid_runtime_tool_loop_limit(tmp_path) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(

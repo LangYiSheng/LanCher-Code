@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import relative_display_path, resolve_path
+from lancher_code.tools.core.common import relative_display_path, resolve_path_in_root
 
 DEFAULT_MAX_INLINE_LINES = 400
 MAX_CHUNK_LINES = 400
 
 READ_FILE_DESCRIPTION = (
     "读取文本文件内容。适合在准备修改文件、理解代码、核对配置、查看命令输出落盘结果时使用。"
-    "如果文件很大，请使用 offset 和 limit 按行分段读取；不要在大文件上省略分页参数。"
-    "不要用它搜索整个项目，也不要用它覆盖写文件，那分别应使用 glob/grep 或 write_file/edit_file。"
-    "path 可以是相对路径或绝对路径；offset 是从 0 开始的行偏移；limit 是本次最多返回多少行。"
-    "返回给模型的 content 会带绝对路径、总行数以及“行号\\t内容”的正文；metadata 里会附带路径、行范围和截断信息供 UI 使用。"
+    "如果文件很大，请使用 offset 和 limit 按行分页读取。"
+    "不要用它搜索整个项目，也不要用它覆盖写文件；那些分别应该使用 glob/grep 或 write_file/edit_file。"
 )
 
 
@@ -40,7 +36,7 @@ class ReadFileTool:
                         "type": "integer",
                         "minimum": 1,
                         "maximum": MAX_CHUNK_LINES,
-                        "description": f"可选。最多返回多少行。大文件必须显式提供，单次上限 {MAX_CHUNK_LINES} 行。",
+                        "description": f"可选。最多返回多少行，单次上限 {MAX_CHUNK_LINES} 行。",
                     },
                 },
                 "required": ["path"],
@@ -48,6 +44,7 @@ class ReadFileTool:
             },
             category="read",
             is_concurrency_safe=True,
+            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
@@ -77,7 +74,15 @@ class ReadFileTool:
                 tool_name=self.definition.name,
             )
 
-        path = resolve_path(context.cwd, raw_path)
+        try:
+            path = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+        except ValueError as exc:
+            return build_tool_error(
+                summary="读取文件失败",
+                error_code="path_outside_project",
+                error_message=str(exc),
+                tool_name=self.definition.name,
+            )
         if not path.exists():
             return build_tool_error(
                 summary=f"文件不存在: {path}",
@@ -114,7 +119,7 @@ class ReadFileTool:
         total_lines = len(lines)
         if total_lines > DEFAULT_MAX_INLINE_LINES and limit is None:
             return build_tool_error(
-                summary="大文件需要分段读取",
+                summary="大文件需要分页读取",
                 error_code="large_file_requires_paging",
                 error_message=(
                     f"文件共有 {total_lines} 行，超过单次直接读取上限。"
@@ -141,11 +146,7 @@ class ReadFileTool:
             is_complete=is_complete,
         )
 
-        if not selected_lines:
-            body = "(该范围内没有内容)"
-        else:
-            body = numbered
-
+        body = numbered if selected_lines else "(该范围内没有内容)"
         content = (
             f"文件: {path}\n"
             f"总行数: {total_lines}\n"

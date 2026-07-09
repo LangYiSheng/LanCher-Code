@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import uuid4
 
 from lancher_code.errors import LanCherError, ToolCallParseError
-from lancher_code.models import CancellationToken, MessageUsage, RuntimeMode, ToolCall, ToolExecutionResult, TurnEvent
+from lancher_code.models import (
+    CancellationToken,
+    MessageUsage,
+    PermissionRequest,
+    PermissionResolution,
+    RuntimeMode,
+    ToolCall,
+    ToolExecutionResult,
+    TurnEvent,
+)
 from lancher_code.providers.base import ChatProvider
 from lancher_code.session import SessionController
 from lancher_code.tool_call_parser import ToolCallAssembler
@@ -23,6 +32,7 @@ class _ActiveTurn:
     task: asyncio.Task[None]
     queue: asyncio.Queue[TurnEvent | object]
     cancellation_token: CancellationToken
+    pending_permissions: dict[str, asyncio.Future[PermissionResolution]] = field(default_factory=dict)
 
 
 class _StreamCollector:
@@ -58,21 +68,42 @@ class TurnRunner:
 
     def set_mode(self, mode: RuntimeMode) -> TurnEvent:
         self._session.set_runtime_mode(mode)
-        label = "Plan Mode 已激活" if mode == "plan" else "已恢复 Normal Mode"
+        label = _mode_status_label(mode)
         return TurnEvent(kind="mode_changed", mode=mode, progress_message=label)
+
+    def restore_mode_after_plan(self) -> TurnEvent:
+        mode = self._session.restore_mode_after_plan()
+        return TurnEvent(kind="mode_changed", mode=mode, progress_message=_mode_status_label(mode))
+
+    def resolve_permission_request(self, resolution: PermissionResolution) -> bool:
+        active_turn = self._active_turn
+        if active_turn is None:
+            return False
+        future = active_turn.pending_permissions.get(resolution.request_id)
+        if future is None or future.done():
+            return False
+        future.set_result(resolution)
+        return True
 
     def cancel_active_turn(self) -> bool:
         if self._active_turn is None:
             return False
         self._active_turn.cancellation_token.cancel()
         self._active_turn.task.cancel()
+        for future in self._active_turn.pending_permissions.values():
+            if not future.done():
+                future.cancel()
+        self._active_turn.pending_permissions.clear()
         return True
 
     async def run_user_turn(self, text: str) -> AsyncIterator[TurnEvent]:
         queue: asyncio.Queue[TurnEvent | object] = asyncio.Queue()
         cancellation_token = CancellationToken()
-        task = asyncio.create_task(self._run_turn(text, queue, cancellation_token))
-        active_turn = _ActiveTurn(task=task, queue=queue, cancellation_token=cancellation_token)
+        active_turn = _ActiveTurn(
+            task=asyncio.create_task(self._run_turn(text, queue, cancellation_token)),
+            queue=queue,
+            cancellation_token=cancellation_token,
+        )
         self._active_turn = active_turn
 
         try:
@@ -85,7 +116,7 @@ class TurnRunner:
         finally:
             if self._active_turn is active_turn:
                 self._active_turn = None
-            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.gather(active_turn.task, return_exceptions=True)
 
     async def _run_turn(
         self,
@@ -235,6 +266,7 @@ class TurnRunner:
                         mode=self._session.runtime_mode,
                         plan_file_path=self._session.plan_file_path,
                         cancellation_token=cancellation_token,
+                        permission_resolver=self._request_permission,
                     )
                     self._session.append_tool_results(results)
                     self._session.append_trace_tool_results(assistant_message.id, results)
@@ -295,7 +327,27 @@ class TurnRunner:
                 message = self._session.fail_message(assistant_message.id, error_text)
                 await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
         finally:
+            if self._active_turn is not None:
+                self._active_turn.pending_permissions.clear()
             await queue.put(_QUEUE_END)
+
+    async def _request_permission(self, permission_request: PermissionRequest) -> PermissionResolution:
+        active_turn = self._active_turn
+        if active_turn is None:
+            return PermissionResolution(request_id=permission_request.request_id, outcome="deny")
+
+        future: asyncio.Future[PermissionResolution] = asyncio.get_running_loop().create_future()
+        active_turn.pending_permissions[permission_request.request_id] = future
+        await self._emit(active_turn.queue, TurnEvent(kind="permission_request_created", permission_request=permission_request))
+        try:
+            resolution = await future
+            await self._emit(
+                active_turn.queue,
+                TurnEvent(kind="permission_request_resolved", permission_resolution=resolution),
+            )
+            return resolution
+        finally:
+            active_turn.pending_permissions.pop(permission_request.request_id, None)
 
     @staticmethod
     async def _emit(queue: asyncio.Queue[TurnEvent | object], event: TurnEvent) -> None:
@@ -335,3 +387,13 @@ class TurnRunner:
     def _raise_if_cancelled(cancellation_token: CancellationToken) -> None:
         if cancellation_token.is_cancelled:
             raise asyncio.CancelledError
+
+
+def _mode_status_label(mode: RuntimeMode) -> str:
+    labels = {
+        "default": "已切换到 Default 模式",
+        "plan": "已切换到 Plan 模式",
+        "acceptEdits": "已切换到 AcceptEdits 模式",
+        "bypass": "已切换到 Bypass 模式",
+    }
+    return labels[mode]

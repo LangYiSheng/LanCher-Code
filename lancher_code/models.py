@@ -10,8 +10,13 @@ ProviderProtocol = Literal["openai", "claude"]
 MessageRole = Literal["system", "user", "assistant"]
 ConversationRole = Literal["system", "user", "assistant", "tool"]
 MessageStatus = Literal["streaming", "complete", "error", "cancelled"]
-RuntimeMode = Literal["normal", "plan"]
+RuntimeMode = Literal["default", "plan", "acceptEdits", "bypass"]
 PlanModeEntryKind = Literal["initial", "reentry"]
+RuleScope = Literal["session", "project", "user"]
+PermissionDecision = Literal["allow", "deny", "ask"]
+PermissionRuleResult = Literal["allow", "deny"]
+PermissionRequestKind = Literal["command", "file_edit"]
+PermissionResolutionOutcome = Literal["allow_once", "allow_session", "allow_project", "deny"]
 StreamEventKind = Literal[
     "text_delta",
     "thinking_delta",
@@ -29,6 +34,8 @@ TurnEventKind = Literal[
     "usage_updated",
     "progress_updated",
     "mode_changed",
+    "permission_request_created",
+    "permission_request_resolved",
     "turn_cancelled",
     "assistant_message_completed",
     "turn_failed",
@@ -55,6 +62,7 @@ class RuntimeConfig:
     tool_loop_limit: int = 50
     unknown_tool_streak_limit: int = 3
     plan_file_path: str = "./.lancher/plan.md"
+    permission_mode: RuntimeMode = "default"
 
 
 @dataclass(slots=True)
@@ -90,7 +98,7 @@ class ToolDefinition:
     is_concurrency_safe: bool = True
     is_system_tool: bool = False
     should_defer: bool = False
-    allowed_modes: tuple[RuntimeMode, ...] = ("normal", "plan")
+    allowed_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
 
     def __init__(
         self,
@@ -101,7 +109,7 @@ class ToolDefinition:
         is_concurrency_safe: bool = True,
         is_system_tool: bool = False,
         should_defer: bool = False,
-        allowed_modes: tuple[RuntimeMode, ...] = ("normal", "plan"),
+        allowed_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass"),
         input_schema: dict[str, object] | None = None,
     ) -> None:
         self.name = name
@@ -137,16 +145,52 @@ class CancellationToken:
 class ToolContext:
     cwd: Path
     timeout_seconds: float
-    mode: RuntimeMode = "normal"
+    mode: RuntimeMode = "default"
+    project_root: Path | None = None
     plan_file_path: Path | None = None
     cancellation_token: CancellationToken | None = None
     file_state_cache: "FileStateCache | None" = None
 
     def __post_init__(self) -> None:
+        if self.project_root is None:
+            self.project_root = self.cwd.resolve()
         if self.file_state_cache is None:
             from lancher_code.tools.core.file_state_cache import FileStateCache
 
             self.file_state_cache = FileStateCache()
+
+
+@dataclass(slots=True)
+class PermissionRule:
+    match: str
+    result: PermissionRuleResult
+    scope: RuleScope
+
+
+@dataclass(slots=True)
+class PermissionRequest:
+    request_id: str
+    call_id: str
+    tool_name: str
+    tool_label: str
+    kind: PermissionRequestKind
+    mode: RuntimeMode
+    title: str
+    prompt: str
+    details: str
+    command: str | None = None
+    description: str | None = None
+    file_paths: list[str] = field(default_factory=list)
+    preview_lines: list[dict[str, str]] = field(default_factory=list)
+    session_rule: str | None = None
+    project_rule: str | None = None
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class PermissionResolution:
+    request_id: str
+    outcome: PermissionResolutionOutcome
 
 
 @dataclass(slots=True)
@@ -284,8 +328,9 @@ class SessionMessage:
 @dataclass(slots=True)
 class SessionState:
     messages: list[SessionMessage] = field(default_factory=list)
-    runtime_mode: RuntimeMode = "normal"
+    runtime_mode: RuntimeMode = "default"
     previous_runtime_mode: RuntimeMode | None = None
+    plan_restore_mode: RuntimeMode = "default"
     plan_mode_turn_count: int = 0
     pending_plan_exit_notice: bool = False
     pending_plan_entry_kind: PlanModeEntryKind | None = None
@@ -323,7 +368,7 @@ class ChatRequest:
     tools: list[ToolDefinition] = field(default_factory=list)
     allow_tool_calls: bool = True
     thinking: ThinkingConfig | None = None
-    mode: RuntimeMode = "normal"
+    mode: RuntimeMode = "default"
     cancellation_token: CancellationToken | None = None
 
 
@@ -346,3 +391,5 @@ class TurnEvent:
     tool_call: ToolCall | None = None
     tool_result: ToolExecutionResult | None = None
     mode: RuntimeMode | None = None
+    permission_request: PermissionRequest | None = None
+    permission_resolution: PermissionResolution | None = None

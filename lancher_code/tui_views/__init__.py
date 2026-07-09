@@ -14,6 +14,7 @@ from lancher_code.tui_views.composer import (
     SlashMenuNavigateRequested,
 )
 from lancher_code.tui_views.message import BannerWidget, MessageWidget, ThinkingTraceWidget, _format_trace_entries
+from lancher_code.tui_views.permission import PermissionRequestScreen
 
 __all__ = [
     "BannerWidget",
@@ -25,6 +26,7 @@ __all__ = [
     "ConfigBootstrapTUI",
     "LanCherTextualApp",
     "MessageWidget",
+    "PermissionRequestScreen",
     "SlashCommandChosen",
     "SlashCommandMenu",
     "SlashCommandMenuItem",

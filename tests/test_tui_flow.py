@@ -146,7 +146,7 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
 
         menu = app.query_one(SlashCommandMenu)
         assert menu.display
-        assert _visible_slash_commands(app) == ["plan", "exit"]
+        assert _visible_slash_commands(app) == ["plan", "mode", "exit"]
 
         composer.text = "/p"
         await pilot.pause(0.05)

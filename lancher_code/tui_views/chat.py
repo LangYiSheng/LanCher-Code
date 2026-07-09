@@ -27,13 +27,14 @@ from lancher_code.tui_views.composer import (
     SlashMenuNavigateRequested,
 )
 from lancher_code.tui_views.message import BannerWidget, MessageWidget
+from lancher_code.tui_views.permission import PermissionRequestScreen
 from lancher_code.turn_runner import TurnRunner
 
 MIN_COMPOSER_LINES = 1
 MAX_COMPOSER_LINES = 6
 COMPOSER_FRAME_HEIGHT = 2
 DEFAULT_COMMAND_HINT = ""
-NORMAL_PLACEHOLDER = "发送一条消息"
+DEFAULT_PLACEHOLDER = "发送一条消息"
 PLAN_PLACEHOLDER = "Plan Mode: 继续补充或修改计划"
 
 
@@ -254,7 +255,7 @@ class LanCherTextualApp(App[int]):
             with Vertical(id="composer-region"):
                 yield SlashCommandMenu(self._slash_command_registry.list_all())
                 with Horizontal(id="composer"):
-                    yield Static("✦", id="prompt-glyph")
+                    yield Static(">", id="prompt-glyph")
                     yield ComposerTextArea(
                         "",
                         soft_wrap=True,
@@ -314,9 +315,7 @@ class LanCherTextualApp(App[int]):
         text = event.value.strip()
         event.composer.clear()
         self._refresh_command_ui()
-        if not text:
-            return
-        if self._is_streaming:
+        if not text or self._is_streaming:
             return
 
         slash_match = self._slash_command_registry.parse_submission(
@@ -359,7 +358,7 @@ class LanCherTextualApp(App[int]):
     def _refresh_status_bar(self) -> None:
         usage = self._session_controller.total_usage()
         api_type = "OpenAI" if self._provider_config.protocol == "openai" else "Claude"
-        mode_label = "PLAN" if self._session_controller.runtime_mode == "plan" else "NORMAL"
+        mode_label = self._session_controller.runtime_mode.upper()
         self.query_one("#status-left", Static).update(f"{self._provider_config.model} ({api_type})")
         center_text = self._status_hint or ("Busy" if self._is_streaming else "Ready")
         self.query_one("#status-center", Static).update(f"{center_text} [{mode_label}]")
@@ -388,6 +387,10 @@ class LanCherTextualApp(App[int]):
             await self._mount_message_widget(event.message)
         elif event.message is not None:
             self._sync_message_widget(event.message.id)
+        if event.kind == "permission_request_created" and event.permission_request is not None:
+            resolution = await self.push_screen_wait(PermissionRequestScreen(event.permission_request))
+            if resolution is not None:
+                self._turn_runner.resolve_permission_request(resolution)
         self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
         self._refresh_status_bar()
 
@@ -409,6 +412,12 @@ class LanCherTextualApp(App[int]):
         if event.kind == "assistant_message_completed":
             self._status_hint = "Ready"
             return
+        if event.kind == "permission_request_created":
+            self._status_hint = "Waiting for permission"
+            return
+        if event.kind == "permission_request_resolved":
+            self._status_hint = "Busy"
+            return
         if event.kind in {"assistant_text_delta", "tool_call_started", "tool_result_received", "usage_updated"}:
             self._status_hint = "Busy"
 
@@ -417,7 +426,7 @@ class LanCherTextualApp(App[int]):
         if self._session_controller.runtime_mode == "plan":
             composer.placeholder = PLAN_PLACEHOLDER
             return
-        composer.placeholder = NORMAL_PLACEHOLDER
+        composer.placeholder = DEFAULT_PLACEHOLDER
 
     def _refresh_command_ui(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
@@ -511,7 +520,7 @@ class LanCherTextualApp(App[int]):
             return None
 
         if command_name == "do":
-            self._apply_turn_event(self._turn_runner.set_mode("normal"))
+            self._apply_turn_event(self._turn_runner.restore_mode_after_plan())
             self._refresh_status_bar()
             return None
 
@@ -522,6 +531,16 @@ class LanCherTextualApp(App[int]):
             if not payload:
                 return None
             return payload
+
+        if command_name == "mode":
+            requested_mode = arguments_text.strip()
+            if requested_mode not in {"default", "plan", "acceptEdits", "bypass"}:
+                self._status_hint = "Unknown mode"
+                self._refresh_status_bar()
+                return None
+            self._apply_turn_event(self._turn_runner.set_mode(requested_mode))  # type: ignore[arg-type]
+            self._refresh_status_bar()
+            return None
 
         return None
 

@@ -1,5 +1,5 @@
 provider:
-  # 协议可选 openai anthropic
+  # 可选: openai | claude
   protocol: openai
   model: gpt-4.1-mini
   base_url: https://api.openai.com/v1
@@ -16,3 +16,6 @@ ui:
 
 runtime:
   tool_loop_limit: 50
+  unknown_tool_streak_limit: 3
+  plan_file_path: ./.lancher/plan.md
+  permission_mode: default

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import relative_display_path
+from lancher_code.tools.core.common import ensure_path_in_root, relative_display_path
 
 WRITE_PLAN_FILE_DESCRIPTION = (
     "覆盖写入计划文件。"
@@ -51,7 +51,16 @@ class WritePlanFileTool:
                 tool_name=self.definition.name,
             )
 
-        path = context.plan_file_path.resolve()
+        try:
+            path = ensure_path_in_root(context.plan_file_path, context.project_root or context.cwd)
+        except ValueError as exc:
+            return build_tool_error(
+                summary="写入计划文件失败",
+                error_code="path_outside_project",
+                error_message=str(exc),
+                tool_name=self.definition.name,
+            )
+
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
@@ -66,7 +75,7 @@ class WritePlanFileTool:
         byte_count = len(content.encode("utf-8"))
         return build_tool_success(
             summary=f"已写入计划文件 {path.name}",
-            content=f"已写入计划文件: {path}\n字节数: {byte_count}",
+            content=f"已写入计划文件 {path}\n字节数: {byte_count}",
             metadata={
                 "path": str(path),
                 "relative_path": relative_display_path(path, context.cwd),

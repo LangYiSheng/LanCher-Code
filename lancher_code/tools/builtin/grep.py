@@ -11,17 +11,15 @@ from lancher_code.tools.core.common import (
     UI_PATH_LIMIT,
     iter_files,
     relative_display_path,
-    resolve_path,
+    resolve_path_in_root,
 )
 
 MAX_LINE_CHARS = 300
 
 GREP_DESCRIPTION = (
     "在代码内容里按正则逐文件逐行搜索。"
-    "适合查找符号定义、关键字、报错文本、配置项、日志格式或需要正则表达式匹配的内容。"
-    "不要用它列目录，也不要用它读取整文件上下文；那些分别应使用 glob 和 read_file。"
-    "pattern 是正则表达式；可选 path 限制搜索范围；可选 include 用文件名 glob 过滤，例如 **/*.py。"
-    "工具会自动跳过二进制文件、无法解码的内容和常见缓存目录。content 会返回 file:line:content 的详细命中列表，metadata 会保留前 200 条供 UI 展示。"
+    "适合查找符号定义、关键词、报错文本、配置项。"
+    "不要用它列目录，也不要用它读取整文件上下文；那些分别应该使用 glob 和 read_file。"
 )
 
 
@@ -52,6 +50,7 @@ class GrepTool:
             },
             category="read",
             is_concurrency_safe=True,
+            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
@@ -73,9 +72,17 @@ class GrepTool:
                 tool_name=self.definition.name,
             )
 
-        search_root = context.cwd
+        search_root = context.project_root or context.cwd
         if isinstance(raw_path, str) and raw_path.strip():
-            search_root = resolve_path(context.cwd, raw_path)
+            try:
+                search_root = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+            except ValueError as exc:
+                return build_tool_error(
+                    summary="搜索代码失败",
+                    error_code="path_outside_project",
+                    error_message=str(exc),
+                    tool_name=self.definition.name,
+                )
         if not search_root.exists():
             return build_tool_error(
                 summary="搜索代码失败",

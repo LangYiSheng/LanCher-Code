@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
 from lancher_code.tools.core.common import (
@@ -10,15 +8,13 @@ from lancher_code.tools.core.common import (
     UI_PATH_LIMIT,
     is_skipped_path,
     relative_display_path,
-    resolve_path,
+    resolve_path_in_root,
 )
 
 GLOB_DESCRIPTION = (
     "按 glob 模式查找文件，支持 ** 递归匹配。"
-    "适合在不知道准确文件名时先缩小范围，比如查找某类源码、配置、测试文件。"
-    "不要用它搜索文件内容；搜索内容应使用 grep。"
-    "pattern 是 glob 模式，可选 path 用于限制搜索根目录；会自动跳过 .git、.venv、node_modules、__pycache__ 等目录。"
-    "结果按文件修改时间倒序排列，越新的文件越靠前。content 会返回详细路径列表给模型，metadata 会保留前 200 条供 UI 展示。"
+    "适合在不知道准确文件名时先缩小范围。"
+    "不要用它搜索文件内容；搜索内容应该使用 grep。"
 )
 
 
@@ -45,6 +41,7 @@ class GlobTool:
             },
             category="read",
             is_concurrency_safe=True,
+            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
@@ -58,9 +55,17 @@ class GlobTool:
                 tool_name=self.definition.name,
             )
 
-        search_root = context.cwd
+        search_root = context.project_root or context.cwd
         if isinstance(raw_path, str) and raw_path.strip():
-            search_root = resolve_path(context.cwd, raw_path)
+            try:
+                search_root = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+            except ValueError as exc:
+                return build_tool_error(
+                    summary="查找文件失败",
+                    error_code="path_outside_project",
+                    error_message=str(exc),
+                    tool_name=self.definition.name,
+                )
         if not search_root.exists():
             return build_tool_error(
                 summary="查找文件失败",
@@ -80,7 +85,7 @@ class GlobTool:
             matches = [
                 path.resolve()
                 for path in search_root.glob(pattern)
-                if path.is_file() and not is_skipped_path(path, context.cwd)
+                if path.is_file() and not is_skipped_path(path, context.project_root or context.cwd)
             ]
         except Exception as exc:
             return build_tool_error(
