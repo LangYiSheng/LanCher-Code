@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from textual import on, work
@@ -7,7 +8,16 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static, TextArea
 
-from lancher_code.models import MessageUsage, ProviderConfig, RuntimeMode, SessionMessage, TurnEvent, UIConfig
+from lancher_code.models import (
+    MessageUsage,
+    PermissionRequest,
+    PermissionResolution,
+    ProviderConfig,
+    RuntimeMode,
+    SessionMessage,
+    TurnEvent,
+    UIConfig,
+)
 from lancher_code.session import SessionController
 from lancher_code.slash_commands import (
     SlashCommandDefinition,
@@ -28,7 +38,7 @@ from lancher_code.tui_views.composer import (
     SlashMenuNavigateRequested,
 )
 from lancher_code.tui_views.message import BannerWidget, MessageWidget
-from lancher_code.tui_views.permission import PermissionRequestScreen
+from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.turn_runner import TurnRunner
 
 MIN_COMPOSER_LINES = 1
@@ -230,6 +240,74 @@ class LanCherTextualApp(App[int]):
         width: 1fr;
     }
 
+    #inline-permission-panel {
+        border: tall #4b6f97;
+        padding: 1 2;
+        width: 1fr;
+        height: auto;
+        background: #0f1a26;
+    }
+
+    #inline-permission-panel:focus {
+        border: tall #73b6ff;
+    }
+
+    #permission-title {
+        color: #73b6ff;
+        text-style: bold;
+        margin-bottom: 1;
+        height: auto;
+    }
+
+    #permission-command, #permission-details {
+        color: #f2f2f2;
+        margin-left: 2;
+        height: auto;
+    }
+
+    #permission-description {
+        color: #a8b9cc;
+        margin: 0 0 1 2;
+        height: auto;
+    }
+
+    #permission-prompt {
+        color: #c8d5e3;
+        margin-bottom: 1;
+        height: auto;
+    }
+
+    .permission-preview {
+        color: #c8d5e3;
+        height: auto;
+        margin-left: 2;
+    }
+
+    .permission-preview.-error {
+        color: #ff7b72;
+    }
+
+    .permission-preview.-success {
+        color: #78d98a;
+    }
+
+    .permission-option {
+        width: 1fr;
+        height: auto;
+        padding: 0 1;
+        color: #c8d5e3;
+    }
+
+    .permission-option.-active {
+        background: #203246;
+    }
+
+    #permission-help {
+        color: #7f9ab8;
+        margin-top: 1;
+        height: auto;
+    }
+
     #status-bar {
         margin: 0 1 1 1;
         height: 1;
@@ -289,6 +367,7 @@ class LanCherTextualApp(App[int]):
         self._status_hint = "Ready"
         self._slash_menu_matches: list[SlashCommandDefinition] = []
         self._slash_menu_index = 0
+        self._permission_resolution_future: asyncio.Future[PermissionResolution] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -391,6 +470,13 @@ class LanCherTextualApp(App[int]):
         self._refresh_status_bar()
         self.process_prompt(text)
 
+    @on(InlinePermissionPanel.Resolved)
+    def handle_permission_resolved(self, event: InlinePermissionPanel.Resolved) -> None:
+        event.stop()
+        future = self._permission_resolution_future
+        if future is not None and not future.done():
+            future.set_result(event.resolution)
+
     @work(exclusive=False, exit_on_error=False)
     async def process_prompt(self, text: str) -> None:
         try:
@@ -453,11 +539,30 @@ class LanCherTextualApp(App[int]):
         elif event.message is not None:
             self._sync_message_widget(event.message.id)
         if event.kind == "permission_request_created" and event.permission_request is not None:
-            resolution = await self.push_screen_wait(PermissionRequestScreen(event.permission_request))
+            resolution = await self._request_inline_permission(event.permission_request)
             if resolution is not None:
                 self._turn_runner.resolve_permission_request(resolution)
         self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
         self._refresh_status_bar()
+
+    async def _request_inline_permission(self, request: PermissionRequest) -> PermissionResolution:
+        composer = self.query_one("#composer", Horizontal)
+        slash_menu = self.query_one(SlashCommandMenu)
+        hint_bar = self.query_one(CommandHintBar)
+        panel = InlinePermissionPanel(request)
+        composer.display = False
+        slash_menu.display = False
+        hint_bar.display = False
+        self._permission_resolution_future = asyncio.get_running_loop().create_future()
+        await self.query_one("#composer-region", Vertical).mount(panel)
+        panel.focus()
+        try:
+            return await self._permission_resolution_future
+        finally:
+            self._permission_resolution_future = None
+            await panel.remove()
+            composer.display = True
+            self._refresh_command_ui()
 
     def _apply_turn_event(self, event: TurnEvent) -> None:
         if event.kind == "mode_changed":

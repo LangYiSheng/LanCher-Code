@@ -1,164 +1,162 @@
 from __future__ import annotations
 
+from rich.console import RenderableType
+from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import Button, Static
+from textual.containers import Vertical
+from textual.events import Click, Message
+from textual.widgets import Static
 
 from lancher_code.models import PermissionRequest, PermissionResolution, PermissionResolutionOutcome
 
 
-class PermissionRequestScreen(ModalScreen[PermissionResolution]):
-    CSS = """
-    PermissionRequestScreen {
-        align: center middle;
-    }
+class PermissionOptionChosen(Message):
+    def __init__(self, outcome: PermissionResolutionOutcome) -> None:
+        super().__init__()
+        self.outcome = outcome
 
-    #permission-dialog {
-        width: 80;
-        max-width: 90%;
-        height: auto;
-        border: round #4b6f97;
-        background: #0f1a26;
-        padding: 1 2;
-    }
 
-    #permission-title {
-        color: #73b6ff;
-        text-style: bold;
-        margin-bottom: 1;
-    }
+class PermissionOption(Static):
+    def __init__(
+        self,
+        index: int,
+        outcome: PermissionResolutionOutcome,
+        label: str,
+        rule: str | None = None,
+    ) -> None:
+        super().__init__(classes="permission-option")
+        self.index = index
+        self.outcome = outcome
+        self.label = label
+        self.rule = rule
+        self._active = False
 
-    .permission-section {
-        margin-bottom: 1;
-        height: auto;
-    }
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        self.set_class(active, "-active")
+        self.refresh()
 
-    .permission-preview {
-        color: #c8d5e3;
-    }
+    def render(self) -> RenderableType:
+        text = Text()
+        text.append("> " if self._active else "  ", style="bold #73b6ff" if self._active else "")
+        text.append(f"{self.index}. {self.label}", style="bold #f2f2f2" if self._active else "#c8d5e3")
+        if self.rule:
+            text.append("    ")
+            text.append(self.rule, style="#a8b9cc")
+        return text
 
-    .permission-preview.-error {
-        color: #ff7b72;
-    }
+    def on_click(self, event: Click) -> None:
+        event.stop()
+        self.post_message(PermissionOptionChosen(self.outcome))
 
-    .permission-preview.-success {
-        color: #78d98a;
-    }
 
-    #permission-help {
-        margin-top: 1;
-        color: #97adc7;
-    }
-
-    #permission-actions {
-        margin-top: 1;
-        height: auto;
-    }
-
-    #permission-actions Button {
-        margin-right: 1;
-    }
-
-    #permission-actions Button:focus {
-        border: heavy #73b6ff;
-    }
-    """
+class InlinePermissionPanel(Vertical):
+    can_focus = True
 
     BINDINGS = [
-        Binding("tab", "focus_next_option", "下一个", show=False, priority=True),
-        Binding("shift+tab", "focus_previous_option", "上一个", show=False, priority=True),
-        Binding("right", "focus_next_option", "下一个", show=False, priority=True),
-        Binding("down", "focus_next_option", "下一个", show=False, priority=True),
-        Binding("left", "focus_previous_option", "上一个", show=False, priority=True),
-        Binding("up", "focus_previous_option", "上一个", show=False, priority=True),
-        Binding("enter", "confirm_focused_option", "确认", show=False, priority=True),
+        Binding("up", "previous_option", "上一个", show=False, priority=True),
+        Binding("shift+tab", "previous_option", "上一个", show=False, priority=True),
+        Binding("down", "next_option", "下一个", show=False, priority=True),
+        Binding("tab", "next_option", "下一个", show=False, priority=True),
+        Binding("enter", "confirm_option", "确认", show=False, priority=True),
         Binding("escape", "deny_request", "拒绝", show=False, priority=True),
     ]
 
+    class Resolved(Message):
+        def __init__(self, resolution: PermissionResolution) -> None:
+            super().__init__()
+            self.resolution = resolution
+
     def __init__(self, request: PermissionRequest) -> None:
-        super().__init__()
+        super().__init__(id="inline-permission-panel")
         self.request = request
+        self._selected_index = 0
+        self._resolved = False
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="permission-dialog"):
+        if self.request.kind == "command":
+            yield Static(f"{self.request.tool_label} 命令", id="permission-title")
+            yield Static(self.request.command or "", id="permission-command")
+            yield Static(self.request.description or "(无描述)", id="permission-description")
+        else:
             yield Static(self.request.title, id="permission-title")
-            yield Static(self.request.prompt, classes="permission-section")
-            yield Static(self.request.details, classes="permission-section")
+            yield Static(self.request.details, id="permission-details")
             for preview in self.request.preview_lines:
                 tone = preview.get("tone", "")
-                css_class = "permission-preview"
-                if tone == "error":
-                    css_class += " -error"
-                elif tone == "success":
-                    css_class += " -success"
-                yield Static(preview.get("text", ""), classes=css_class)
-            with Horizontal(id="permission-actions"):
-                for outcome, label in _button_specs(self.request):
-                    yield Button(label, id=f"permission-{outcome}")
-            yield Static("Tab / Shift+Tab 切换选项，Enter 确认，Esc 拒绝。", id="permission-help")
+                classes = "permission-preview"
+                if tone in {"error", "success"}:
+                    classes += f" -{tone}"
+                yield Static(preview.get("text", ""), classes=classes)
+        yield Static(self.request.prompt, id="permission-prompt")
+        for index, (outcome, label, rule) in enumerate(_option_specs(self.request), start=1):
+            yield PermissionOption(index, outcome, label, rule)
+        yield Static("↑/↓ 选择   Enter 确认   Esc 拒绝", id="permission-help")
 
     def on_mount(self) -> None:
-        first_button = next(iter(self._buttons()), None)
-        if first_button is not None:
-            first_button.focus()
+        self._refresh_selection()
+        self.focus()
 
-    @on(Button.Pressed)
-    def handle_button_pressed(self, event: Button.Pressed) -> None:
-        self._dismiss_with_outcome(_outcome_from_button_id(event.button.id))
+    @on(PermissionOptionChosen)
+    def handle_option_chosen(self, event: PermissionOptionChosen) -> None:
+        event.stop()
+        options = self._options()
+        for index, option in enumerate(options):
+            if option.outcome == event.outcome:
+                self._selected_index = index
+                break
+        self._refresh_selection()
+        self._resolve(event.outcome)
 
-    def action_focus_next_option(self) -> None:
-        self._move_focus(1)
+    def action_previous_option(self) -> None:
+        self._move_selection(-1)
 
-    def action_focus_previous_option(self) -> None:
-        self._move_focus(-1)
+    def action_next_option(self) -> None:
+        self._move_selection(1)
 
-    def action_confirm_focused_option(self) -> None:
-        focused = self.focused
-        if isinstance(focused, Button):
-            self._dismiss_with_outcome(_outcome_from_button_id(focused.id))
+    def action_confirm_option(self) -> None:
+        options = self._options()
+        if options:
+            self._resolve(options[self._selected_index].outcome)
 
     def action_deny_request(self) -> None:
-        self._dismiss_with_outcome("deny")
+        self._resolve("deny")
 
-    def _move_focus(self, direction: int) -> None:
-        buttons = self._buttons()
-        if not buttons:
+    def _move_selection(self, direction: int) -> None:
+        options = self._options()
+        if not options:
             return
+        self._selected_index = (self._selected_index + direction) % len(options)
+        self._refresh_selection()
 
-        focused = self.focused
-        if focused not in buttons:
-            buttons[0].focus()
+    def _refresh_selection(self) -> None:
+        for index, option in enumerate(self._options()):
+            option.set_active(index == self._selected_index)
+
+    def _resolve(self, outcome: PermissionResolutionOutcome) -> None:
+        if self._resolved:
             return
+        self._resolved = True
+        self.post_message(
+            self.Resolved(PermissionResolution(request_id=self.request.request_id, outcome=outcome))
+        )
 
-        index = buttons.index(focused)
-        buttons[(index + direction) % len(buttons)].focus()
-
-    def _dismiss_with_outcome(self, outcome: PermissionResolutionOutcome) -> None:
-        self.dismiss(PermissionResolution(request_id=self.request.request_id, outcome=outcome))
-
-    def _buttons(self) -> list[Button]:
-        return list(self.query(Button))
+    def _options(self) -> list[PermissionOption]:
+        return list(self.query(PermissionOption))
 
 
-def _outcome_from_button_id(button_id: str | None) -> PermissionResolutionOutcome:
-    outcome = button_id.removeprefix("permission-") if button_id else "deny"
-    if outcome in {"allow_once", "allow_session", "allow_project", "deny"}:
-        return outcome
-    return "deny"
-
-
-def _button_specs(request: PermissionRequest) -> list[tuple[PermissionResolutionOutcome, str]]:
+def _option_specs(
+    request: PermissionRequest,
+) -> list[tuple[PermissionResolutionOutcome, str, str | None]]:
     if request.kind == "command":
         return [
-            ("allow_once", "允许执行本次命令"),
-            ("allow_session", "在本会话中永久放行"),
-            ("allow_project", "在本项目中永久放行"),
-            ("deny", "拒绝执行"),
+            ("allow_once", "仅允许执行本次命令", None),
+            ("allow_session", "在本次会话中放行", request.session_rule),
+            ("allow_project", "在当前项目中放行", request.project_rule),
+            ("deny", "拒绝执行", None),
         ]
     return [
-        ("allow_once", "允许本次编辑"),
-        ("deny", "拒绝本次编辑"),
+        ("allow_once", "仅允许本次编辑", None),
+        ("deny", "拒绝本次编辑", None),
     ]
