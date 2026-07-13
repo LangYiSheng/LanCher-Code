@@ -10,6 +10,7 @@ from textual.widgets import Button, Checkbox, Collapsible, Input, Select, Static
 
 from lancher_code.config import write_config_data
 from lancher_code.errors import ConfigError
+from lancher_code.mcp.template import ensure_user_mcp_config
 
 PROTOCOL_OPTIONS = [("OpenAI", "openai"), ("Claude", "claude")]
 DEFAULT_BASE_URLS = {
@@ -180,6 +181,7 @@ class ConfigBootstrapApp(App[int]):
         try:
             raw_data = self._build_raw_config()
             write_config_data(self._config_path, raw_data)
+            ensure_user_mcp_config(home_dir=self._config_path.parent.parent)
         except ConfigError as exc:
             self._show_error(exc.user_message)
             return

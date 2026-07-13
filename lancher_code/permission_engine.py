@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -286,11 +287,20 @@ class PermissionEngine:
             return "allow"
         if tool.category == "read":
             return "allow"
+        if tool.permission is not None and tool.permission.source == "external":
+            return "deny" if mode == "plan" else "ask"
         if mode == "acceptEdits" and tool.category == "write" and tool.name != "bash":
             return "allow"
         return "ask"
 
     def _build_match_target(self, call: ToolCall, tool: ToolDefinition, context: ToolContext) -> _MatchTarget:
+        if tool.permission is not None and tool.permission.source == "external":
+            return _MatchTarget(
+                tool_name=tool.permission.rule_key,
+                tool_label=tool.permission.display_name,
+                value="",
+                matcher="exact",
+            )
         if tool.name == "bash":
             command = str(call.arguments.get("command", "")).strip()
             normalized = _normalize_command(command)
@@ -328,6 +338,29 @@ class PermissionEngine:
         target: _MatchTarget,
     ) -> PermissionRequest:
         request_id = f"perm-{uuid4().hex[:8]}"
+        if tool.permission is not None and tool.permission.source == "external":
+            arguments = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)
+            if len(arguments) > 1000:
+                arguments = f"{arguments[:997]}..."
+            rule = tool.permission.rule_key
+            return PermissionRequest(
+                request_id=request_id,
+                call_id=call.call_id,
+                tool_name=tool.name,
+                tool_label=tool.permission.display_name,
+                kind="external_tool",
+                mode=context.mode,
+                title="是否允许调用 MCP 工具",
+                prompt=f"{tool.permission.server_name}/{tool.permission.remote_tool_name} 可能产生远程副作用。",
+                details=f"参数: {arguments}",
+                session_rule=rule,
+                project_rule=rule,
+                metadata={
+                    "mode": context.mode,
+                    "server": tool.permission.server_name or "",
+                    "remote_tool": tool.permission.remote_tool_name or "",
+                },
+            )
         if tool.name == "bash":
             command = str(call.arguments.get("command", "")).strip()
             description = str(call.arguments.get("description", "")).strip()
@@ -413,7 +446,9 @@ def _match_command_blacklist(command: str) -> str | None:
 def _rule_matches(rule_match: str, target: _MatchTarget) -> bool:
     parsed = _parse_rule(rule_match)
     if parsed is None:
-        return False
+        if target.value:
+            return False
+        return fnmatch.fnmatchcase(target.tool_name, rule_match.strip())
     tool_name, rule_value = parsed
     if tool_name != target.tool_name:
         return False

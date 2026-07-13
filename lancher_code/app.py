@@ -11,6 +11,7 @@ from lancher_code.config import (
     resolve_config_bootstrap_state,
 )
 from lancher_code.errors import ConfigError
+from lancher_code.mcp import MCPClientManager, load_mcp_config
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
@@ -46,6 +47,12 @@ async def run_app() -> int:
         initial_runtime_mode=config.runtime.permission_mode,
     )
     tool_registry = create_default_tool_registry()
+    mcp_configs, mcp_issues = load_mcp_config(cwd)
+    mcp_manager = MCPClientManager(
+        mcp_configs,
+        issues=mcp_issues,
+        timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS,
+    )
     permission_engine = PermissionEngine(
         PermissionStorage(
             project_rules_path=get_project_permissions_path(cwd),
@@ -72,4 +79,9 @@ async def run_app() -> int:
         session_controller=session_controller,
         ui_config=config.ui,
     )
-    return await tui.run()
+    if hasattr(tui, "configure_mcp"):
+        tui.configure_mcp(mcp_manager, tool_registry)
+    try:
+        return await tui.run()
+    finally:
+        await mcp_manager.close()

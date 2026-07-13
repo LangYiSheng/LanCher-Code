@@ -6,10 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "lancher-code"
 version = "0.1.0"
 description = "LanCher Code coding assistant"
-readme = "docs/phase-1/spec.md"
+readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "httpx>=0.28.1,<1.0.0",
+    "mcp>=1.12.4,<2.0.0",
     "PyYAML>=6.0.2,<7.0.0",
     "rich>=14.0.0,<15.0.0",
     "textual>=6.1.0,<7.0.0",
@@ -30,3 +31,6 @@ lancher-code = "lancher_code.cli:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+include = ["lancher_code*"]

@@ -156,6 +156,13 @@ def _option_specs(
             ("allow_project", "在当前项目中放行", request.project_rule),
             ("deny", "拒绝执行", None),
         ]
+    if request.kind == "external_tool":
+        return [
+            ("allow_once", "仅允许本次调用", None),
+            ("allow_session", "在本次会话中放行", request.session_rule),
+            ("allow_project", "在当前项目中放行", request.project_rule),
+            ("deny", "拒绝调用", None),
+        ]
     return [
         ("allow_once", "仅允许本次编辑", None),
         ("deny", "拒绝本次编辑", None),

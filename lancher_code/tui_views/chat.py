@@ -18,6 +18,7 @@ from lancher_code.models import (
     TurnEvent,
     UIConfig,
 )
+from lancher_code.mcp.manager import MCPClientManager, MCPInitializationProgress
 from lancher_code.session import SessionController
 from lancher_code.slash_commands import (
     SlashCommandDefinition,
@@ -40,6 +41,7 @@ from lancher_code.tui_views.composer import (
 from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.turn_runner import TurnRunner
+from lancher_code.tools.core.registry import ToolRegistry
 
 MIN_COMPOSER_LINES = 1
 MAX_COMPOSER_LINES = 6
@@ -47,6 +49,7 @@ COMPOSER_FRAME_HEIGHT = 2
 DEFAULT_COMMAND_HINT = ""
 DEFAULT_PLACEHOLDER = "发送一条消息"
 PLAN_PLACEHOLDER = "Plan Mode: 继续补充或修改计划"
+MCP_PLACEHOLDER = "正在初始化 MCP，请稍候…"
 MODE_SEQUENCE: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
 MODE_GLYPHS: dict[RuntimeMode, str] = {
     "default": ">",
@@ -354,6 +357,8 @@ class LanCherTextualApp(App[int]):
         session_controller: SessionController,
         ui_config: UIConfig,
         slash_command_registry: SlashCommandRegistry | None = None,
+        mcp_manager: MCPClientManager | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         super().__init__()
         self._turn_runner = turn_runner
@@ -368,6 +373,9 @@ class LanCherTextualApp(App[int]):
         self._slash_menu_matches: list[SlashCommandDefinition] = []
         self._slash_menu_index = 0
         self._permission_resolution_future: asyncio.Future[PermissionResolution] | None = None
+        self._mcp_manager = mcp_manager
+        self._tool_registry = tool_registry
+        self.mcp_initialization_complete = mcp_manager is None or not mcp_manager.has_servers
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -393,12 +401,39 @@ class LanCherTextualApp(App[int]):
                 yield Static(id="status-right")
 
     def on_mount(self) -> None:
-        self.query_one(ComposerTextArea).focus()
+        composer = self.query_one(ComposerTextArea)
+        composer.disabled = not self.mcp_initialization_complete
+        if self.mcp_initialization_complete:
+            composer.focus()
         self._update_composer_height()
         self._refresh_mode_chrome()
         self._refresh_composer_placeholder()
         self._refresh_command_ui()
         self._refresh_status_bar()
+        if self._mcp_manager is not None:
+            self._mcp_manager.add_progress_callback(self._handle_mcp_progress)
+            if self._mcp_manager.has_servers:
+                self._status_hint = "Initializing MCP"
+                self.initialize_mcp()
+            else:
+                self._handle_mcp_progress(MCPInitializationProgress(0, 0, 0, 0, 0, None, "complete"))
+
+    @work(exclusive=True, exit_on_error=False)
+    async def initialize_mcp(self) -> None:
+        try:
+            if self._mcp_manager is not None and self._tool_registry is not None:
+                await self._mcp_manager.initialize(self._tool_registry)
+        finally:
+            self.mcp_initialization_complete = True
+            composer = self.query_one("#composer-input", ComposerTextArea)
+            composer.disabled = False
+            self._status_hint = "Ready"
+            self._refresh_composer_placeholder()
+            self._refresh_status_bar()
+            composer.focus()
+
+    def _handle_mcp_progress(self, progress: MCPInitializationProgress) -> None:
+        self.query_one(BannerWidget).update_mcp_progress(progress)
 
     def on_resize(self) -> None:
         self.call_after_refresh(self._update_composer_height)
@@ -443,6 +478,8 @@ class LanCherTextualApp(App[int]):
 
     @on(ComposerSubmitted)
     async def handle_input_submitted(self, event: ComposerSubmitted) -> None:
+        if not self.mcp_initialization_complete:
+            return
         text = event.value.strip()
         event.composer.clear()
         self._refresh_command_ui()
@@ -601,6 +638,9 @@ class LanCherTextualApp(App[int]):
 
     def _refresh_composer_placeholder(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
+        if not self.mcp_initialization_complete:
+            composer.placeholder = MCP_PLACEHOLDER
+            return
         if self._session_controller.runtime_mode == "plan":
             composer.placeholder = PLAN_PLACEHOLDER
             return
@@ -746,14 +786,23 @@ class ChatTUI:
         provider_config: ProviderConfig,
         session_controller: SessionController,
         ui_config: UIConfig,
+        mcp_manager: MCPClientManager | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._app = LanCherTextualApp(
             turn_runner=turn_runner,
             provider_config=provider_config,
             session_controller=session_controller,
             ui_config=ui_config,
+            mcp_manager=mcp_manager,
+            tool_registry=tool_registry,
         )
 
     async def run(self) -> int:
         result = await self._app.run_async()
         return 0 if result is None else result
+
+    def configure_mcp(self, manager: MCPClientManager, registry: ToolRegistry) -> None:
+        self._app._mcp_manager = manager
+        self._app._tool_registry = registry
+        self._app.mcp_initialization_complete = not manager.has_servers

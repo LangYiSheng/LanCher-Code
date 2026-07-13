@@ -15,7 +15,7 @@ PlanModeEntryKind = Literal["initial", "reentry"]
 RuleScope = Literal["session", "project", "user"]
 PermissionDecision = Literal["allow", "deny", "ask"]
 PermissionRuleResult = Literal["allow", "deny"]
-PermissionRequestKind = Literal["command", "file_edit"]
+PermissionRequestKind = Literal["command", "file_edit", "external_tool"]
 PermissionResolutionOutcome = Literal["allow_once", "allow_session", "allow_project", "deny"]
 StreamEventKind = Literal[
     "text_delta",
@@ -43,6 +43,16 @@ TurnEventKind = Literal[
 ContentBlockKind = Literal["text", "tool_use", "tool_result"]
 TraceEntryKind = Literal["thinking", "tool_call", "tool_result", "text", "notice"]
 ToolCategory = Literal["read", "write", "command"]
+ToolSource = Literal["builtin", "external"]
+
+
+@dataclass(slots=True, frozen=True)
+class ToolPermissionMetadata:
+    source: ToolSource
+    rule_key: str
+    display_name: str
+    server_name: str | None = None
+    remote_tool_name: str | None = None
 
 
 @dataclass(slots=True)
@@ -99,6 +109,7 @@ class ToolDefinition:
     is_system_tool: bool = False
     should_defer: bool = False
     allowed_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
+    permission: ToolPermissionMetadata | None = None
 
     def __init__(
         self,
@@ -110,6 +121,7 @@ class ToolDefinition:
         is_system_tool: bool = False,
         should_defer: bool = False,
         allowed_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass"),
+        permission: ToolPermissionMetadata | None = None,
         input_schema: dict[str, object] | None = None,
     ) -> None:
         self.name = name
@@ -120,6 +132,7 @@ class ToolDefinition:
         self.is_system_tool = is_system_tool
         self.should_defer = should_defer
         self.allowed_modes = allowed_modes
+        self.permission = permission
 
     @property
     def input_schema(self) -> dict[str, object]:

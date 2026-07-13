@@ -24,7 +24,9 @@ from lancher_code.tui import (
     SlashCommandMenuItem,
     ThinkingTraceWidget,
     _format_trace_entries,
+    ComposerSubmitted,
 )
+from lancher_code.mcp.manager import MCPInitializationProgress
 from lancher_code.turn_runner import TurnRunner
 
 DelayedEvent = tuple[StreamEvent, float]
@@ -177,6 +179,48 @@ def _visible_slash_commands(app: LanCherTextualApp) -> list[str]:
         for item in app.query(SlashCommandMenuItem)
         if item.display
     ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_initialization_gates_input_and_restores_composer(
+    openai_provider_config, ui_config, tmp_path: Path,
+) -> None:
+    class FakeManager:
+        has_servers = True
+
+        def __init__(self) -> None:
+            self.callbacks = []
+            self.release = asyncio.Event()
+
+        def add_progress_callback(self, callback) -> None:
+            self.callbacks.append(callback)
+
+        async def initialize(self, registry) -> None:
+            for callback in self.callbacks:
+                callback(MCPInitializationProgress(1, 0, 0, 0, 0, "demo", "connecting"))
+            await self.release.wait()
+            for callback in self.callbacks:
+                callback(MCPInitializationProgress(1, 1, 1, 0, 2, None, "complete"))
+
+    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+    manager = FakeManager()
+    app._mcp_manager = manager  # type: ignore[assignment]
+    app._tool_registry = object()  # type: ignore[assignment]
+    app.mcp_initialization_complete = False
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        await pilot.pause(0.05)
+        assert composer.disabled
+        assert composer.placeholder == "正在初始化 MCP，请稍候…"
+        await app.handle_input_submitted(ComposerSubmitted(composer, "不应发送"))
+        assert session._state.messages == []
+        manager.release.set()
+        await pilot.pause(0.05)
+        assert app.mcp_initialization_complete
+        assert not composer.disabled
+        assert composer.placeholder == "发送一条消息"
+        assert "2 个工具" in app.query_one(BannerWidget)._mcp_status
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from textual.events import Click
 from textual.widgets import Static
 
 from lancher_code.models import SessionMessage, TraceEntry
+from lancher_code.mcp.manager import MCPInitializationProgress
 
 BANNER_TEXT = r"""
     __                ________                 ______          __
@@ -26,6 +27,7 @@ class BannerWidget(Static):
         super().__init__(id="banner")
         self._cwd = cwd
         self._compact = False
+        self._mcp_status = "MCP：未配置"
 
     @property
     def compact(self) -> bool:
@@ -36,6 +38,31 @@ class BannerWidget(Static):
         self.set_class(compact, "-compact")
         self.refresh()
 
+    def update_mcp_progress(self, progress: MCPInitializationProgress) -> None:
+        if progress.state == "complete":
+            if progress.total_servers == 0:
+                self._mcp_status = "MCP：未配置"
+            elif progress.failed_servers:
+                self._mcp_status = (
+                    f"MCP：初始化完成 · 成功 {progress.successful_servers}/{progress.total_servers}"
+                    f" · {progress.registered_tools} 个工具 · {progress.failed_servers} 个失败"
+                )
+            else:
+                self._mcp_status = (
+                    f"MCP：已就绪 · {progress.successful_servers}/{progress.total_servers} Server"
+                    f" · {progress.registered_tools} 个工具"
+                )
+            if progress.warning_count:
+                self._mcp_status += f" · {progress.warning_count} 条警告"
+        else:
+            current = f" · {progress.current_server}：连接中" if progress.current_server else ""
+            self._mcp_status = (
+                f"MCP：正在初始化 {progress.completed_servers}/{progress.total_servers}"
+                f" · 成功 {progress.successful_servers} · 失败 {progress.failed_servers}"
+                f" · 工具 {progress.registered_tools}{current}"
+            )
+        self.refresh()
+
     def render(self) -> RenderableType:
         if self._compact:
             compact_text = Text()
@@ -43,13 +70,16 @@ class BannerWidget(Static):
             compact_text.append("  ")
             compact_text.append("工作目录：", style="bold #73b6ff")
             compact_text.append(str(self._cwd), style="default")
+            compact_text.append("  ")
+            compact_text.append(self._mcp_status, style="#97adc7")
             return compact_text
 
         title = Text(BANNER_TEXT.strip("\n"), style="bold #73b6ff")
         subtitle = Text()
         subtitle.append("当前工作目录：", style="bold #73b6ff")
         subtitle.append(str(self._cwd), style="default")
-        return Group(title, subtitle)
+        status = Text(self._mcp_status, style="#97adc7")
+        return Group(title, subtitle, status)
 
 
 class ThinkingTraceWidget(Vertical):
