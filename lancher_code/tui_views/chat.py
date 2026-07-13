@@ -19,6 +19,7 @@ from lancher_code.models import (
     UIConfig,
 )
 from lancher_code.mcp.manager import MCPClientManager, MCPInitializationProgress
+from lancher_code.logging_system import get_logger
 from lancher_code.session import SessionController
 from lancher_code.slash_commands import (
     SlashCommandDefinition,
@@ -42,6 +43,8 @@ from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.turn_runner import TurnRunner
 from lancher_code.tools.core.registry import ToolRegistry
+
+logger = get_logger("tui.chat")
 
 MIN_COMPOSER_LINES = 1
 MAX_COMPOSER_LINES = 6
@@ -423,6 +426,12 @@ class LanCherTextualApp(App[int]):
         try:
             if self._mcp_manager is not None and self._tool_registry is not None:
                 await self._mcp_manager.initialize(self._tool_registry)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "event=tui_mcp_worker_failed exception_type=%s", type(exc).__name__
+            )
         finally:
             self.mcp_initialization_complete = True
             composer = self.query_one("#composer-input", ComposerTextArea)
@@ -519,6 +528,12 @@ class LanCherTextualApp(App[int]):
         try:
             async for event in self._turn_runner.run_user_turn(text):
                 await self._consume_turn_event(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "event=tui_turn_worker_failed exception_type=%s", type(exc).__name__
+            )
         finally:
             self._is_streaming = False
             self._status_hint = "Ready"

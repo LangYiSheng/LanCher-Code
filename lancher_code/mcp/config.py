@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 import yaml
 
 from lancher_code.config_system.paths import get_global_mcp_config_path, get_project_mcp_config_path
+from lancher_code.logging_system import get_logger
+
+logger = get_logger("mcp.config")
 
 ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
@@ -49,7 +52,9 @@ def load_mcp_config(project_root: Path, *, home_dir: Path | None = None, environ
         try:
             config = _parse_server(name, raw, env_source)
         except ValueError as exc:
-            issues.append(MCPConfigIssue("config", str(exc), str(name)))
+            issue = MCPConfigIssue("config", str(exc), str(name))
+            issues.append(issue)
+            logger.error("event=mcp_config_invalid server=%s reason=%s", name, issue.message)
             continue
         if config.enabled:
             configs.append(config)
@@ -61,19 +66,26 @@ def _read_layer(path: Path, issues: list[MCPConfigIssue]) -> dict[str, object]:
         return {}
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError) as exc:
         issues.append(MCPConfigIssue("config", f"MCP 配置文件无法读取或 YAML 非法: {path}"))
+        # YAML 解析异常可能内嵌原始配置行，这里只记录类型，避免凭据随坏行落盘。
+        logger.error(
+            "event=mcp_config_file_invalid path=%s exception_type=%s",
+            path, type(exc).__name__,
+        )
         return {}
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         issues.append(MCPConfigIssue("config", f"MCP 配置顶层必须是对象: {path}"))
+        logger.error("event=mcp_config_top_level_invalid path=%s", path)
         return {}
     servers = raw.get("mcp_servers", {})
     if servers is None:
         return {}
     if not isinstance(servers, dict):
         issues.append(MCPConfigIssue("config", f"mcp_servers 必须是对象: {path}"))
+        logger.error("event=mcp_config_servers_invalid path=%s", path)
         return {}
     return dict(servers)
 

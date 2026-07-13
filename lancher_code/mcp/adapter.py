@@ -4,6 +4,9 @@ from mcp import types as mcp_types
 
 from lancher_code.mcp.connection import MCPServerConnection
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult, ToolPermissionMetadata
+from lancher_code.logging_system import get_logger
+
+logger = get_logger("mcp.adapter")
 
 
 class MCPToolAdapter:
@@ -41,6 +44,10 @@ class MCPToolAdapter:
         try:
             result = await self._connection.call_tool(self._remote_name, arguments)
         except Exception:
+            logger.exception(
+                "event=mcp_tool_call_failed server=%s tool=%s",
+                self._server_name, self._remote_name,
+            )
             return ToolExecutionResult(
                 call_id="", tool_name=self.definition.name,
                 content=f"MCP 工具 {self._server_name}/{self._remote_name} 调用失败或连接已断开。",

@@ -11,6 +11,9 @@ from lancher_code.mcp.adapter import MCPToolAdapter
 from lancher_code.mcp.config import MCPConfigIssue, MCPServerConfig
 from lancher_code.mcp.connection import MCPConnectionError, MCPServerConnection
 from lancher_code.tools.core.registry import ToolRegistry
+from lancher_code.logging_system import get_logger
+
+logger = get_logger("mcp.manager")
 
 TOOL_NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 ConnectionFactory = Callable[[MCPServerConfig], MCPServerConnection]
@@ -54,6 +57,11 @@ class MCPClientManager:
             if isinstance(result, BaseException):
                 stage = result.stage if isinstance(result, MCPConnectionError) else "启动"
                 self.issues.append(MCPConfigIssue(stage, f"MCP Server {config.name} {stage}失败", config.name))
+                logger.error(
+                    "event=mcp_server_initialization_failed server=%s stage=%s exception_type=%s",
+                    config.name, stage, type(result).__name__,
+                    exc_info=(type(result), result, result.__traceback__),
+                )
                 self._failed += 1
                 self._completed += 1
                 self._emit(config.name, "server_failed")
@@ -84,11 +92,13 @@ class MCPClientManager:
     def _register_tool(self, registry: ToolRegistry, server_name: str, remote: mcp_types.Tool, connection: MCPServerConnection) -> None:
         if not remote.name or not TOOL_NAME_PATTERN.fullmatch(remote.name):
             self.issues.append(MCPConfigIssue("tool_name", f"Server {server_name} 返回了非法工具名", server_name))
+            logger.error("event=mcp_tool_name_invalid server=%s", server_name)
             return
         try:
             registry.register(MCPToolAdapter(server_name, remote, connection))
         except ValueError:
             self.issues.append(MCPConfigIssue("duplicate_tool", f"Server {server_name} 的工具 {remote.name} 名称冲突", server_name))
+            logger.error("event=mcp_tool_name_duplicate server=%s tool=%s", server_name, remote.name)
             return
         self._registered += 1
 
@@ -108,8 +118,16 @@ class MCPClientManager:
             return
         try:
             async with asyncio.timeout(self.close_timeout_seconds):
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for connection, result in zip(connections, results):
+                    if isinstance(result, BaseException):
+                        logger.error(
+                            "event=mcp_close_failed server=%s exception_type=%s",
+                            connection.name, type(result).__name__,
+                            exc_info=(type(result), result, result.__traceback__),
+                        )
         except TimeoutError:
+            logger.error("event=mcp_close_timeout connection_count=%d", len(connections))
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

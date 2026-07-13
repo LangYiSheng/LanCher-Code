@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from lancher_code.errors import LanCherError, ToolCallParseError
+from lancher_code.logging_system import get_logger
 from lancher_code.models import (
     CancellationToken,
     MessageUsage,
@@ -21,6 +22,8 @@ from lancher_code.session import SessionController
 from lancher_code.tool_call_parser import ToolCallAssembler
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
+
+logger = get_logger("turn_runner")
 
 MAX_TOOL_LOOPS = 50
 DEFAULT_UNKNOWN_TOOL_STREAK_LIMIT = 3
@@ -321,6 +324,7 @@ class TurnRunner:
                 message = self._session.fail_message(assistant_message.id, exc.user_message)
                 await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=exc.user_message))
         except Exception as exc:
+            logger.exception("event=turn_failed_unexpected exception_type=%s", type(exc).__name__)
             error_text = f"发生未预期异常: {exc}"
             if assistant_message is not None:
                 self._session.append_trace_notice(assistant_message.id, error_text)

@@ -6,8 +6,11 @@ from collections.abc import AsyncIterator, Callable
 import httpx
 
 from lancher_code.errors import ProviderRequestError, ProviderResponseError
+from lancher_code.logging_system import get_logger
 from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
+
+logger = get_logger("providers.openai")
 
 
 class OpenAIProvider(BaseChatProvider):
@@ -90,8 +93,13 @@ class OpenAIProvider(BaseChatProvider):
 
                     yield StreamEvent(kind="message_end", usage=usage)
         except ProviderResponseError:
+            logger.exception("event=provider_response_failed provider=openai")
             raise
         except Exception as exc:
+            logger.exception(
+                "event=provider_request_failed provider=openai exception_type=%s",
+                type(exc).__name__,
+            )
             if isinstance(exc, ProviderRequestError):
                 raise
             if isinstance(exc, httpx.HTTPError):

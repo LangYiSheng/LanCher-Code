@@ -11,6 +11,7 @@ from lancher_code.mcp.manager import MCPClientManager
 from lancher_code.mcp.connection import MCPServerConnection
 from lancher_code.models import ToolContext
 from lancher_code.tools.core.registry import ToolRegistry
+from lancher_code.logging_system import close_logging, configure_logging, register_sensitive_values
 
 
 class FakeConnection:
@@ -113,3 +114,29 @@ async def test_real_stdio_server_discovery_call_and_close(tmp_path: Path) -> Non
     )
     assert result.content == "你好 MCP"
     await asyncio.wait_for(connection.close(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_adapter_failure_writes_redacted_error_log(tmp_path: Path) -> None:
+    class FailedConnection(FakeConnection):
+        async def call_tool(self, name: str, arguments: dict[str, object]) -> types.CallToolResult:
+            raise RuntimeError("Authorization: Bearer private-token")
+
+    log_path = tmp_path / "lancher-error.log"
+    configure_logging(log_path=log_path)
+    register_sensitive_values(["private-token"])
+    try:
+        config = MCPServerConfig(name="demo", type="stdio", command="python")
+        adapter = MCPToolAdapter("demo", remote_tool(), FailedConnection(config))  # type: ignore[arg-type]
+        result = await adapter.execute(
+            {"secret_argument": "must-not-be-logged"},
+            ToolContext(cwd=tmp_path, timeout_seconds=10),
+        )
+    finally:
+        close_logging()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert result.error_code == "mcp_tool_error"
+    assert "event=mcp_tool_call_failed server=demo tool=lookup" in log_text
+    assert "RuntimeError" in log_text
+    assert "private-token" not in log_text
+    assert "must-not-be-logged" not in log_text

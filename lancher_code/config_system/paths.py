@@ -6,6 +6,8 @@ GLOBAL_CONFIG_DIRNAME = ".lancher"
 GLOBAL_CONFIG_FILENAME = "lancher.yaml"
 PERMISSIONS_CONFIG_FILENAME = "permissions.yaml"
 MCP_CONFIG_FILENAME = "mcp.yaml"
+LOGS_DIRNAME = "logs"
+ERROR_LOG_FILENAME = "lancher-error.log"
 DEFAULT_PLAN_FILE_PATH = "./.lancher/plan.md"
 
 
@@ -24,6 +26,14 @@ def get_global_permissions_path(home_dir: Path | None = None) -> Path:
 
 def get_global_mcp_config_path(home_dir: Path | None = None) -> Path:
     return get_global_config_dir(home_dir) / MCP_CONFIG_FILENAME
+
+
+def get_global_logs_dir(home_dir: Path | None = None) -> Path:
+    return get_global_config_dir(home_dir) / LOGS_DIRNAME
+
+
+def get_error_log_path(home_dir: Path | None = None) -> Path:
+    return get_global_logs_dir(home_dir) / ERROR_LOG_FILENAME
 
 
 def get_legacy_config_path(cwd: Path | None = None) -> Path:

@@ -54,6 +54,7 @@ class BannerWidget(Static):
                 )
             if progress.warning_count:
                 self._mcp_status += f" · {progress.warning_count} 条警告"
+                self._mcp_status += " · 详情：~/.lancher/logs/lancher-error.log"
         else:
             current = f" · {progress.current_server}：连接中" if progress.current_server else ""
             self._mcp_status = (

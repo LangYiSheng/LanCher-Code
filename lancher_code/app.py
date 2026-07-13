@@ -12,6 +12,7 @@ from lancher_code.config import (
 )
 from lancher_code.errors import ConfigError
 from lancher_code.mcp import MCPClientManager, load_mcp_config
+from lancher_code.logging_system import get_logger, register_sensitive_values
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
@@ -22,6 +23,7 @@ from lancher_code.tui_views.chat import ChatTUI
 from lancher_code.turn_runner import TurnRunner
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10.0
+logger = get_logger("app")
 
 
 async def run_app() -> int:
@@ -35,10 +37,12 @@ async def run_app() -> int:
     try:
         config = load_config(bootstrap_state.config_path)
     except ConfigError as exc:
+        logger.error("event=application_config_invalid exception_type=%s", type(exc).__name__)
         console.print(f"[错误] {exc.user_message}", style="bold red")
         return 1
 
     provider = create_provider(config.provider)
+    register_sensitive_values([config.provider.api_key])
     cwd = Path.cwd()
     session_controller = SessionController(
         config.provider,
@@ -48,6 +52,11 @@ async def run_app() -> int:
     )
     tool_registry = create_default_tool_registry()
     mcp_configs, mcp_issues = load_mcp_config(cwd)
+    register_sensitive_values(
+        value
+        for mcp_config in mcp_configs
+        for value in (*mcp_config.env.values(), *mcp_config.headers.values())
+    )
     mcp_manager = MCPClientManager(
         mcp_configs,
         issues=mcp_issues,

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from lancher_code.errors import ToolNotFoundError
+from lancher_code.logging_system import get_logger
 from lancher_code.models import (
     CancellationToken,
     PermissionRequest,
@@ -17,6 +18,8 @@ from lancher_code.models import (
 from lancher_code.permission_engine import PermissionCheck, PermissionEngine
 from lancher_code.tools.core.file_state_cache import FileStateCache
 from lancher_code.tools.core.registry import ToolRegistry
+
+logger = get_logger("tools.executor")
 
 PermissionResolver = Callable[[PermissionRequest], Awaitable[PermissionResolution]]
 
@@ -157,6 +160,7 @@ class ToolExecutor:
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
+            logger.error("event=tool_execution_timeout tool=%s", call.tool_name)
             return ToolExecutionResult(
                 call_id=call.call_id,
                 tool_name=call.tool_name,
@@ -168,6 +172,10 @@ class ToolExecutor:
                 error_message=f"{call.tool_name} 执行超时",
             )
         except Exception as exc:
+            logger.exception(
+                "event=tool_execution_failed tool=%s exception_type=%s",
+                call.tool_name, type(exc).__name__,
+            )
             return ToolExecutionResult(
                 call_id=call.call_id,
                 tool_name=call.tool_name,
