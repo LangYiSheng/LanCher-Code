@@ -245,6 +245,7 @@ class SessionController:
         *,
         allow_tool_calls: bool,
         mode: RuntimeMode | None = None,
+        deferred_tool_names: list[str] | None = None,
     ) -> ChatRequest:
         active_mode = mode or self.runtime_mode
         thinking = self._request_thinking()
@@ -253,6 +254,7 @@ class SessionController:
             context=self._prompt_context(active_mode),
             transcript=self.transcript,
             tools=filtered_tools,
+            deferred_tool_names=deferred_tool_names,
         )
         return ChatRequest(
             model=self._provider_config.model,

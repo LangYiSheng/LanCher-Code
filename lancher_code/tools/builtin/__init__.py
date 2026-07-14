@@ -5,6 +5,7 @@ from lancher_code.tools.builtin.edit_file import EditFileTool, ReplaceInFileTool
 from lancher_code.tools.builtin.glob import FindFilesTool, GlobTool
 from lancher_code.tools.builtin.grep import GrepTool, SearchCodeTool
 from lancher_code.tools.builtin.read_file import ReadFileTool
+from lancher_code.tools.builtin.tool_search import ToolSearchTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
 from lancher_code.tools.builtin.write_plan_file import WritePlanFileTool
 
@@ -18,6 +19,7 @@ __all__ = [
     "ReplaceInFileTool",
     "RunCommandTool",
     "SearchCodeTool",
+    "ToolSearchTool",
     "WriteFileTool",
     "WritePlanFileTool",
 ]

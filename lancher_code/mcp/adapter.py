@@ -25,7 +25,7 @@ class MCPToolAdapter:
             category="read" if read_only else "command",
             is_concurrency_safe=read_only,
             is_system_tool=False,
-            should_defer=False,
+            should_defer=True,
             permission=ToolPermissionMetadata(
                 source="external",
                 rule_key=visible_name,

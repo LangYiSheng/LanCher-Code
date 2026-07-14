@@ -53,6 +53,7 @@ async def test_adapter_maps_definition_and_safely_converts_content(tmp_path: Pat
     adapter = MCPToolAdapter("demo", remote_tool(), connection)  # type: ignore[arg-type]
     assert adapter.definition.name == "mcp__demo__lookup"
     assert adapter.definition.category == "read"
+    assert adapter.definition.should_defer is True
     assert adapter.definition.permission is not None
     result = await adapter.execute({}, ToolContext(cwd=tmp_path, timeout_seconds=10))
     assert not result.is_error

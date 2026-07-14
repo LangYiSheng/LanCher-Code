@@ -47,6 +47,7 @@ class ToolExecutor:
         plan_file_path: Path | None = None,
         cancellation_token: CancellationToken | None = None,
         permission_resolver: PermissionResolver | None = None,
+        available_tool_names: set[str] | None = None,
     ) -> list[ToolExecutionResult]:
         context = ToolContext(
             cwd=self._cwd,
@@ -62,6 +63,26 @@ class ToolExecutor:
 
         for call in calls:
             self._raise_if_cancelled(context)
+            if available_tool_names is not None and call.tool_name not in available_tool_names:
+                if safe_batch:
+                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver))
+                    safe_batch = []
+                results.append(
+                    ToolExecutionResult(
+                        call_id=call.call_id,
+                        tool_name=call.tool_name,
+                        content=(
+                            f"{call.tool_name} 尚未加载。"
+                            "请先调用 tool_search，再在下一次模型请求中调用该工具。"
+                        ),
+                        is_error=True,
+                        metadata={"requires_tool_search": True},
+                        summary=f"{call.tool_name} 尚未加载",
+                        error_code="tool_not_found",
+                        error_message=f"{call.tool_name} 尚未加载。",
+                    )
+                )
+                continue
             try:
                 tool = self._registry.get(call.tool_name)
             except ToolNotFoundError:

@@ -26,7 +26,7 @@ def test_session_controller_filters_tools_for_plan_mode(openai_provider_config, 
     )
 
     tool_names = [tool.name for tool in request.tools]
-    assert tool_names == ["read_file", "bash", "glob", "grep", "write_plan_file"]
+    assert tool_names == ["read_file", "bash", "glob", "grep", "write_plan_file", "tool_search"]
     assert "write_file" not in tool_names
     assert "edit_file" not in tool_names
 

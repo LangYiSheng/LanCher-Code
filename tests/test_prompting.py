@@ -54,6 +54,18 @@ def test_build_environment_prompt_contains_stable_environment_context(tmp_path: 
     assert "git" not in prompt.casefold()
 
 
+def test_build_deferred_tools_prompt_contains_only_compact_name_index() -> None:
+    prompt = prompting_module.build_deferred_tools_prompt(
+        ["mcp__grafana__query_prometheus", "mcp__grafana__query_loki"]
+    )
+
+    assert prompt is not None
+    assert "必须先调用 tool_search" in prompt
+    assert "mcp__grafana__query_prometheus" in prompt
+    assert "input_schema" not in prompt
+    assert prompting_module.build_deferred_tools_prompt([]) is None
+
+
 def test_build_dynamic_context_prompt_returns_none_without_dynamic_state(tmp_path: Path) -> None:
     prompt = prompting_module.build_dynamic_context_prompt(_context(tmp_path))
 
@@ -154,3 +166,16 @@ def test_build_chat_request_payload_keeps_system_messages_before_history(tmp_pat
     assert len(payload.system) == 2
     assert payload.messages == transcript
     assert payload.tools == tools
+
+
+def test_build_chat_request_payload_appends_deferred_tools_to_system(tmp_path: Path) -> None:
+    payload = prompting_module.build_chat_request_payload(
+        context=_context(tmp_path),
+        transcript=[],
+        tools=[],
+        deferred_tool_names=["mcp__demo__lookup"],
+    )
+
+    assert len(payload.system) == 3
+    assert payload.system[-1].startswith("<deferred-tools>")
+    assert "mcp__demo__lookup" in payload.system[-1]

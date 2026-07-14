@@ -131,6 +131,7 @@ class TurnRunner:
         total_usage = MessageUsage()
         loop_count = 0
         unknown_tool_streak = 0
+        discovered_tool_names: set[str] = set()
 
         try:
             user_message = self._session.create_user_message(text)
@@ -157,10 +158,17 @@ class TurnRunner:
                     await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
                     return
 
+                visible_tools = self._tool_registry.list_definitions(
+                    discovered_names=discovered_tool_names,
+                    mode=self._session.runtime_mode,
+                )
                 request = self._session.build_request(
-                    self._tool_registry.list_definitions(mode=self._session.runtime_mode),
+                    visible_tools,
                     allow_tool_calls=True,
                     mode=self._session.runtime_mode,
+                    deferred_tool_names=self._tool_registry.list_deferred_index(
+                        mode=self._session.runtime_mode
+                    ),
                 )
                 request.cancellation_token = cancellation_token
                 loop_usage = MessageUsage()
@@ -270,7 +278,14 @@ class TurnRunner:
                         plan_file_path=self._session.plan_file_path,
                         cancellation_token=cancellation_token,
                         permission_resolver=self._request_permission,
+                        available_tool_names={tool.name for tool in visible_tools},
                     )
+                    for result in results:
+                        discovered = result.metadata.get("discovered_tool_names")
+                        if isinstance(discovered, list):
+                            discovered_tool_names.update(
+                                name for name in discovered if isinstance(name, str)
+                            )
                     self._session.append_tool_results(results)
                     self._session.append_trace_tool_results(assistant_message.id, results)
                     for result in results:

@@ -6,6 +6,7 @@ from lancher_code.models import ToolPermissionMetadata
 _BUILTIN_LABELS = {
     "read_file": "ReadFile", "write_file": "WriteFile", "edit_file": "EditFile",
     "bash": "Bash", "glob": "Glob", "grep": "Grep", "write_plan_file": "WritePlanFile",
+    "tool_search": "ToolSearch",
 }
 
 
@@ -18,6 +19,7 @@ def create_default_tool_registry() -> ToolRegistry:
         ReadFileTool,
         WriteFileTool,
         WritePlanFileTool,
+        ToolSearchTool,
     )
 
     registry = ToolRegistry()
@@ -28,6 +30,7 @@ def create_default_tool_registry() -> ToolRegistry:
     registry.register(GlobTool())
     registry.register(GrepTool())
     registry.register(WritePlanFileTool())
+    registry.register(ToolSearchTool(registry))
     for definition in registry.list_definitions(include_deferred=True):
         if definition.permission is None:
             label = _BUILTIN_LABELS[definition.name]

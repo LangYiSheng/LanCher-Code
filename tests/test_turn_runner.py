@@ -51,6 +51,32 @@ class EchoTool:
         )
 
 
+class DeferredEchoTool(EchoTool):
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="mcp__demo__echo",
+            description="来自 demo Server 的延迟 echo",
+            input_schema={"type": "object", "properties": {"value": {"type": "string"}}},
+            should_defer=True,
+        )
+
+
+class DiscoverTool:
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(name="tool_search", description="发现工具", input_schema={"type": "object"})
+
+    async def execute(self, arguments, context) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            call_id="",
+            tool_name="tool_search",
+            content="已发现",
+            metadata={"discovered_tool_names": ["mcp__demo__echo"]},
+            summary="已发现工具",
+        )
+
+
 def _runner(provider: FakeProvider, openai_provider_config, tmp_path: Path) -> tuple[TurnRunner, SessionController]:
     registry = ToolRegistry()
     registry.register(EchoTool())
@@ -87,6 +113,91 @@ async def test_turn_runner_completes_plain_text_turn(openai_provider_config, tmp
     assert events[-1].message.content == "直接回答"
     assert len(provider.requests) == 1
     assert [message.role for message in session.transcript] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_adds_discovered_schema_only_to_next_loop(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-search", name_delta="tool_search")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"query":"echo"}')),
+                StreamEvent(kind="message_end"),
+            ],
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="text_delta", text="已加载"),
+                StreamEvent(kind="message_end"),
+            ],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(DiscoverTool())
+    registry.register(DeferredEchoTool())
+    session = SessionController(openai_provider_config)
+    executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
+    runner = TurnRunner(provider, session, registry, executor)
+
+    events = [event async for event in runner.run_user_turn("使用远程 echo")]
+
+    assert events[-1].kind == "assistant_message_completed"
+    assert [tool.name for tool in provider.requests[0].tools] == ["tool_search"]
+    assert [tool.name for tool in provider.requests[1].tools] == ["tool_search", "mcp__demo__echo"]
+    assert "mcp__demo__echo" in provider.requests[0].system[-1]
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_resets_discovered_tools_for_next_user_turn(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-search", name_delta="tool_search")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"query":"echo"}')),
+                StreamEvent(kind="message_end"),
+            ],
+            [StreamEvent(kind="message_start"), StreamEvent(kind="text_delta", text="完成"), StreamEvent(kind="message_end")],
+            [StreamEvent(kind="message_start"), StreamEvent(kind="text_delta", text="新一轮"), StreamEvent(kind="message_end")],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(DiscoverTool())
+    registry.register(DeferredEchoTool())
+    session = SessionController(openai_provider_config)
+    runner = TurnRunner(provider, session, registry, ToolExecutor(registry, cwd=tmp_path))
+
+    _ = [event async for event in runner.run_user_turn("第一轮")]
+    _ = [event async for event in runner.run_user_turn("第二轮")]
+
+    assert [tool.name for tool in provider.requests[2].tools] == ["tool_search"]
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_rejects_direct_call_to_undiscovered_tool(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [
+                StreamEvent(kind="message_start"),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-hidden", name_delta="mcp__demo__echo")),
+                StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, arguments_delta='{"value":"x"}')),
+                StreamEvent(kind="message_end"),
+            ],
+            [StreamEvent(kind="message_start"), StreamEvent(kind="text_delta", text="先搜索"), StreamEvent(kind="message_end")],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(DiscoverTool())
+    registry.register(DeferredEchoTool())
+    session = SessionController(openai_provider_config)
+    runner = TurnRunner(provider, session, registry, ToolExecutor(registry, cwd=tmp_path))
+
+    events = [event async for event in runner.run_user_turn("直接调用隐藏工具")]
+    result_events = [event for event in events if event.kind == "tool_result_received"]
+
+    assert result_events[0].tool_result is not None
+    assert result_events[0].tool_result.error_code == "tool_not_found"
+    assert result_events[0].tool_result.metadata["requires_tool_search"] is True
 
 
 @pytest.mark.asyncio

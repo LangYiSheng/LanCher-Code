@@ -68,6 +68,18 @@ def build_environment_prompt(context: PromptContext) -> str:
     )
 
 
+def build_deferred_tools_prompt(tool_names: list[str]) -> str | None:
+    if not tool_names:
+        return None
+    return (
+        "<deferred-tools>\n"
+        "以下 MCP 工具已延迟加载，当前请求不包含其完整参数定义。"
+        "需要使用时，必须先调用 tool_search；不要直接调用尚未加载的工具。\n"
+        f"可搜索工具：{', '.join(tool_names)}\n"
+        "</deferred-tools>"
+    )
+
+
 def build_dynamic_context_prompt(context: PromptContext) -> str | None:
     reminders: list[str] = []
     for builder in (
@@ -193,11 +205,15 @@ def build_chat_request_payload(
     context: PromptContext,
     transcript: list[ConversationMessage],
     tools: list[ToolDefinition],
+    deferred_tool_names: list[str] | None = None,
 ) -> PromptPayload:
     system = [
         build_system_prompt(),
         build_environment_prompt(context),
     ]
+    deferred_tools_prompt = build_deferred_tools_prompt(deferred_tool_names or [])
+    if deferred_tools_prompt:
+        system.append(deferred_tools_prompt)
     messages = list(transcript)
 
     # Reserved for future AGENTS.md injection.
