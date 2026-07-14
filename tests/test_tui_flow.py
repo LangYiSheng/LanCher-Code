@@ -5,6 +5,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from rich.console import Console
+from rich.table import Table
 from rich.text import Text
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
@@ -124,6 +126,21 @@ async def test_tui_composer_placeholder_is_minimal_in_normal_mode(
         assert str(status_left.render()) == "gpt-test (OpenAI)"
         hint_bar = app.query_one(CommandHintBar)
         assert not hint_bar.display
+
+
+@pytest.mark.asyncio
+async def test_chat_view_keeps_balanced_horizontal_gutters(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, _ = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test(size=(100, 30)):
+        chat_view = app.query_one("#chat-view", VerticalScroll)
+        assert chat_view.region.x == 1
+        assert chat_view.region.right == 99
+        assert chat_view.content_region.x >= 2
 
 
 @pytest.mark.asyncio
@@ -355,20 +372,20 @@ async def test_composer_grows_with_multiline_input_and_shrinks_after_submit(
         composer_box = app.query_one("#composer", Horizontal)
 
         assert str(composer.styles.height) == "1"
-        assert str(composer_box.styles.height) == "3"
+        assert str(composer_box.styles.height) == "2"
 
         composer.text = "第一行\n第二行\n第三行"
         composer.focus()
         await pilot.pause(0.05)
 
         assert str(composer.styles.height) == "3"
-        assert str(composer_box.styles.height) == "5"
+        assert str(composer_box.styles.height) == "4"
 
         await pilot.press("enter")
         await pilot.pause(0.1)
 
         assert str(composer.styles.height) == "1"
-        assert str(composer_box.styles.height) == "3"
+        assert str(composer_box.styles.height) == "2"
 
 
 @pytest.mark.asyncio
@@ -508,9 +525,14 @@ async def test_banner_collapses_after_first_submission(
         banner = app.query_one(BannerWidget)
         assert banner.compact is True
         renderable = banner.render()
-        assert isinstance(renderable, Text)
-        assert "LanCher Code" in renderable.plain
-        assert "工作目录：" in renderable.plain
+        assert isinstance(renderable, Table)
+        console = Console(width=120, color_system=None)
+        with console.capture() as capture:
+            console.print(renderable)
+        header_text = capture.get()
+        assert "LanCher Code" in header_text
+        assert "cwd:" in header_text
+        assert "MCP 0/0" in header_text
         assert app.query_one("#chat-view", VerticalScroll).has_class("-banner-collapsed")
 
 

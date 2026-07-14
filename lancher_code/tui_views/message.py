@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.console import Group, RenderableType
+from rich.table import Table
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -11,7 +12,7 @@ from textual.events import Click
 from textual.widgets import Static
 
 from lancher_code.models import SessionMessage, TraceEntry
-from lancher_code.mcp.manager import MCPInitializationProgress
+from lancher_code.mcp.manager import MCPInitializationProgress, MCPServerInitialization
 
 BANNER_TEXT = r"""
     __                ________                 ______          __
@@ -28,6 +29,13 @@ class BannerWidget(Static):
         self._cwd = cwd
         self._compact = False
         self._mcp_status = "MCP：未配置"
+        self._mcp_compact_status = "MCP 0/0"
+        self._mcp_has_issues = False
+        self._mcp_progress: MCPInitializationProgress | None = None
+        self._spinner_frame = 0
+
+    def on_mount(self) -> None:
+        self.set_interval(0.14, self._advance_spinner)
 
     @property
     def compact(self) -> bool:
@@ -39,6 +47,13 @@ class BannerWidget(Static):
         self.refresh()
 
     def update_mcp_progress(self, progress: MCPInitializationProgress) -> None:
+        self._mcp_progress = progress
+        self._mcp_has_issues = bool(progress.failed_servers or progress.warning_count)
+        self._mcp_compact_status = (
+            f"MCP {progress.successful_servers}/{progress.total_servers}"
+        )
+        if self._mcp_has_issues:
+            self._mcp_compact_status += " !"
         if progress.state == "complete":
             if progress.total_servers == 0:
                 self._mcp_status = "MCP：未配置"
@@ -64,23 +79,80 @@ class BannerWidget(Static):
             )
         self.refresh()
 
+    def _advance_spinner(self) -> None:
+        progress = self._mcp_progress
+        if progress is None or progress.state == "complete":
+            return
+        if any(server.state in {"connecting", "registering"} for server in progress.servers):
+            self._spinner_frame = (self._spinner_frame + 1) % 4
+            self.refresh()
+
     def render(self) -> RenderableType:
+        header = self._header()
         if self._compact:
-            compact_text = Text()
-            compact_text.append("LanCher Code", style="bold #73b6ff")
-            compact_text.append("  ")
-            compact_text.append("工作目录：", style="bold #73b6ff")
-            compact_text.append(str(self._cwd), style="default")
-            compact_text.append("  ")
-            compact_text.append(self._mcp_status, style="#97adc7")
-            return compact_text
+            return header
 
         title = Text(BANNER_TEXT.strip("\n"), style="bold #73b6ff")
-        subtitle = Text()
-        subtitle.append("当前工作目录：", style="bold #73b6ff")
-        subtitle.append(str(self._cwd), style="default")
-        status = Text(self._mcp_status, style="#97adc7")
-        return Group(title, subtitle, status)
+        return Group(header, title, self._render_mcp_panel())
+
+    def _header(self) -> Table:
+        header = Table.grid(expand=True)
+        header.add_column(ratio=1, overflow="ellipsis")
+        header.add_column(justify="right", no_wrap=True)
+
+        left = Text()
+        left.append("LanCher Code", style="bold #73b6ff")
+        left.append("  cwd: ", style="#7f9ab8")
+        left.append(str(self._cwd), style="#c8d5e3")
+
+        mcp_style = "#ff9b6b" if self._mcp_has_issues else "#7f9ab8"
+        header.add_row(left, Text(self._mcp_compact_status, style=mcp_style))
+        return header
+
+    def _render_mcp_panel(self) -> RenderableType:
+        progress = self._mcp_progress
+        if progress is None or not progress.servers:
+            return Text(self._mcp_status, style="#97adc7")
+
+        lines: list[Text] = []
+        heading = Text("MCP 服务", style="bold #c8d5e3")
+        lines.append(heading)
+        for server in progress.servers:
+            lines.append(self._render_server_row(server))
+
+        footer = Text()
+        footer.append(
+            f"  {progress.successful_servers}/{progress.total_servers} 已就绪",
+            style="#78d98a" if progress.successful_servers else "#7f9ab8",
+        )
+        footer.append(f" · {progress.registered_tools} 个工具", style="#97adc7")
+        if progress.failed_servers:
+            footer.append(f" · {progress.failed_servers} 个失败", style="#ff7b72")
+        if progress.warning_count:
+            footer.append(f" · {progress.warning_count} 条警告", style="#ff9b6b")
+        lines.append(footer)
+        return Group(*lines)
+
+    def _render_server_row(self, server: MCPServerInitialization) -> Text:
+        spinners = ("◐", "◓", "◑", "◒")
+        if server.state == "waiting":
+            marker, state_text, style = "○", "等待启动", "#7f9ab8"
+        elif server.state == "connecting":
+            marker, state_text, style = spinners[self._spinner_frame], "正在连接…", "#73b6ff"
+        elif server.state == "registering":
+            marker, state_text, style = spinners[self._spinner_frame], "正在注册工具…", "#73b6ff"
+        elif server.state == "failed":
+            marker, state_text, style = "✕", "启动失败", "#ff7b72"
+        elif server.warning_count:
+            marker, state_text, style = "!", f"已就绪 · {server.registered_tools} 个工具", "#ff9b6b"
+        else:
+            marker, state_text, style = "✓", f"已就绪 · {server.registered_tools} 个工具", "#78d98a"
+
+        row = Text("  ")
+        row.append(marker, style=f"bold {style}")
+        row.append(f" {server.name:<18}", style="#c8d5e3")
+        row.append(state_text, style=style)
+        return row
 
 
 class ThinkingTraceWidget(Vertical):

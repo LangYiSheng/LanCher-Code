@@ -48,7 +48,7 @@ logger = get_logger("tui.chat")
 
 MIN_COMPOSER_LINES = 1
 MAX_COMPOSER_LINES = 6
-COMPOSER_FRAME_HEIGHT = 2
+COMPOSER_FRAME_HEIGHT = 1
 DEFAULT_COMMAND_HINT = ""
 DEFAULT_PLACEHOLDER = "发送一条消息"
 PLAN_PLACEHOLDER = "Plan Mode: 继续补充或修改计划"
@@ -77,33 +77,34 @@ class LanCherTextualApp(App[int]):
 
     #root {
         height: 100%;
+        width: 100%;
         layout: vertical;
     }
 
     #banner {
-        margin: 0 1 0 1;
-        padding: 0 1 0 1;
-        border: tall #73b6ff;
+        margin: 1 2 0 2;
+        padding: 0;
+        border: none;
         width: 1fr;
     }
 
     #banner.-compact {
-        border: none;
-        margin: 0 1 0 1;
+        margin: 0 2;
         padding: 0;
         height: auto;
+        color: #7f9ab8;
     }
 
     #chat-view {
         margin: 1 1 0 1;
-        padding: 1 1;
-        border: round #4b6f97;
+        padding: 1;
+        border: none;
         height: 1fr;
-        width: 1fr;
+        width: 100%;
     }
 
     .message {
-        margin: 0 0 1 0;
+        margin: 0 0 2 0;
         padding: 0 0 0 1;
         width: 100%;
         height: auto;
@@ -147,14 +148,14 @@ class LanCherTextualApp(App[int]):
     }
 
     #composer-region {
-        margin: 1 1 0 1;
+        margin: 1 2 0 2;
         width: 1fr;
         layout: vertical;
         height: auto;
     }
 
     #slash-command-menu {
-        border: round #4b6f97;
+        border-left: solid #4b6f97;
         background: #0f1a26;
         padding: 0 0;
         margin: 0 0 1 0;
@@ -174,17 +175,17 @@ class LanCherTextualApp(App[int]):
     }
 
     #composer {
-        border: tall #4b6f97;
-        height: 3;
-        min-height: 3;
-        max-height: 8;
+        border-top: solid #4b6f97;
+        height: 2;
+        min-height: 2;
+        max-height: 7;
         layout: horizontal;
         width: 1fr;
         padding: 0 1;
     }
 
     #composer:focus-within {
-        border: tall #73b6ff;
+        border-top: solid #73b6ff;
     }
 
     #prompt-glyph {
@@ -247,7 +248,7 @@ class LanCherTextualApp(App[int]):
     }
 
     #inline-permission-panel {
-        border: tall #4b6f97;
+        border-left: solid #4b6f97;
         padding: 1 2;
         width: 1fr;
         height: auto;
@@ -255,7 +256,7 @@ class LanCherTextualApp(App[int]):
     }
 
     #inline-permission-panel:focus {
-        border: tall #73b6ff;
+        border-left: solid #73b6ff;
     }
 
     #permission-title {
@@ -315,7 +316,7 @@ class LanCherTextualApp(App[int]):
     }
 
     #status-bar {
-        margin: 0 1 1 1;
+        margin: 1 1 1 1;
         height: 1;
         layout: horizontal;
         color: #97adc7;

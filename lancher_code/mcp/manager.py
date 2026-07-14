@@ -20,6 +20,14 @@ ConnectionFactory = Callable[[MCPServerConfig], MCPServerConnection]
 
 
 @dataclass(slots=True, frozen=True)
+class MCPServerInitialization:
+    name: str
+    state: str
+    registered_tools: int = 0
+    warning_count: int = 0
+
+
+@dataclass(slots=True, frozen=True)
 class MCPInitializationProgress:
     total_servers: int
     completed_servers: int
@@ -29,6 +37,7 @@ class MCPInitializationProgress:
     current_server: str | None
     state: str
     warning_count: int = 0
+    servers: tuple[MCPServerInitialization, ...] = ()
 
 
 class MCPClientManager:
@@ -41,6 +50,10 @@ class MCPClientManager:
         self._connections: dict[str, MCPServerConnection] = {}
         self._progress_callbacks: list[Callable[[MCPInitializationProgress], None]] = []
         self._completed = self._successful = self._failed = self._registered = 0
+        self._server_states: dict[str, MCPServerInitialization] = {
+            config.name: MCPServerInitialization(config.name, "waiting")
+            for config in self.configs
+        }
 
     @property
     def has_servers(self) -> bool:
@@ -51,9 +64,9 @@ class MCPClientManager:
 
     async def initialize(self, registry: ToolRegistry) -> list[MCPConfigIssue]:
         self._emit(None, "initializing")
-        tasks = [asyncio.create_task(self._discover(config)) for config in self.configs]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for config, result in zip(self.configs, results):
+        tasks = [asyncio.create_task(self._discover_safely(config)) for config in self.configs]
+        for completed in asyncio.as_completed(tasks):
+            config, result = await completed
             if isinstance(result, BaseException):
                 stage = result.stage if isinstance(result, MCPConnectionError) else "启动"
                 self.issues.append(MCPConfigIssue(stage, f"MCP Server {config.name} {stage}失败", config.name))
@@ -64,21 +77,39 @@ class MCPClientManager:
                 )
                 self._failed += 1
                 self._completed += 1
+                self._set_server(config.name, "failed")
                 self._emit(config.name, "server_failed")
                 continue
             connection, tools = result
             self._connections[config.name] = connection
+            self._set_server(config.name, "registering")
+            self._emit(config.name, "registering_tools")
+            registered_before = self._registered
             for remote in tools:
                 self._register_tool(registry, config.name, remote, connection)
+            registered_tools = self._registered - registered_before
             self._successful += 1
             self._completed += 1
+            warning_count = sum(1 for issue in self.issues if issue.server_name == config.name)
+            self._set_server(config.name, "ready", registered_tools, warning_count)
             self._emit(config.name, "server_ready")
         self._emit(None, "complete")
         return list(self.issues)
 
+    async def _discover_safely(
+        self, config: MCPServerConfig
+    ) -> tuple[MCPServerConfig, tuple[MCPServerConnection, list[mcp_types.Tool]] | BaseException]:
+        try:
+            return config, await self._discover(config)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            return config, exc
+
     async def _discover(self, config: MCPServerConfig) -> tuple[MCPServerConnection, list[mcp_types.Tool]]:
         connection = self._connection_factory(config)
         self._connections[config.name] = connection
+        self._set_server(config.name, "connecting")
         self._emit(config.name, "connecting")
         try:
             async with asyncio.timeout(self.timeout_seconds):
@@ -105,10 +136,22 @@ class MCPClientManager:
     def _emit(self, current_server: str | None, state: str) -> None:
         progress = MCPInitializationProgress(
             len(self.configs), self._completed, self._successful, self._failed,
-            self._registered, current_server, state, len(self.issues)
+            self._registered, current_server, state, len(self.issues),
+            tuple(self._server_states.values()),
         )
         for callback in tuple(self._progress_callbacks):
             callback(progress)
+
+    def _set_server(
+        self,
+        name: str,
+        state: str,
+        registered_tools: int = 0,
+        warning_count: int = 0,
+    ) -> None:
+        self._server_states[name] = MCPServerInitialization(
+            name, state, registered_tools, warning_count
+        )
 
     async def close(self) -> None:
         connections = list(dict.fromkeys(self._connections.values()))

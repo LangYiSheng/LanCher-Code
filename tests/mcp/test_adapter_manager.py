@@ -101,6 +101,37 @@ async def test_manager_times_out_one_server_without_losing_other() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manager_reports_each_server_progress_independently() -> None:
+    class StaggeredConnection(FakeConnection):
+        async def connect_and_list_tools(self) -> list[types.Tool]:
+            await asyncio.sleep(0.03 if self.name == "slow" else 0)
+            return [remote_tool(self.name)]
+
+    configs = [
+        MCPServerConfig(name="slow", type="stdio", command="python"),
+        MCPServerConfig(name="fast", type="stdio", command="python"),
+    ]
+    manager = MCPClientManager(configs, connection_factory=StaggeredConnection)  # type: ignore[arg-type]
+    snapshots = []
+    manager.add_progress_callback(snapshots.append)
+
+    await manager.initialize(ToolRegistry())
+
+    assert any(
+        {server.name: server.state for server in progress.servers}
+        == {"slow": "connecting", "fast": "ready"}
+        for progress in snapshots
+    )
+    final = snapshots[-1]
+    assert final.state == "complete"
+    assert [(server.name, server.state, server.registered_tools) for server in final.servers] == [
+        ("slow", "ready", 1),
+        ("fast", "ready", 1),
+    ]
+    await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_real_stdio_server_discovery_call_and_close(tmp_path: Path) -> None:
     server_path = Path(__file__).with_name("stdio_test_server.py")
     config = MCPServerConfig(
