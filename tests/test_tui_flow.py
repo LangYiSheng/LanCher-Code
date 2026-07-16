@@ -70,7 +70,7 @@ class FakeProvider:
 
 
 def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Path) -> tuple[LanCherTextualApp, SessionController]:
-    session = SessionController(provider_config)
+    session = SessionController(provider_config, cwd=tmp_path)
     registry = ToolRegistry()
     registry.register(EchoTool())
     executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
@@ -192,10 +192,35 @@ async def test_shift_tab_cycles_permission_mode_and_updates_status_left(
 
 def _visible_slash_commands(app: LanCherTextualApp) -> list[str]:
     return [
-        item.definition.name
+        item.candidate.value
         for item in app.query(SlashCommandMenuItem)
         if item.display
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_resume_rebuilds_chat_widgets(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    saved = SessionController(openai_provider_config, cwd=tmp_path)
+    saved.create_user_message("历史问题")
+    reply = saved.create_assistant_message()
+    saved.append_message_content(reply.id, "历史回答")
+    saved.complete_message(reply.id)
+    saved.save_session("history")
+
+    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+    async with app.run_test() as pilot:
+        await app._execute_session_command("resume history")
+        await pilot.pause()
+
+        assert session.active_session_name == "history"
+        assert [widget.message_id for widget in app.query(MessageWidget)] == [
+            message.id for message in session.state.messages
+        ]
+        assert app.query_one(BannerWidget).compact is True
 
 
 @pytest.mark.asyncio
@@ -251,18 +276,21 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
         composer.text = "/"
+        composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
 
         menu = app.query_one(SlashCommandMenu)
         assert menu.display
-        assert _visible_slash_commands(app) == ["plan", "mode", "settings", "exit"]
+        assert _visible_slash_commands(app) == ["plan", "mode", "session", "settings", "exit"]
 
         composer.text = "/p"
+        composer.cursor_location = composer.document.end
         await pilot.pause(0.05)
         assert _visible_slash_commands(app) == ["plan"]
 
         composer.text = "/d"
+        composer.cursor_location = composer.document.end
         await pilot.pause(0.05)
         assert not menu.display
 
@@ -279,6 +307,7 @@ async def test_slash_menu_accepts_selection_without_submitting(
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
         composer.text = "/"
+        composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
         await pilot.press("enter")
@@ -301,6 +330,7 @@ async def test_slash_menu_accepts_selection_with_tab_without_submitting(
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
         composer.text = "/"
+        composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
         await pilot.press("tab")
@@ -309,6 +339,70 @@ async def test_slash_menu_accepts_selection_with_tab_without_submitting(
         assert composer.text == "/plan "
         assert len(provider.requests) == 0
         assert not app.query_one(SlashCommandMenu).display
+
+
+@pytest.mark.asyncio
+async def test_multilevel_session_completion_advances_until_terminal_value(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    saved = SessionController(openai_provider_config, cwd=tmp_path)
+    saved.save_session("history")
+    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/ses"
+        composer.cursor_location = composer.document.end
+        composer.focus()
+        await pilot.pause(0.05)
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+        assert composer.text == "/session "
+        assert _visible_slash_commands(app) == ["list", "save", "remove", "rename", "resume"]
+
+        composer.text = "/session res"
+        composer.cursor_location = composer.document.end
+        await pilot.pause(0.05)
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+        assert composer.text == "/session resume "
+        assert _visible_slash_commands(app) == ["history"]
+
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+        assert composer.text == "/session resume history"
+        assert not app.query_one(SlashCommandMenu).display
+
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+        assert session.active_session_name == "history"
+
+
+@pytest.mark.asyncio
+async def test_mode_completion_selects_terminal_value_before_submission(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer-input", ComposerTextArea)
+        composer.text = "/mode p"
+        composer.cursor_location = composer.document.end
+        composer.focus()
+        await pilot.pause(0.05)
+        await pilot.press("tab")
+        await pilot.pause(0.05)
+
+        assert composer.text == "/mode plan"
+        assert not app.query_one(SlashCommandMenu).display
+        assert session.runtime_mode == "default"
+
+        await pilot.press("enter")
+        await pilot.pause(0.05)
+        assert session.runtime_mode == "plan"
 
 
 @pytest.mark.asyncio
@@ -322,6 +416,7 @@ async def test_escape_closes_slash_menu(
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
         composer.text = "/"
+        composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
         await pilot.press("escape")

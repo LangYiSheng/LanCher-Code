@@ -46,11 +46,16 @@ async def run_app() -> int:
     provider = create_provider(config.provider)
     register_sensitive_values([config.provider.api_key])
     cwd = Path.cwd()
+    permission_storage = PermissionStorage(
+        project_rules_path=get_project_permissions_path(cwd),
+        user_rules_path=get_global_permissions_path(),
+    )
     session_controller = SessionController(
         config.provider,
         cwd=cwd,
         plan_file_path=Path(config.runtime.plan_file_path),
         initial_runtime_mode=config.runtime.permission_mode,
+        permission_storage=permission_storage,
     )
     tool_registry = create_default_tool_registry()
     mcp_configs, mcp_issues = load_mcp_config(cwd)
@@ -64,12 +69,7 @@ async def run_app() -> int:
         issues=mcp_issues,
         timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS,
     )
-    permission_engine = PermissionEngine(
-        PermissionStorage(
-            project_rules_path=get_project_permissions_path(cwd),
-            user_rules_path=get_global_permissions_path(),
-        )
-    )
+    permission_engine = PermissionEngine(permission_storage)
     settings_service = SettingsService(
         config_path=bootstrap_state.config_path,
         global_mcp_path=get_global_mcp_config_path(),

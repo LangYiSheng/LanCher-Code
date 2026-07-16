@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 from uuid import uuid4
 
 import yaml
@@ -123,6 +123,7 @@ class PermissionStorage:
         self._project_rules_path = project_rules_path
         self._user_rules_path = user_rules_path
         self._session_rules: list[PermissionRule] = []
+        self._session_rule_callbacks: list[Callable[[], None]] = []
         self._project_rules = self._load_rules(project_rules_path, "project")
         self._user_rules = self._load_rules(user_rules_path, "user")
 
@@ -164,9 +165,39 @@ class PermissionStorage:
             self._user_rules = normalized
 
     def add_session_rule(self, match: str, result: Literal["allow", "deny"]) -> PermissionRule:
-        rule = PermissionRule(match=match, result=result, scope="session")
+        normalized_match = match.strip()
+        if not normalized_match:
+            raise ValueError("session 权限规则的 match 不能为空。")
+        rule = PermissionRule(match=normalized_match, result=result, scope="session")
         self._session_rules.append(rule)
+        self._notify_session_rules_changed()
         return rule
+
+    def replace_session_rules(
+        self,
+        rules: list[PermissionRule],
+        *,
+        notify: bool = True,
+    ) -> None:
+        normalized: list[PermissionRule] = []
+        for rule in rules:
+            match = rule.match.strip()
+            if not match:
+                raise ValueError("session 权限规则的 match 不能为空。")
+            if rule.result not in {"allow", "deny"}:
+                raise ValueError("session 权限规则的 result 只能是 allow 或 deny。")
+            normalized.append(PermissionRule(match=match, result=rule.result, scope="session"))
+        self._session_rules = normalized
+        if notify:
+            self._notify_session_rules_changed()
+
+    def subscribe_session_rules_changed(self, callback: Callable[[], None]) -> None:
+        if callback not in self._session_rule_callbacks:
+            self._session_rule_callbacks.append(callback)
+
+    def _notify_session_rules_changed(self) -> None:
+        for callback in tuple(self._session_rule_callbacks):
+            callback()
 
     def add_project_rule(self, match: str, result: Literal["allow", "deny"]) -> PermissionRule:
         if self._project_rules_path is None:

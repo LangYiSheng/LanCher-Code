@@ -348,6 +348,9 @@ class TurnRunner:
         finally:
             if self._active_turn is not None:
                 self._active_turn.pending_permissions.clear()
+            auto_save_error = self._session.auto_save()
+            if auto_save_error:
+                logger.error("event=session_auto_save_failed error=%s", auto_save_error)
             await queue.put(_QUEUE_END)
 
     async def _request_permission(self, permission_request: PermissionRequest) -> PermissionResolution:

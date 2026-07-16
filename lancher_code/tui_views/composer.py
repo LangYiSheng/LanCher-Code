@@ -5,11 +5,11 @@ from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.events import Click, Message
 from textual.widgets import Static, TextArea
 
-from lancher_code.slash_commands import SlashCommandDefinition
+from lancher_code.slash_commands import SlashCompletionCandidate
 
 
 class ComposerSubmitted(Message):
@@ -33,10 +33,10 @@ class SlashMenuDismissRequested(Message):
     pass
 
 
-class SlashCommandChosen(Message):
-    def __init__(self, command_name: str) -> None:
+class SlashCompletionChosen(Message):
+    def __init__(self, candidate_key: str) -> None:
         super().__init__()
-        self.command_name = command_name
+        self.candidate_key = candidate_key
 
 
 class PermissionModeCycleRequested(Message):
@@ -56,7 +56,7 @@ class ComposerTextArea(TextArea):
         self.slash_menu_active = False
         self._accepted_slash_command_text: str | None = None
 
-    def _on_key(self, event: events.Key) -> None:
+    async def _on_key(self, event: events.Key) -> None:
         if self.slash_menu_active:
             if event.key == "up":
                 self.post_message(SlashMenuNavigateRequested(-1))
@@ -74,7 +74,7 @@ class ComposerTextArea(TextArea):
                 self.post_message(SlashMenuDismissRequested())
                 event.prevent_default()
                 return
-        super()._on_key(event)
+        await super()._on_key(event)
 
     def action_submit_message(self) -> None:
         if self.slash_menu_active:
@@ -103,10 +103,10 @@ class ComposerTextArea(TextArea):
             self._accepted_slash_command_text = None
 
 
-class SlashCommandMenuItem(Static):
-    def __init__(self, definition: SlashCommandDefinition) -> None:
+class SlashCompletionMenuItem(Static):
+    def __init__(self, candidate: SlashCompletionCandidate) -> None:
         super().__init__(classes="slash-command-item")
-        self.definition = definition
+        self.candidate = candidate
         self._active = False
 
     def set_active(self, active: bool) -> None:
@@ -116,32 +116,41 @@ class SlashCommandMenuItem(Static):
 
     def render(self) -> RenderableType:
         text = Text()
-        text.append(self.definition.usage, style="bold #73b6ff" if not self._active else "bold #f2f2f2")
+        text.append(self.candidate.display, style="bold #73b6ff" if not self._active else "bold #f2f2f2")
         text.append("  ")
-        text.append(self.definition.description, style="#a8b9cc" if not self._active else "#dbe7f3")
+        text.append(self.candidate.description, style="#a8b9cc" if not self._active else "#dbe7f3")
         return text
 
     def on_click(self, event: Click) -> None:
         event.stop()
-        self.post_message(SlashCommandChosen(self.definition.name))
+        self.post_message(SlashCompletionChosen(self.candidate.key))
 
 
-class SlashCommandMenu(Vertical):
-    def __init__(self, commands: list[SlashCommandDefinition]) -> None:
+class SlashCompletionMenu(VerticalScroll):
+    def __init__(self) -> None:
         super().__init__(id="slash-command-menu")
-        self._commands = commands
 
-    def compose(self) -> ComposeResult:
-        for command in self._commands:
-            yield SlashCommandMenuItem(command)
+    async def set_candidates(
+        self,
+        candidates: list[SlashCompletionCandidate],
+        active_key: str | None,
+    ) -> None:
+        await self.remove_children()
+        self.display = bool(candidates)
+        if not candidates:
+            return
+        items = [SlashCompletionMenuItem(candidate) for candidate in candidates]
+        await self.mount(*items)
+        for item in items:
+            item.set_active(item.candidate.key == active_key)
+            if item.candidate.key == active_key:
+                item.scroll_visible(animate=False)
 
-    def set_matches(self, commands: list[SlashCommandDefinition], active_name: str | None) -> None:
-        visible_names = {command.name for command in commands}
-        self.display = bool(commands)
-        for item in self.query(SlashCommandMenuItem):
-            visible = item.definition.name in visible_names
-            item.display = visible
-            item.set_active(visible and item.definition.name == active_name)
+
+# 保留旧导出名，避免外部调用方因菜单泛化而立即失效。
+SlashCommandChosen = SlashCompletionChosen
+SlashCommandMenuItem = SlashCompletionMenuItem
+SlashCommandMenu = SlashCompletionMenu
 
 
 class CommandHintBar(Static):

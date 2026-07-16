@@ -22,12 +22,13 @@ from lancher_code.mcp.manager import MCPClientManager, MCPInitializationProgress
 from lancher_code.settings_service import SettingsService
 from lancher_code.logging_system import get_logger
 from lancher_code.session import SessionController
+from lancher_code.session_store import SessionStoreError
 from lancher_code.slash_commands import (
-    SlashCommandDefinition,
+    SlashCompletionCandidate,
+    SlashCompletionContext,
     SlashCommandRegistry,
     create_default_slash_command_registry,
     extract_exact_command_name,
-    extract_slash_menu_query,
 )
 from lancher_code.tui_views.composer import (
     CommandHintBar,
@@ -164,6 +165,7 @@ class LanCherTextualApp(App[int]):
         display: none;
         width: 1fr;
         height: auto;
+        max-height: 8;
     }
 
     .slash-command-item {
@@ -377,7 +379,7 @@ class LanCherTextualApp(App[int]):
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
         self._status_hint = "Ready"
-        self._slash_menu_matches: list[SlashCommandDefinition] = []
+        self._slash_menu_matches: list[SlashCompletionCandidate] = []
         self._slash_menu_index = 0
         self._permission_resolution_future: asyncio.Future[PermissionResolution] | None = None
         self._mcp_manager = mcp_manager
@@ -390,7 +392,7 @@ class LanCherTextualApp(App[int]):
             yield BannerWidget(Path.cwd())
             yield VerticalScroll(id="chat-view")
             with Vertical(id="composer-region"):
-                yield SlashCommandMenu(self._slash_command_registry.list_all())
+                yield SlashCommandMenu()
                 with Horizontal(id="composer"):
                     yield Static(MODE_GLYPHS["default"], id="prompt-glyph")
                     yield ComposerTextArea(
@@ -408,7 +410,7 @@ class LanCherTextualApp(App[int]):
                 yield Static(id="status-center")
                 yield Static(id="status-right")
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         composer = self.query_one(ComposerTextArea)
         composer.disabled = not self.mcp_initialization_complete
         if self.mcp_initialization_complete:
@@ -416,7 +418,7 @@ class LanCherTextualApp(App[int]):
         self._update_composer_height()
         self._refresh_mode_chrome()
         self._refresh_composer_placeholder()
-        self._refresh_command_ui()
+        await self._refresh_command_ui()
         self._refresh_status_bar()
         if self._mcp_manager is not None:
             self._mcp_manager.add_progress_callback(self._handle_mcp_progress)
@@ -461,32 +463,33 @@ class LanCherTextualApp(App[int]):
         self.exit(0)
 
     @on(TextArea.Changed, "#composer-input")
-    def handle_composer_changed(self) -> None:
+    async def handle_composer_changed(self) -> None:
         self._update_composer_height()
-        self._refresh_command_ui()
+        await self._refresh_command_ui()
 
     @on(SlashMenuNavigateRequested)
-    def handle_slash_menu_navigation(self, event: SlashMenuNavigateRequested) -> None:
-        self._move_slash_menu(event.direction)
+    async def handle_slash_menu_navigation(self, event: SlashMenuNavigateRequested) -> None:
+        await self._move_slash_menu(event.direction)
 
     @on(SlashMenuAcceptRequested)
-    def handle_slash_menu_accept(self) -> None:
-        self._accept_slash_menu_selection()
+    async def handle_slash_menu_accept(self) -> None:
+        await self._accept_slash_menu_selection()
 
     @on(SlashMenuDismissRequested)
-    def handle_slash_menu_dismiss(self) -> None:
-        self._dismiss_slash_menu()
+    async def handle_slash_menu_dismiss(self) -> None:
+        await self._dismiss_slash_menu()
 
     @on(SlashCommandChosen)
-    def handle_slash_command_chosen(self, event: SlashCommandChosen) -> None:
-        self._accept_slash_command(event.command_name)
+    async def handle_slash_command_chosen(self, event: SlashCommandChosen) -> None:
+        await self._accept_completion(event.candidate_key)
 
     @on(PermissionModeCycleRequested)
-    def handle_permission_mode_cycle_requested(self) -> None:
+    async def handle_permission_mode_cycle_requested(self) -> None:
         if self._is_streaming:
             return
         next_mode = _next_runtime_mode(self._session_controller.runtime_mode)
         self._apply_turn_event(self._turn_runner.set_mode(next_mode))
+        await self._refresh_command_ui()
         self._refresh_status_bar()
         self.query_one("#composer-input", ComposerTextArea).focus()
 
@@ -496,7 +499,7 @@ class LanCherTextualApp(App[int]):
             return
         text = event.value.strip()
         event.composer.clear()
-        self._refresh_command_ui()
+        await self._refresh_command_ui()
         if not text or self._is_streaming:
             return
 
@@ -505,7 +508,7 @@ class LanCherTextualApp(App[int]):
             self._session_controller.runtime_mode,
         )
         if slash_match is not None:
-            payload = self._execute_slash_command(slash_match.definition.name, slash_match.arguments_text)
+            payload = await self._execute_slash_command(slash_match.definition.name, slash_match.arguments_text)
             if payload is None:
                 return
             text = payload
@@ -541,13 +544,16 @@ class LanCherTextualApp(App[int]):
             )
         finally:
             self._is_streaming = False
+            auto_save_error = self._session_controller.auto_save()
+            if auto_save_error:
+                self.notify(auto_save_error, title="Session 自动保存", severity="error", timeout=10)
             self._status_hint = "Ready"
             input_widget = self.query_one("#composer-input", ComposerTextArea)
             input_widget.disabled = False
             input_widget.focus()
             self._refresh_mode_chrome()
             self._refresh_composer_placeholder()
-            self._refresh_command_ui()
+            await self._refresh_command_ui()
             self._refresh_status_bar()
             self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
 
@@ -619,14 +625,13 @@ class LanCherTextualApp(App[int]):
             self._permission_resolution_future = None
             await panel.remove()
             composer.display = True
-            self._refresh_command_ui()
+            await self._refresh_command_ui()
 
     def _apply_turn_event(self, event: TurnEvent) -> None:
         if event.kind == "mode_changed":
             self._status_hint = event.progress_message or "Mode changed"
             self._refresh_mode_chrome()
             self._refresh_composer_placeholder()
-            self._refresh_command_ui()
             return
         if event.kind == "progress_updated":
             self._status_hint = event.progress_message or ("Busy" if self._is_streaming else "Ready")
@@ -666,36 +671,44 @@ class LanCherTextualApp(App[int]):
             return
         composer.placeholder = DEFAULT_PLACEHOLDER
 
-    def _refresh_command_ui(self) -> None:
+    async def _refresh_command_ui(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
         menu = self.query_one(SlashCommandMenu)
         hint_bar = self.query_one(CommandHintBar)
         composer.clear_accepted_slash_command_if_needed()
 
-        menu_query = extract_slash_menu_query(composer.text)
-        active_name = self._current_active_slash_name()
-        if menu_query is not None and not composer.should_suppress_slash_menu():
-            matches = self._slash_command_registry.suggest(menu_query, self._session_controller.runtime_mode)
-            match_names = [command.name for command in matches]
-            if active_name in match_names:
-                self._slash_menu_index = match_names.index(active_name)
-            else:
-                self._slash_menu_index = 0
-            self._slash_menu_matches = matches
-            active_name = self._current_active_slash_name()
-            menu.set_matches(matches, active_name)
-            composer.slash_menu_active = bool(matches)
-            if matches and active_name is not None:
-                active_command = self._slash_command_registry.get(active_name)
-                hint_bar.set_hint(active_command.hint_text if active_command is not None else DEFAULT_COMMAND_HINT)
-                return
-            hint_bar.set_hint(DEFAULT_COMMAND_HINT)
+        cursor_at_end = composer.cursor_location == composer.document.end
+        sessions = self._session_controller.list_saved_sessions() if cursor_at_end else []
+        matches = (
+            self._slash_command_registry.complete(
+                SlashCompletionContext(
+                    text=composer.text,
+                    mode=self._session_controller.runtime_mode,
+                    session_names=tuple(item.name for item in sessions),
+                    active_session_name=self._session_controller.active_session_name,
+                )
+            )
+            if cursor_at_end and not composer.should_suppress_slash_menu()
+            else []
+        )
+        active_key = self._current_active_completion_key()
+        match_keys = [candidate.key for candidate in matches]
+        if active_key in match_keys:
+            self._slash_menu_index = match_keys.index(active_key)
+        else:
+            self._slash_menu_index = 0
+        self._slash_menu_matches = matches
+        active_key = self._current_active_completion_key()
+        await menu.set_candidates(matches, active_key)
+        composer.slash_menu_active = bool(matches)
+        if matches and active_key is not None:
+            active = matches[self._slash_menu_index]
+            hint_bar.set_hint(active.description)
             return
 
         self._slash_menu_matches = []
         self._slash_menu_index = 0
         composer.slash_menu_active = False
-        menu.set_matches([], None)
 
         command_name = extract_exact_command_name(composer.text)
         if command_name is not None:
@@ -706,36 +719,46 @@ class LanCherTextualApp(App[int]):
 
         hint_bar.set_hint(DEFAULT_COMMAND_HINT)
 
-    def _move_slash_menu(self, direction: int) -> None:
+    async def _move_slash_menu(self, direction: int) -> None:
         if not self._slash_menu_matches:
             return
         self._slash_menu_index = (self._slash_menu_index + direction) % len(self._slash_menu_matches)
-        self._refresh_command_ui()
+        menu = self.query_one(SlashCommandMenu)
+        await menu.set_candidates(
+            self._slash_menu_matches,
+            self._current_active_completion_key(),
+        )
 
-    def _accept_slash_menu_selection(self) -> None:
-        command_name = self._current_active_slash_name()
-        if command_name is None:
+    async def _accept_slash_menu_selection(self) -> None:
+        candidate_key = self._current_active_completion_key()
+        if candidate_key is None:
             return
-        self._accept_slash_command(command_name)
+        await self._accept_completion(candidate_key)
 
-    def _accept_slash_command(self, command_name: str) -> None:
-        command = self._slash_command_registry.get(command_name)
-        if command is None:
+    async def _accept_completion(self, candidate_key: str) -> None:
+        candidate = next(
+            (item for item in self._slash_menu_matches if item.key == candidate_key),
+            None,
+        )
+        if candidate is None:
             return
 
         composer = self.query_one("#composer-input", ComposerTextArea)
-        composer.text = command.insert_text
+        composer.text = candidate.apply(composer.text)
         composer.cursor_location = composer.document.end
-        composer.remember_accepted_slash_command(command.insert_text)
+        if candidate.append_space:
+            composer.remember_accepted_slash_command("")
+        else:
+            composer.remember_accepted_slash_command(composer.text)
         composer.focus()
-        self._refresh_command_ui()
+        await self._refresh_command_ui()
 
-    def _dismiss_slash_menu(self) -> None:
+    async def _dismiss_slash_menu(self) -> None:
         self._slash_menu_matches = []
         self._slash_menu_index = 0
         composer = self.query_one("#composer-input", ComposerTextArea)
         composer.slash_menu_active = False
-        self.query_one(SlashCommandMenu).set_matches([], None)
+        await self.query_one(SlashCommandMenu).set_candidates([], None)
 
         command_name = extract_exact_command_name(composer.text)
         if command_name is not None:
@@ -745,14 +768,14 @@ class LanCherTextualApp(App[int]):
                 return
         self.query_one(CommandHintBar).set_hint(DEFAULT_COMMAND_HINT)
 
-    def _current_active_slash_name(self) -> str | None:
+    def _current_active_completion_key(self) -> str | None:
         if not self._slash_menu_matches:
             return None
         if self._slash_menu_index >= len(self._slash_menu_matches):
             self._slash_menu_index = 0
-        return self._slash_menu_matches[self._slash_menu_index].name
+        return self._slash_menu_matches[self._slash_menu_index].key
 
-    def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
+    async def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         if command_name == "exit":
             self.exit(0)
             return None
@@ -788,7 +811,85 @@ class LanCherTextualApp(App[int]):
             self.push_screen(SettingsScreen(self._settings_service), self._handle_settings_result)
             return None
 
+        if command_name == "session":
+            await self._execute_session_command(arguments_text)
+            return None
+
         return None
+
+    async def _execute_session_command(self, arguments_text: str) -> None:
+        arguments = arguments_text.split()
+        if not arguments:
+            self.notify(
+                "用法：/session <list|save|remove|rename|resume> [名称]",
+                title="Session",
+                severity="warning",
+            )
+            return
+
+        action = arguments[0]
+        try:
+            if action == "list" and len(arguments) == 1:
+                sessions = self._session_controller.list_saved_sessions()
+                if not sessions:
+                    message = "当前项目还没有已保存的会话。"
+                else:
+                    active = self._session_controller.active_session_name
+                    message = "\n".join(
+                        f"{'* ' if item.name == active else '  '}{item.name} · "
+                        f"{item.updated_at.astimezone().strftime('%Y-%m-%d %H:%M')} · "
+                        f"{item.message_count} 条消息 · {item.permission_rule_count} 条会话权限"
+                        for item in sessions
+                    )
+                self.notify(message, title="项目会话", timeout=10)
+                return
+
+            if action == "save" and len(arguments) == 2:
+                self._session_controller.save_session(arguments[1])
+                self.notify(f"已保存并绑定会话：{arguments[1]}", title="Session")
+                return
+
+            if action == "remove" and len(arguments) == 2:
+                self._session_controller.remove_session(arguments[1])
+                self.notify(f"已删除会话：{arguments[1]}", title="Session")
+                return
+
+            if action == "rename" and len(arguments) == 3:
+                self._session_controller.rename_session(arguments[1], arguments[2])
+                self.notify(f"已将 {arguments[1]} 重命名为 {arguments[2]}", title="Session")
+                return
+
+            if action == "resume" and len(arguments) in {2, 3}:
+                force = len(arguments) == 3 and arguments[2] == "--force"
+                if len(arguments) == 3 and not force:
+                    raise SessionStoreError("resume 的第三个参数只能是 --force。")
+                permission_count = self._session_controller.resume_session(arguments[1], force=force)
+                await self._restore_session_view()
+                self.notify(
+                    f"已恢复会话：{arguments[1]}（恢复 {permission_count} 条会话权限）",
+                    title="Session",
+                )
+                return
+
+            raise SessionStoreError("参数不正确，请查看 /session 的命令提示。")
+        except SessionStoreError as exc:
+            self.notify(str(exc), title="Session", severity="error", timeout=10)
+
+    async def _restore_session_view(self) -> None:
+        chat_view = self.query_one("#chat-view", VerticalScroll)
+        for child in list(chat_view.children):
+            await child.remove()
+        self._message_widgets.clear()
+        for message in self._session_controller.state.messages:
+            await self._mount_message_widget(message)
+
+        self._chat_started = bool(self._session_controller.state.messages)
+        self.query_one(BannerWidget).set_compact(self._chat_started)
+        chat_view.set_class(self._chat_started, "-banner-collapsed")
+        self._refresh_mode_chrome()
+        self._refresh_composer_placeholder()
+        self._refresh_status_bar()
+        chat_view.scroll_end(animate=False)
 
     def _handle_settings_result(self, result: SettingsResult | None) -> None:
         if result is not None and result.saved:

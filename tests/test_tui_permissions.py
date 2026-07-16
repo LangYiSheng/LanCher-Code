@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+import json
 
 import pytest
 from lancher_code.models import ChatRequest, StreamEvent, ToolCallChunk
 from lancher_code.session import SessionController
+from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.tools.builtin.bash import BashTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
 from lancher_code.tools.core.executor import ToolExecutor
@@ -27,11 +29,22 @@ class FakeProvider:
 
 
 def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Path) -> tuple[LanCherTextualApp, SessionController]:
-    session = SessionController(provider_config, cwd=tmp_path, plan_file_path=Path("./.lancher/plan.md"))
+    permission_storage = PermissionStorage()
+    session = SessionController(
+        provider_config,
+        cwd=tmp_path,
+        plan_file_path=Path("./.lancher/plan.md"),
+        permission_storage=permission_storage,
+    )
     registry = ToolRegistry()
     registry.register(BashTool())
     registry.register(WriteFileTool())
-    executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
+    executor = ToolExecutor(
+        registry,
+        cwd=tmp_path,
+        timeout_seconds=1,
+        permission_engine=PermissionEngine(permission_storage),
+    )
     runner = TurnRunner(provider, session, registry, executor)
     app = LanCherTextualApp(
         turn_runner=runner,
@@ -216,3 +229,28 @@ async def test_command_permission_panel_returns_each_outcome(
         await pilot.pause(0.2)
 
     assert captured_outcomes == [expected_outcome]
+
+
+@pytest.mark.asyncio
+async def test_allow_session_resolution_is_auto_saved_with_bound_session(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(responses=_permission_request_responses())
+    app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+    session.save_session("permission-session")
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "查看仓库状态")
+        await pilot.pause(0.1)
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause(1.5)
+
+    path = tmp_path / ".lancher" / "session" / "permission-session.jsonl"
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    permissions = next(record for record in records if record["type"] == "permissions")
+    assert permissions["data"]["rules"] == [
+        {"match": "Bash(git *)", "result": "allow"}
+    ]

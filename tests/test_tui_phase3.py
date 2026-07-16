@@ -101,10 +101,11 @@ async def test_plan_mode_slash_menu_only_shows_do_and_exit(
 
         composer = app.query_one("#composer-input", ComposerTextArea)
         composer.text = "/d"
+        composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
 
-        visible = [item.definition.name for item in app.query(SlashCommandMenuItem) if item.display]
+        visible = [item.candidate.value for item in app.query(SlashCommandMenuItem) if item.display]
         assert session.runtime_mode == "plan"
         assert visible == ["do"]
 
@@ -212,6 +213,7 @@ async def test_do_command_can_be_submitted_after_slash_menu_accepts_it(
 
         composer = app.query_one("#composer-input", ComposerTextArea)
         composer.text = "/do"
+        composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
         await pilot.press("enter")

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from lancher_code.models import PermissionResolution, ToolCall, ToolContext
+from lancher_code.models import PermissionResolution, PermissionRule, ToolCall, ToolContext
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.tools.builtin.bash import BashTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
@@ -81,6 +81,35 @@ def test_session_rule_overrides_project_rule(tmp_path: Path) -> None:
     )
 
     assert check.decision == "allow"
+
+
+def test_replace_session_rules_normalizes_scope_and_notifies_without_touching_persistent_rules(
+    tmp_path: Path,
+) -> None:
+    project_rules = tmp_path / ".lancher" / "permissions.yaml"
+    project_rules.parent.mkdir(parents=True)
+    project_rules.write_text(
+        'rules:\n  - match: "Bash(git *)"\n    result: deny\n',
+        encoding="utf-8",
+    )
+    storage = PermissionStorage(project_rules_path=project_rules)
+    notifications: list[bool] = []
+    storage.subscribe_session_rules_changed(lambda: notifications.append(True))
+
+    storage.replace_session_rules(
+        [PermissionRule(match="  Bash(pnpm *)  ", result="allow", scope="project")]
+    )
+
+    assert storage.rules_for_scope("session") == [
+        PermissionRule(match="Bash(pnpm *)", result="allow", scope="session")
+    ]
+    assert storage.rules_for_scope("project") == [
+        PermissionRule(match="Bash(git *)", result="deny", scope="project")
+    ]
+    assert notifications == [True]
+
+    storage.replace_session_rules([], notify=False)
+    assert notifications == [True]
 
 
 def test_default_mode_asks_for_file_write(tmp_path: Path) -> None:
