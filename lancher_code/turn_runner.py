@@ -166,7 +166,7 @@ class TurnRunner:
                     visible_tools,
                     allow_tool_calls=True,
                     mode=self._session.runtime_mode,
-                    deferred_tool_names=self._tool_registry.list_deferred_index(
+                    deferred_tool_groups=self._tool_registry.list_deferred_index(
                         mode=self._session.runtime_mode
                     ),
                 )

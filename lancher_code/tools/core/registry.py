@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 from lancher_code.errors import ToolNotFoundError
-from lancher_code.models import RuntimeMode, ToolDefinition
+from lancher_code.models import DeferredToolGroup, RuntimeMode, ToolDefinition
 from lancher_code.tools.core.base import Tool
 
 
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self._deferred_servers: dict[str, tuple[str, str | None]] = {}
+        self._deferred_tool_servers: dict[str, str] = {}
 
-    def register(self, tool: Tool) -> None:
+    def register(self, tool: Tool, *, deferred_server_name: str | None = None) -> None:
         name = tool.definition.name
         if name in self._tools:
             raise ValueError(f"工具已注册: {name}")
         self._tools[name] = tool
+        if deferred_server_name is not None:
+            self._deferred_tool_servers[name] = deferred_server_name
+
+    def register_deferred_server(
+        self,
+        server_name: str,
+        *,
+        title: str,
+        description: str | None,
+    ) -> None:
+        self._deferred_servers[server_name] = (title, description)
 
     def get(self, name: str) -> Tool:
         tool = self._tools.get(name)
@@ -42,11 +55,24 @@ class ToolRegistry:
             definitions.append(tool.definition)
         return definitions
 
-    def list_deferred_index(self, *, mode: RuntimeMode | None = None) -> list[str]:
+    def list_deferred_index(self, *, mode: RuntimeMode | None = None) -> list[DeferredToolGroup]:
+        grouped_names: dict[str, list[str]] = {}
+        for definition in self.list_definitions(include_deferred=True, mode=mode):
+            if not definition.should_defer:
+                continue
+            server_name = self._deferred_tool_servers.get(definition.name)
+            if server_name is None or server_name not in self._deferred_servers:
+                continue
+            grouped_names.setdefault(server_name, []).append(definition.name)
+
         return [
-            definition.name
-            for definition in self.list_definitions(include_deferred=True, mode=mode)
-            if definition.should_defer
+            DeferredToolGroup(
+                server_name=server_name,
+                title=self._deferred_servers[server_name][0],
+                description=self._deferred_servers[server_name][1],
+                tool_names=tuple(tool_names),
+            )
+            for server_name, tool_names in grouped_names.items()
         ]
 
     def search_deferred(

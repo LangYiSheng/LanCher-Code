@@ -4,6 +4,7 @@ import asyncio
 import os
 from collections.abc import Callable
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -14,6 +15,12 @@ from mcp.client.streamable_http import streamable_http_client
 from lancher_code.mcp.config import MCPServerConfig
 
 SessionFactory = Callable[[Any, Any], ClientSession]
+
+
+@dataclass(slots=True, frozen=True)
+class MCPServerDiscovery:
+    server_info: types.Implementation
+    tools: tuple[types.Tool, ...]
 
 
 class MCPConnectionError(RuntimeError):
@@ -31,9 +38,9 @@ class MCPServerConnection:
         self._session: ClientSession | None = None
         self._task: asyncio.Task[None] | None = None
         self._close_event = asyncio.Event()
-        self._ready: asyncio.Future[list[types.Tool]] | None = None
+        self._ready: asyncio.Future[MCPServerDiscovery] | None = None
 
-    async def connect_and_list_tools(self) -> list[types.Tool]:
+    async def connect_and_list_tools(self) -> MCPServerDiscovery:
         if self._task is not None:
             raise RuntimeError(f"MCP Server {self.name} 已经启动")
         self._ready = asyncio.get_running_loop().create_future()
@@ -54,15 +61,15 @@ class MCPServerConnection:
                 raise MCPConnectionError("连接", self.name) from exc
             try:
                 self._session = await stack.enter_async_context(self._session_factory(read, write))
-                await self._session.initialize()
+                initialize_result = await self._session.initialize()
             except Exception as exc:
                 raise MCPConnectionError("初始化", self.name) from exc
             try:
-                tools = list((await self._session.list_tools()).tools)
+                tools = tuple((await self._session.list_tools()).tools)
             except Exception as exc:
                 raise MCPConnectionError("列出工具", self.name) from exc
             if self._ready is not None and not self._ready.done():
-                self._ready.set_result(tools)
+                self._ready.set_result(MCPServerDiscovery(initialize_result.serverInfo, tools))
             await self._close_event.wait()
         except asyncio.CancelledError:
             if self._ready is not None and not self._ready.done():

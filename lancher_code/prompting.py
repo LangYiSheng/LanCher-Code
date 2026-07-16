@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import platform
+from html import escape
 from datetime import date
 from pathlib import Path
 
 from lancher_code.models import (
     ConversationMessage,
+    DeferredToolGroup,
     PlanModeEntryKind,
     PromptContext,
     PromptPayload,
@@ -68,15 +70,26 @@ def build_environment_prompt(context: PromptContext) -> str:
     )
 
 
-def build_deferred_tools_prompt(tool_names: list[str]) -> str | None:
-    if not tool_names:
+def build_deferred_tools_prompt(tool_groups: list[DeferredToolGroup]) -> str | None:
+    if not tool_groups:
         return None
+    servers: list[str] = []
+    for group in tool_groups:
+        lines = ["<server>", f"<name>{escape(group.title)}</name>"]
+        if group.description:
+            lines.append(f"<description>{escape(group.description)}</description>")
+        lines.append("<tools>")
+        lines.extend(f"<tool>{escape(tool_name)}</tool>" for tool_name in group.tool_names)
+        lines.extend(("</tools>", "</server>"))
+        servers.append("\n".join(lines))
     return (
-        "<deferred-tools>\n"
+        "<deferred_tools>\n"
+        "<instruction>\n"
         "以下 MCP 工具已延迟加载，当前请求不包含其完整参数定义。"
         "需要使用时，必须先调用 tool_search；不要直接调用尚未加载的工具。\n"
-        f"可搜索工具：{', '.join(tool_names)}\n"
-        "</deferred-tools>"
+        "</instruction>\n\n"
+        + "\n\n".join(servers)
+        + "\n</deferred_tools>"
     )
 
 
@@ -205,13 +218,13 @@ def build_chat_request_payload(
     context: PromptContext,
     transcript: list[ConversationMessage],
     tools: list[ToolDefinition],
-    deferred_tool_names: list[str] | None = None,
+    deferred_tool_groups: list[DeferredToolGroup] | None = None,
 ) -> PromptPayload:
     system = [
         build_system_prompt(),
         build_environment_prompt(context),
     ]
-    deferred_tools_prompt = build_deferred_tools_prompt(deferred_tool_names or [])
+    deferred_tools_prompt = build_deferred_tools_prompt(deferred_tool_groups or [])
     if deferred_tools_prompt:
         system.append(deferred_tools_prompt)
     messages = list(transcript)

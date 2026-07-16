@@ -9,7 +9,7 @@ from mcp import types as mcp_types
 
 from lancher_code.mcp.adapter import MCPToolAdapter
 from lancher_code.mcp.config import MCPConfigIssue, MCPServerConfig
-from lancher_code.mcp.connection import MCPConnectionError, MCPServerConnection
+from lancher_code.mcp.connection import MCPConnectionError, MCPServerConnection, MCPServerDiscovery
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.logging_system import get_logger
 
@@ -80,12 +80,17 @@ class MCPClientManager:
                 self._set_server(config.name, "failed")
                 self._emit(config.name, "server_failed")
                 continue
-            connection, tools = result
+            connection, discovery = result
             self._connections[config.name] = connection
+            registry.register_deferred_server(
+                config.name,
+                title=_server_title(config.name, discovery.server_info),
+                description=_server_description(discovery.server_info),
+            )
             self._set_server(config.name, "registering")
             self._emit(config.name, "registering_tools")
             registered_before = self._registered
-            for remote in tools:
+            for remote in discovery.tools:
                 self._register_tool(registry, config.name, remote, connection)
             registered_tools = self._registered - registered_before
             self._successful += 1
@@ -98,7 +103,7 @@ class MCPClientManager:
 
     async def _discover_safely(
         self, config: MCPServerConfig
-    ) -> tuple[MCPServerConfig, tuple[MCPServerConnection, list[mcp_types.Tool]] | BaseException]:
+    ) -> tuple[MCPServerConfig, tuple[MCPServerConnection, MCPServerDiscovery] | BaseException]:
         try:
             return config, await self._discover(config)
         except asyncio.CancelledError:
@@ -106,15 +111,15 @@ class MCPClientManager:
         except BaseException as exc:
             return config, exc
 
-    async def _discover(self, config: MCPServerConfig) -> tuple[MCPServerConnection, list[mcp_types.Tool]]:
+    async def _discover(self, config: MCPServerConfig) -> tuple[MCPServerConnection, MCPServerDiscovery]:
         connection = self._connection_factory(config)
         self._connections[config.name] = connection
         self._set_server(config.name, "connecting")
         self._emit(config.name, "connecting")
         try:
             async with asyncio.timeout(self.timeout_seconds):
-                tools = await connection.connect_and_list_tools()
-            return connection, tools
+                discovery = await connection.connect_and_list_tools()
+            return connection, discovery
         except BaseException:
             await connection.close()
             self._connections.pop(config.name, None)
@@ -126,7 +131,10 @@ class MCPClientManager:
             logger.error("event=mcp_tool_name_invalid server=%s", server_name)
             return
         try:
-            registry.register(MCPToolAdapter(server_name, remote, connection))
+            registry.register(
+                MCPToolAdapter(server_name, remote, connection),
+                deferred_server_name=server_name,
+            )
         except ValueError:
             self.issues.append(MCPConfigIssue("duplicate_tool", f"Server {server_name} 的工具 {remote.name} 名称冲突", server_name))
             logger.error("event=mcp_tool_name_duplicate server=%s tool=%s", server_name, remote.name)
@@ -174,3 +182,17 @@ class MCPClientManager:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _server_title(server_name: str, server_info: mcp_types.Implementation) -> str:
+    title = server_info.title
+    return title.strip() if isinstance(title, str) and title.strip() else server_name
+
+
+def _server_description(server_info: mcp_types.Implementation) -> str | None:
+    description = getattr(server_info, "description", None)
+    if description is None:
+        model_extra = getattr(server_info, "model_extra", None)
+        if isinstance(model_extra, dict):
+            description = model_extra.get("description")
+    return description.strip() if isinstance(description, str) and description.strip() else None

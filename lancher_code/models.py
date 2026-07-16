@@ -214,6 +214,14 @@ class ToolCallChunk:
     arguments_delta: str = ""
 
 
+@dataclass(slots=True, frozen=True)
+class DeferredToolGroup:
+    server_name: str
+    title: str
+    description: str | None
+    tool_names: tuple[str, ...]
+
+
 @dataclass(slots=True)
 class ToolCall:
     call_index: int

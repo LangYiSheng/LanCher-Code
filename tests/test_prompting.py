@@ -56,14 +56,67 @@ def test_build_environment_prompt_contains_stable_environment_context(tmp_path: 
 
 def test_build_deferred_tools_prompt_contains_only_compact_name_index() -> None:
     prompt = prompting_module.build_deferred_tools_prompt(
-        ["mcp__grafana__query_prometheus", "mcp__grafana__query_loki"]
+        [
+            prompting_module.DeferredToolGroup(
+                server_name="grafana",
+                title="Grafana MCP",
+                description="查询监控指标和日志",
+                tool_names=("mcp__grafana__query_prometheus", "mcp__grafana__query_loki"),
+            )
+        ]
     )
 
     assert prompt is not None
     assert "必须先调用 tool_search" in prompt
     assert "mcp__grafana__query_prometheus" in prompt
+    assert "<name>Grafana MCP</name>" in prompt
+    assert "<description>查询监控指标和日志</description>" in prompt
+    assert "<tool>mcp__grafana__query_prometheus</tool>" in prompt
     assert "input_schema" not in prompt
     assert prompting_module.build_deferred_tools_prompt([]) is None
+
+
+def test_build_deferred_tools_prompt_groups_multiple_servers_and_omits_missing_description() -> None:
+    prompt = prompting_module.build_deferred_tools_prompt(
+        [
+            prompting_module.DeferredToolGroup(
+                server_name="one",
+                title="Server One",
+                description="第一台服务器",
+                tool_names=("mcp__one__read",),
+            ),
+            prompting_module.DeferredToolGroup(
+                server_name="two",
+                title="Server Two",
+                description=None,
+                tool_names=("mcp__two__write",),
+            ),
+        ]
+    )
+
+    assert prompt is not None
+    assert "<name>Server One</name>\n<description>第一台服务器</description>" in prompt
+    assert "<tool>mcp__one__read</tool>" in prompt
+    assert "<name>Server Two</name>\n<tools>" in prompt
+    assert "<tool>mcp__two__write</tool>" in prompt
+    assert "暂无描述" not in prompt
+
+
+def test_build_deferred_tools_prompt_escapes_server_metadata() -> None:
+    prompt = prompting_module.build_deferred_tools_prompt(
+        [
+            prompting_module.DeferredToolGroup(
+                server_name="unsafe",
+                title="Docs <MCP>",
+                description="Search & fetch </server>",
+                tool_names=("mcp__unsafe__lookup",),
+            )
+        ]
+    )
+
+    assert prompt is not None
+    assert "<name>Docs &lt;MCP&gt;</name>" in prompt
+    assert "<description>Search &amp; fetch &lt;/server&gt;</description>" in prompt
 
 
 def test_build_dynamic_context_prompt_returns_none_without_dynamic_state(tmp_path: Path) -> None:
@@ -173,9 +226,16 @@ def test_build_chat_request_payload_appends_deferred_tools_to_system(tmp_path: P
         context=_context(tmp_path),
         transcript=[],
         tools=[],
-        deferred_tool_names=["mcp__demo__lookup"],
+        deferred_tool_groups=[
+            prompting_module.DeferredToolGroup(
+                server_name="demo",
+                title="Demo MCP",
+                description=None,
+                tool_names=("mcp__demo__lookup",),
+            )
+        ],
     )
 
     assert len(payload.system) == 3
-    assert payload.system[-1].startswith("<deferred-tools>")
+    assert payload.system[-1].startswith("<deferred_tools>")
     assert "mcp__demo__lookup" in payload.system[-1]

@@ -85,3 +85,26 @@ def test_registry_excludes_mode_disallowed_deferred_tools() -> None:
     )
 
     assert registry.search_deferred("write", mode="plan") == []
+
+
+def test_registry_groups_deferred_tools_without_parsing_visible_names() -> None:
+    registry = ToolRegistry()
+    registry.register_deferred_server(
+        "grafana_prod",
+        title="Grafana MCP",
+        description="查询监控指标",
+    )
+    registry.register(
+        DeferredTool("mcp__grafana_prod__query", "查询指标"),
+        deferred_server_name="grafana_prod",
+    )
+    registry.register(
+        DeferredTool("mcp__grafana_prod__write", "写入指标", allowed_modes=("default",)),
+        deferred_server_name="grafana_prod",
+    )
+
+    groups = registry.list_deferred_index(mode="plan")
+
+    assert len(groups) == 1
+    assert groups[0].server_name == "grafana_prod"
+    assert groups[0].tool_names == ("mcp__grafana_prod__query",)
