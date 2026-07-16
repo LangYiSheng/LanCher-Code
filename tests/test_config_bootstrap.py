@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from textual.widgets import Checkbox, Input, Select, Static
+from textual.containers import Horizontal, VerticalScroll
+from textual.widgets import Button, Checkbox, Input, Select, Static
 
 from lancher_code.config import load_config, resolve_config_bootstrap_state
 from lancher_code.tui_views.bootstrap import ConfigBootstrapApp, ConfigBootstrapTUI
@@ -58,8 +59,74 @@ async def test_config_bootstrap_app_renders_updated_welcome_copy(tmp_path) -> No
     app = ConfigBootstrapApp(config_path)
 
     async with app.run_test():
-        assert str(app.query_one("#bootstrap-title", Static).render()) == "欢迎使用 LanCher Code"
-        assert str(app.query_one("#bootstrap-copy", Static).render()) == "首次启动配置，请填写模型供应商信息。"
+        assert str(app.query_one("#bootstrap-title", Static).render()) == "LanCher Code"
+        assert str(app.query_one("#bootstrap-copy", Static).render()) == "首次启动 · 配置模型供应商"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_size", [(120, 40), (80, 30), (60, 24), (40, 20), (32, 16)])
+async def test_config_bootstrap_app_adapts_to_terminal_width(tmp_path, terminal_size) -> None:
+    config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
+    app = ConfigBootstrapApp(config_path)
+
+    async with app.run_test(size=terminal_size):
+        root = app.query_one("#bootstrap-root")
+        actions = app.query_one("#actions", Horizontal)
+        save_button = app.query_one("#save-button", Button)
+        cancel_button = app.query_one("#cancel-button", Button)
+
+        assert root.region.width <= 76
+        assert root.region.x >= 0
+        assert root.region.right <= terminal_size[0]
+
+        if terminal_size[0] < app.NARROW_WIDTH:
+            assert actions.has_class("-narrow")
+            assert save_button.region.width == cancel_button.region.width
+            assert save_button.region.y < cancel_button.region.y
+        else:
+            assert not actions.has_class("-narrow")
+            assert save_button.region.y == cancel_button.region.y
+            assert save_button.region.x < cancel_button.region.x
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_size", [(40, 20), (32, 16)])
+async def test_config_bootstrap_app_keeps_actions_reachable_in_short_terminal(
+    tmp_path,
+    terminal_size,
+) -> None:
+    config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
+    app = ConfigBootstrapApp(config_path)
+
+    async with app.run_test(size=terminal_size) as pilot:
+        scroll = app.query_one("#bootstrap-scroll", VerticalScroll)
+        cancel_button = app.query_one("#cancel-button", Button)
+
+        assert scroll.max_scroll_y > 0
+        cancel_button.scroll_visible(animate=False)
+        await pilot.pause()
+
+        assert cancel_button.region.y >= 0
+        assert cancel_button.region.bottom <= terminal_size[1]
+
+
+@pytest.mark.asyncio
+async def test_config_bootstrap_error_scrolls_back_into_view(tmp_path) -> None:
+    config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
+    app = ConfigBootstrapApp(config_path)
+
+    async with app.run_test(size=(32, 16)) as pilot:
+        scroll = app.query_one("#bootstrap-scroll", VerticalScroll)
+        scroll.scroll_end(animate=False)
+        await pilot.pause()
+
+        app._show_error("请填写模型名称")
+        await pilot.pause()
+
+        error = app.query_one("#bootstrap-error", Static)
+        assert error.display is True
+        assert error.region.y >= 0
+        assert error.region.bottom <= 16
 
 
 @pytest.mark.asyncio
