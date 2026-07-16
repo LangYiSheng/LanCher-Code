@@ -25,7 +25,7 @@ def test_extract_exact_command_name_can_keep_argument_hint_state() -> None:
 def test_registry_suggests_commands_by_mode() -> None:
     registry = create_default_slash_command_registry()
 
-    assert [command.name for command in registry.suggest("", "default")] == ["plan", "mode", "exit"]
+    assert [command.name for command in registry.suggest("", "default")] == ["plan", "mode", "settings", "exit"]
     assert [command.name for command in registry.suggest("d", "default")] == []
     assert [command.name for command in registry.suggest("d", "plan")] == ["do"]
 

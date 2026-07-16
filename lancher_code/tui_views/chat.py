@@ -19,6 +19,7 @@ from lancher_code.models import (
     UIConfig,
 )
 from lancher_code.mcp.manager import MCPClientManager, MCPInitializationProgress
+from lancher_code.settings_service import SettingsService
 from lancher_code.logging_system import get_logger
 from lancher_code.session import SessionController
 from lancher_code.slash_commands import (
@@ -41,6 +42,7 @@ from lancher_code.tui_views.composer import (
 )
 from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
+from lancher_code.tui_views.settings import SettingsResult, SettingsScreen
 from lancher_code.turn_runner import TurnRunner
 from lancher_code.tools.core.registry import ToolRegistry
 
@@ -363,6 +365,7 @@ class LanCherTextualApp(App[int]):
         slash_command_registry: SlashCommandRegistry | None = None,
         mcp_manager: MCPClientManager | None = None,
         tool_registry: ToolRegistry | None = None,
+        settings_service: SettingsService | None = None,
     ) -> None:
         super().__init__()
         self._turn_runner = turn_runner
@@ -379,6 +382,7 @@ class LanCherTextualApp(App[int]):
         self._permission_resolution_future: asyncio.Future[PermissionResolution] | None = None
         self._mcp_manager = mcp_manager
         self._tool_registry = tool_registry
+        self._settings_service = settings_service
         self.mcp_initialization_complete = mcp_manager is None or not mcp_manager.has_servers
 
     def compose(self) -> ComposeResult:
@@ -776,7 +780,23 @@ class LanCherTextualApp(App[int]):
             self._refresh_status_bar()
             return None
 
+        if command_name == "settings":
+            if self._settings_service is None:
+                self._status_hint = "Settings unavailable"
+                self._refresh_status_bar()
+                return None
+            self.push_screen(SettingsScreen(self._settings_service), self._handle_settings_result)
+            return None
+
         return None
+
+    def _handle_settings_result(self, result: SettingsResult | None) -> None:
+        if result is not None and result.saved:
+            self._status_hint = "Settings saved · restart for model/MCP"
+        else:
+            self._status_hint = "Ready"
+        self._refresh_status_bar()
+        self.query_one("#composer-input", ComposerTextArea).focus()
 
     def _update_composer_height(self) -> None:
         composer_input = self.query_one("#composer-input", ComposerTextArea)
@@ -804,6 +824,7 @@ class ChatTUI:
         ui_config: UIConfig,
         mcp_manager: MCPClientManager | None = None,
         tool_registry: ToolRegistry | None = None,
+        settings_service: SettingsService | None = None,
     ) -> None:
         self._app = LanCherTextualApp(
             turn_runner=turn_runner,
@@ -812,6 +833,7 @@ class ChatTUI:
             ui_config=ui_config,
             mcp_manager=mcp_manager,
             tool_registry=tool_registry,
+            settings_service=settings_service,
         )
 
     async def run(self) -> int:
@@ -822,3 +844,6 @@ class ChatTUI:
         self._app._mcp_manager = manager
         self._app._tool_registry = registry
         self._app.mcp_initialization_complete = not manager.has_servers
+
+    def configure_settings(self, service: SettingsService) -> None:
+        self._app._settings_service = service

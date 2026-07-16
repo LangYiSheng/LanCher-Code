@@ -141,6 +141,15 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
     )
     registry.register(
         SlashCommandDefinition(
+            name="settings",
+            description="打开设置面板",
+            usage="/settings",
+            visible_modes=("default", "plan", "acceptEdits", "bypass"),
+            executable_modes=("default", "plan", "acceptEdits", "bypass"),
+        )
+    )
+    registry.register(
+        SlashCommandDefinition(
             name="exit",
             description="退出当前会话",
             usage="/exit",

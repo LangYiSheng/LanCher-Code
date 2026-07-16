@@ -137,6 +137,32 @@ class PermissionStorage:
             return list(self._project_rules)
         return list(self._user_rules)
 
+    @property
+    def user_rules_path(self) -> Path | None:
+        return self._user_rules_path
+
+    def replace_rules(
+        self,
+        scope: Literal["project", "user"],
+        rules: list[PermissionRule],
+        *,
+        persist: bool = True,
+    ) -> None:
+        """替换指定持久化层的规则；会话级规则保持不变。"""
+        path = self._project_rules_path if scope == "project" else self._user_rules_path
+        if path is None:
+            raise PermissionRuleFileError(f"{scope} 权限规则文件路径未配置。")
+        normalized = [
+            PermissionRule(match=rule.match, result=rule.result, scope=scope)
+            for rule in rules
+        ]
+        if persist:
+            self._write_rules(path, normalized)
+        if scope == "project":
+            self._project_rules = normalized
+        else:
+            self._user_rules = normalized
+
     def add_session_rule(self, match: str, result: Literal["allow", "deny"]) -> PermissionRule:
         rule = PermissionRule(match=match, result=result, scope="session")
         self._session_rules.append(rule)
@@ -204,6 +230,10 @@ class PermissionStorage:
 class PermissionEngine:
     def __init__(self, storage: PermissionStorage | None = None) -> None:
         self._storage = storage or PermissionStorage()
+
+    @property
+    def storage(self) -> PermissionStorage:
+        return self._storage
 
     def evaluate(
         self,

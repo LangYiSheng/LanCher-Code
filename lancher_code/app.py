@@ -11,11 +11,13 @@ from lancher_code.config import (
     resolve_config_bootstrap_state,
 )
 from lancher_code.errors import ConfigError
+from lancher_code.config_system.paths import get_global_mcp_config_path, get_project_mcp_config_path
 from lancher_code.mcp import MCPClientManager, load_mcp_config
 from lancher_code.logging_system import get_logger, register_sensitive_values
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
+from lancher_code.settings_service import SettingsService
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tui_views.bootstrap import ConfigBootstrapTUI
@@ -68,6 +70,12 @@ async def run_app() -> int:
             user_rules_path=get_global_permissions_path(),
         )
     )
+    settings_service = SettingsService(
+        config_path=bootstrap_state.config_path,
+        global_mcp_path=get_global_mcp_config_path(),
+        project_mcp_path=get_project_mcp_config_path(cwd),
+        permission_storage=permission_engine.storage,
+    )
     tool_executor = ToolExecutor(
         tool_registry,
         cwd=cwd,
@@ -88,6 +96,8 @@ async def run_app() -> int:
         session_controller=session_controller,
         ui_config=config.ui,
     )
+    if hasattr(tui, "configure_settings"):
+        tui.configure_settings(settings_service)
     if hasattr(tui, "configure_mcp"):
         tui.configure_mcp(mcp_manager, tool_registry)
     try:
