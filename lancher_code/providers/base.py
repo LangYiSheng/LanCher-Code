@@ -8,6 +8,7 @@ import httpx
 
 from lancher_code.errors import (
     ProviderAuthError,
+    ProviderPromptTooLongError,
     ProviderRequestError,
     ProviderResponseError,
     StreamProtocolError,
@@ -92,8 +93,11 @@ class BaseChatProvider:
             return
 
         message = await BaseChatProvider.extract_error_message(response)
+        code = await BaseChatProvider.extract_error_code(response)
         if response.status_code in (401, 403):
             raise ProviderAuthError(message or "模型供应商认证失败，请检查 API Key。")
+        if BaseChatProvider.is_prompt_too_long(message, code=code):
+            raise ProviderPromptTooLongError(message or "请求超过模型上下文窗口。")
         raise ProviderResponseError(
             message or f"模型供应商返回错误状态码 {response.status_code}。"
         )
@@ -123,12 +127,50 @@ class BaseChatProvider:
         return text
 
     @staticmethod
+    async def extract_error_code(response: httpx.Response) -> str | None:
+        body = await response.aread()
+        try:
+            payload = json.loads(body.decode("utf-8", errors="ignore"))
+        except (json.JSONDecodeError, UnicodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        error = payload.get("error")
+        if isinstance(error, dict):
+            value = error.get("code") or error.get("type")
+            return value if isinstance(value, str) else None
+        value = payload.get("code") or payload.get("type")
+        return value if isinstance(value, str) else None
+
+    @staticmethod
     def map_request_error(exc: Exception) -> ProviderRequestError:
         if isinstance(exc, httpx.TimeoutException):
             return ProviderRequestError("请求模型超时，请稍后重试。")
         if isinstance(exc, httpx.RequestError):
             return ProviderRequestError(f"请求模型失败: {exc}")
         return ProviderRequestError("请求模型失败。")
+
+    @staticmethod
+    def is_prompt_too_long(message: str, *, code: str | None = None) -> bool:
+        normalized_code = (code or "").strip().casefold()
+        if normalized_code in {
+            "context_length_exceeded",
+            "prompt_too_long",
+            "request_too_large",
+            "context_window_exceeded",
+        }:
+            return True
+        normalized = message.casefold()
+        return any(
+            marker in normalized
+            for marker in (
+                "maximum context length",
+                "context length exceeded",
+                "prompt is too long",
+                "prompt too long",
+                "exceeds the context window",
+            )
+        )
 
     @staticmethod
     def text_from_blocks(blocks: list[ContentBlock]) -> str:

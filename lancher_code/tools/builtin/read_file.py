@@ -136,6 +136,7 @@ class ReadFileTool:
         effective_limit = total_lines if limit is None else limit
         end = min(offset + effective_limit, total_lines)
         selected_lines = lines[offset:end]
+        source_content = "".join(text.splitlines(keepends=True)[offset:end])
         numbered = _format_numbered_lines(selected_lines, start_line=offset + 1)
         is_complete = offset == 0 and end >= total_lines
 
@@ -164,6 +165,8 @@ class ReadFileTool:
                 "line_end": end,
                 "returned_lines": len(selected_lines),
                 "is_complete": is_complete,
+                "normalized_path": str(path.resolve()),
+                "source_content": source_content,
             },
             tool_name=self.definition.name,
         )

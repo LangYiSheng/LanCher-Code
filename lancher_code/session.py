@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 from datetime import date, datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
@@ -8,6 +10,10 @@ from uuid import uuid4
 from lancher_code.models import (
     ChatRequest,
     ContentBlock,
+    ContextCompactionResult,
+    ContextFileSnapshot,
+    ContextManagementState,
+    ContextUsageAnchor,
     ConversationMessage,
     DeferredToolGroup,
     MessageUsage,
@@ -21,9 +27,22 @@ from lancher_code.models import (
     ToolCall,
     ToolDefinition,
     ToolExecutionResult,
+    ToolResultReplacement,
     TraceEntry,
     ThinkingTrace,
 )
+from lancher_code.context_management import (
+    compact_transcript,
+    estimate_request_tokens,
+    offload_tool_results,
+    record_file_snapshot,
+    update_usage_anchor,
+)
+from lancher_code.logging_system import get_logger
+from lancher_code.providers.base import ChatProvider
+
+
+logger = get_logger("session")
 from lancher_code.permission_engine import PermissionStorage
 from lancher_code.prompting import (
     build_chat_request_payload,
@@ -65,6 +84,8 @@ class SessionController:
         self._active_session_name: str | None = None
         self._session_created_at: datetime | None = None
         self._dirty = False
+        self._context_lock = asyncio.Lock()
+        self._active_dynamic_context: str | None = None
         self._permission_storage = permission_storage or PermissionStorage()
         self._permission_storage.subscribe_session_rules_changed(self._mark_dirty)
         if initial_runtime_mode != self._state.runtime_mode:
@@ -93,6 +114,14 @@ class SessionController:
     @property
     def has_unsaved_changes(self) -> bool:
         return self._dirty
+
+    @property
+    def context_state(self) -> ContextManagementState:
+        return self._state.context_management
+
+    @property
+    def context_window(self) -> int:
+        return self._provider_config.context_window
 
     def set_runtime_mode(self, mode: RuntimeMode) -> RuntimeMode:
         previous_mode = self._state.runtime_mode
@@ -128,8 +157,10 @@ class SessionController:
             timestamp=self._now(),
         )
         self._state.messages.append(message)
-        dynamic_context = build_dynamic_context_prompt(self._prompt_context(self.runtime_mode))
-        self._transcript.append(build_user_message(text=text, dynamic_context=dynamic_context))
+        self._active_dynamic_context = build_dynamic_context_prompt(self._prompt_context(self.runtime_mode))
+        self._transcript.append(
+            build_user_message(text=text, dynamic_context=self._active_dynamic_context)
+        )
         self._advance_dynamic_prompt_state_after_user_turn()
         self._mark_dirty()
         return message
@@ -248,6 +279,7 @@ class SessionController:
         message.usage = usage or MessageUsage()
         if message.content.strip():
             self._transcript.append(ConversationMessage.text_message("assistant", message.content))
+        self._active_dynamic_context = None
         return message
 
     def fail_message(self, message_id: str, error_text: str) -> SessionMessage:
@@ -255,6 +287,7 @@ class SessionController:
         message.status = "error"
         message.content = error_text
         message.trace.collapsed = True
+        self._active_dynamic_context = None
         return message
 
     def cancel_message(self, message_id: str, notice_text: str = "本轮已取消。") -> SessionMessage:
@@ -263,6 +296,7 @@ class SessionController:
         if not message.content.strip():
             message.content = notice_text
         message.trace.collapsed = True
+        self._active_dynamic_context = None
         return message
 
     def get_message(self, message_id: str) -> SessionMessage:
@@ -281,12 +315,18 @@ class SessionController:
     ) -> ChatRequest:
         active_mode = mode or self.runtime_mode
         thinking = self._request_thinking()
-        filtered_tools = self._filter_tools_for_mode(tools, active_mode) if allow_tool_calls else []
+        if not allow_tool_calls:
+            filtered_tools = []
+        elif all(active_mode in tool.allowed_modes for tool in tools):
+            filtered_tools = tools
+        else:
+            filtered_tools = self._filter_tools_for_mode(tools, active_mode)
         payload = build_chat_request_payload(
             context=self._prompt_context(active_mode),
-            transcript=self.transcript,
+            transcript=self._request_transcript(),
             tools=filtered_tools,
             deferred_tool_groups=deferred_tool_groups,
+            dynamic_context=None,
         )
         return ChatRequest(
             model=self._provider_config.model,
@@ -297,6 +337,97 @@ class SessionController:
             thinking=thinking,
             mode=active_mode,
         )
+
+    def estimate_request_tokens(self, request: ChatRequest) -> int:
+        return estimate_request_tokens(request, self.context_state)
+
+    def update_context_usage(self, request: ChatRequest, usage: MessageUsage) -> None:
+        if usage.input_tokens + usage.output_tokens > 0:
+            update_usage_anchor(self.context_state, request, usage)
+        else:
+            self.context_state.usage_anchor = None
+        self._mark_dirty()
+
+    def record_read_file_result(self, result: ToolExecutionResult) -> None:
+        if result.is_error or result.tool_name != "read_file":
+            return
+        path = result.metadata.get("normalized_path")
+        relative_path = result.metadata.get("relative_path")
+        content = result.metadata.get("source_content")
+        if (
+            not isinstance(path, str)
+            or not isinstance(relative_path, str)
+            or not isinstance(content, str)
+        ):
+            return
+        record_file_snapshot(
+            self.context_state,
+            path=relative_path,
+            normalized_path=path,
+            content=content,
+        )
+        self._mark_dirty()
+
+    async def offload_large_tool_results(self) -> int:
+        async with self._context_lock:
+            working_state = copy.deepcopy(self.context_state)
+            result = await offload_tool_results(self.transcript, working_state, self._cwd)
+            if result.transcript != self._transcript or working_state != self.context_state:
+                self._transcript = result.transcript
+                self._state.context_management = working_state
+                self._mark_dirty()
+            return result.offloaded_count
+
+    async def compact_context(
+        self,
+        *,
+        provider: ChatProvider,
+        visible_tools: list[ToolDefinition],
+        deferred_tool_groups: list[DeferredToolGroup] | None = None,
+        persist: bool = False,
+        cancellation_token: "CancellationToken | None" = None,
+    ) -> ContextCompactionResult:
+        async with self._context_lock:
+            previous_transcript = copy.deepcopy(self._transcript)
+            previous_context = copy.deepcopy(self.context_state)
+            previous_dirty = self._dirty
+            before_request = self.build_request(
+                visible_tools,
+                allow_tool_calls=True,
+                deferred_tool_groups=deferred_tool_groups,
+            )
+            before_tokens = self.estimate_request_tokens(before_request)
+            compacted = await compact_transcript(
+                provider=provider,
+                model=self._provider_config.model,
+                transcript=self.transcript,
+                visible_tools=visible_tools,
+                state=self.context_state,
+                context_window=self.context_window,
+                cancellation_token=cancellation_token,
+            )
+            self._transcript = compacted.transcript
+            self.context_state.usage_anchor = None
+            after_request = self.build_request(
+                visible_tools,
+                allow_tool_calls=True,
+                deferred_tool_groups=deferred_tool_groups,
+            )
+            after_tokens = self.estimate_request_tokens(after_request)
+            self._mark_dirty()
+            if persist and self._active_session_name is not None:
+                try:
+                    await asyncio.to_thread(self._write_active_session)
+                except Exception:
+                    self._transcript = previous_transcript
+                    self._state.context_management = previous_context
+                    self._dirty = previous_dirty
+                    raise
+            return ContextCompactionResult(
+                before_tokens=before_tokens,
+                after_tokens=after_tokens,
+                dropped_groups=compacted.dropped_groups,
+            )
 
     def total_usage(self) -> MessageUsage:
         total = MessageUsage()
@@ -349,6 +480,15 @@ class SessionController:
             )
         records = self._session_store.load(normalized)
         state, transcript, created_at, permission_rules = self._decode_records(records, normalized)
+        for replacement in state.context_management.replacements.values():
+            path = (self._cwd / replacement.relative_path).resolve()
+            if self._cwd not in path.parents or not path.is_file():
+                logger.warning(
+                    "event=context_tool_result_missing context_id=%s call_id=%s path=%s",
+                    state.context_management.context_id,
+                    replacement.call_id,
+                    replacement.relative_path,
+                )
         self._permission_storage.replace_session_rules(permission_rules, notify=False)
         self._state = state
         self._transcript = transcript
@@ -372,6 +512,7 @@ class SessionController:
                 "updated_at": now.isoformat(),
                 "message_count": len(self._state.messages),
                 "permission_rule_count": len(self._permission_storage.rules_for_scope("session")),
+                "context_management": self._encode_context_management(),
             },
             {
                 "type": "state",
@@ -428,8 +569,8 @@ class SessionController:
             messages = [self._decode_message(record["data"]) for record in records if record.get("type") == "message"]
             transcript = [self._decode_transcript(record["data"]) for record in records if record.get("type") == "transcript"]
             permission_records = [record for record in records if record.get("type") == "permissions"]
-            if version == 2 and len(permission_records) != 1:
-                raise SessionStoreError("v2 会话必须包含且仅包含一条 permissions 记录。")
+            if version in {2, 3} and len(permission_records) != 1:
+                raise SessionStoreError("v2/v3 会话必须包含且仅包含一条 permissions 记录。")
             if version == 1 and permission_records:
                 raise SessionStoreError("v1 会话不能包含 permissions 记录。")
             permission_rules = (
@@ -445,6 +586,11 @@ class SessionController:
                 plan_mode_turn_count=int(state_data.get("plan_mode_turn_count", 0)),
                 pending_plan_exit_notice=bool(state_data.get("pending_plan_exit_notice", False)),
                 pending_plan_entry_kind=state_data.get("pending_plan_entry_kind"),  # type: ignore[arg-type]
+                context_management=(
+                    self._decode_context_management(metadata.get("context_management"))
+                    if version == 3
+                    else ContextManagementState()
+                ),
             )
             if state.runtime_mode not in {"default", "plan", "acceptEdits", "bypass"}:
                 raise SessionStoreError("会话运行模式无效。")
@@ -455,6 +601,55 @@ class SessionController:
         except (KeyError, StopIteration, TypeError, ValueError) as exc:
             raise SessionStoreError(f"会话文件结构无效：{exc}") from exc
         return state, transcript, created_at, permission_rules
+
+    def _encode_context_management(self) -> dict[str, object]:
+        context = self.context_state
+        return {
+            "version": 1,
+            "context_id": context.context_id,
+            "usage_anchor": asdict(context.usage_anchor) if context.usage_anchor else None,
+            "seen_call_ids": sorted(context.seen_call_ids),
+            "replacements": {key: asdict(value) for key, value in context.replacements.items()},
+            "recent_files": [asdict(value) for value in context.recent_files],
+            "automatic_failure_count": context.automatic_failure_count,
+            "automatic_compaction_disabled": context.automatic_compaction_disabled,
+        }
+
+    @staticmethod
+    def _decode_context_management(value: object) -> ContextManagementState:
+        if not isinstance(value, dict) or value.get("version") != 1:
+            raise TypeError("context_management metadata")
+        context_id = value.get("context_id")
+        if not isinstance(context_id, str) or not context_id.strip():
+            raise ValueError("context_id 无效。")
+        anchor_data = value.get("usage_anchor")
+        anchor = None
+        if anchor_data is not None:
+            if not isinstance(anchor_data, dict):
+                raise TypeError("usage_anchor")
+            anchor = ContextUsageAnchor(**anchor_data)
+        raw_seen = value.get("seen_call_ids", [])
+        raw_replacements = value.get("replacements", {})
+        raw_files = value.get("recent_files", [])
+        if not isinstance(raw_seen, list) or not all(isinstance(item, str) for item in raw_seen):
+            raise TypeError("seen_call_ids")
+        if not isinstance(raw_replacements, dict) or not isinstance(raw_files, list):
+            raise TypeError("context management collections")
+        replacements: dict[str, ToolResultReplacement] = {}
+        for key, item in raw_replacements.items():
+            if not isinstance(key, str) or not isinstance(item, dict):
+                raise TypeError("tool result replacement")
+            replacements[key] = ToolResultReplacement(**item)
+        files = [ContextFileSnapshot(**item) for item in raw_files if isinstance(item, dict)]
+        return ContextManagementState(
+            context_id=context_id,
+            usage_anchor=anchor,
+            seen_call_ids=set(raw_seen),
+            replacements=replacements,
+            recent_files=files,
+            automatic_failure_count=int(value.get("automatic_failure_count", 0)),
+            automatic_compaction_disabled=bool(value.get("automatic_compaction_disabled", False)),
+        )
 
     @staticmethod
     def _decode_permission_rules(value: object) -> list[PermissionRule]:
@@ -544,6 +739,25 @@ class SessionController:
             pending_plan_entry_kind=self._state.pending_plan_entry_kind,
             pending_plan_exit_notice=self._state.pending_plan_exit_notice,
         )
+
+    def _request_transcript(self) -> list[ConversationMessage]:
+        messages: list[ConversationMessage] = []
+        for message in self.transcript:
+            blocks = list(message.blocks)
+            if (
+                message.role == "user"
+                and len(blocks) > 1
+                and blocks[0].kind == "text"
+                and blocks[0].text.startswith("<system-reminder>\n")
+            ):
+                blocks = blocks[1:]
+            messages.append(ConversationMessage(role=message.role, blocks=blocks))
+        if self._active_dynamic_context:
+            for message in reversed(messages):
+                if message.role == "user":
+                    message.blocks.insert(0, ContentBlock.text_block(self._active_dynamic_context))
+                    break
+        return messages
 
     def _advance_dynamic_prompt_state_after_user_turn(self) -> None:
         if self._state.runtime_mode == "plan":

@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable
 
 import httpx
 
-from lancher_code.errors import ProviderRequestError, ProviderResponseError
+from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
 from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
@@ -43,6 +43,12 @@ class OpenAIProvider(BaseChatProvider):
 
                         chunk = self.parse_json_payload(data)
                         if "error" in chunk:
+                            error = chunk.get("error")
+                            if isinstance(error, dict):
+                                message = str(error.get("message", ""))
+                                code = error.get("code") or error.get("type")
+                                if self.is_prompt_too_long(message, code=code if isinstance(code, str) else None):
+                                    raise ProviderPromptTooLongError(message or "请求超过模型上下文窗口。")
                             raise ProviderResponseError("OpenAI 响应包含 error 字段。")
 
                         if isinstance(chunk.get("usage"), dict):

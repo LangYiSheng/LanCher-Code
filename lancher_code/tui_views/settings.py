@@ -451,6 +451,7 @@ class SettingsScreen(Screen[SettingsResult]):
             api_key=api_key,
             timeout_seconds=timeout,
             thinking=thinking,
+            context_window=self.snapshot.config.provider.context_window,
         )
 
     @on(Button.Pressed, "#settings-cancel")

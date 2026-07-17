@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 ProviderProtocol = Literal["openai", "claude"]
 MessageRole = Literal["system", "user", "assistant"]
@@ -83,6 +84,7 @@ class ProviderConfig:
     api_key: str
     timeout_seconds: float = 60.0
     thinking: ThinkingConfig | None = None
+    context_window: int = 128000
 
 
 @dataclass(slots=True)
@@ -97,6 +99,49 @@ class MessageUsage:
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0
+
+
+@dataclass(slots=True)
+class ContextUsageAnchor:
+    token_count: int
+    request_char_count: int
+    system_tools_digest: str
+    message_count: int
+    messages_digest: str
+
+
+@dataclass(slots=True)
+class ToolResultReplacement:
+    call_id: str
+    preview: str
+    relative_path: str
+    original_bytes: int
+
+
+@dataclass(slots=True)
+class ContextFileSnapshot:
+    path: str
+    normalized_path: str
+    content: str
+    read_at: str
+
+
+@dataclass(slots=True)
+class ContextManagementState:
+    context_id: str = field(default_factory=lambda: uuid4().hex)
+    usage_anchor: ContextUsageAnchor | None = None
+    seen_call_ids: set[str] = field(default_factory=set)
+    replacements: dict[str, ToolResultReplacement] = field(default_factory=dict)
+    recent_files: list[ContextFileSnapshot] = field(default_factory=list)
+    automatic_failure_count: int = 0
+    automatic_compaction_disabled: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class ContextCompactionResult:
+    before_tokens: int
+    after_tokens: int
+    dropped_groups: int = 0
 
 
 @dataclass(slots=True, init=False)
@@ -355,6 +400,7 @@ class SessionState:
     plan_mode_turn_count: int = 0
     pending_plan_exit_notice: bool = False
     pending_plan_entry_kind: PlanModeEntryKind | None = None
+    context_management: ContextManagementState = field(default_factory=ContextManagementState)
 
     def snapshot(self) -> list[SessionMessage]:
         return list(self.messages)

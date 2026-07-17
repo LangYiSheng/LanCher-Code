@@ -5,10 +5,18 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from lancher_code.errors import LanCherError, ToolCallParseError
+from lancher_code.context_management import AUTOMATIC_FAILURE_LIMIT, EMERGENCY_MARGIN, automatic_threshold
+from lancher_code.errors import (
+    ContextCompactionError,
+    LanCherError,
+    ProviderPromptTooLongError,
+    ToolCallParseError,
+)
 from lancher_code.logging_system import get_logger
 from lancher_code.models import (
     CancellationToken,
+    ChatRequest,
+    ContextCompactionResult,
     MessageUsage,
     PermissionRequest,
     PermissionResolution,
@@ -99,6 +107,26 @@ class TurnRunner:
         self._active_turn.pending_permissions.clear()
         return True
 
+    @property
+    def has_active_turn(self) -> bool:
+        return self._active_turn is not None
+
+    async def compact_context(self) -> ContextCompactionResult:
+        if self.has_active_turn:
+            raise ContextCompactionError("模型正在响应，暂时不能压缩上下文。")
+        visible_tools = self._tool_registry.list_definitions(
+            discovered_names=set(),
+            mode=self._session.runtime_mode,
+        )
+        return await self._session.compact_context(
+            provider=self._provider,
+            visible_tools=visible_tools,
+            deferred_tool_groups=self._tool_registry.list_deferred_index(
+                mode=self._session.runtime_mode
+            ),
+            persist=True,
+        )
+
     async def run_user_turn(self, text: str) -> AsyncIterator[TurnEvent]:
         queue: asyncio.Queue[TurnEvent | object] = asyncio.Queue()
         cancellation_token = CancellationToken()
@@ -162,18 +190,85 @@ class TurnRunner:
                     discovered_names=discovered_tool_names,
                     mode=self._session.runtime_mode,
                 )
+                await self._session.offload_large_tool_results()
+                deferred_tool_groups = self._tool_registry.list_deferred_index(
+                    mode=self._session.runtime_mode
+                )
                 request = self._session.build_request(
                     visible_tools,
                     allow_tool_calls=True,
                     mode=self._session.runtime_mode,
-                    deferred_tool_groups=self._tool_registry.list_deferred_index(
-                        mode=self._session.runtime_mode
-                    ),
+                    deferred_tool_groups=deferred_tool_groups,
                 )
                 request.cancellation_token = cancellation_token
-                loop_usage = MessageUsage()
-                assembler = ToolCallAssembler()
-                collector = _StreamCollector()
+                context_state = self._session.context_state
+                estimated_tokens = self._session.estimate_request_tokens(request)
+                if (
+                    not context_state.automatic_compaction_disabled
+                    and estimated_tokens >= automatic_threshold(self._session.context_window)
+                ):
+                    await self._emit(
+                        queue,
+                        TurnEvent(
+                            kind="progress_updated",
+                            message=self._session.get_message(assistant_message.id),
+                            progress_message="正在自动压缩上下文...",
+                        ),
+                    )
+                    try:
+                        compaction_result = await self._session.compact_context(
+                            provider=self._provider,
+                            visible_tools=visible_tools,
+                            deferred_tool_groups=deferred_tool_groups,
+                            cancellation_token=cancellation_token,
+                        )
+                    except Exception as exc:
+                        context_state.automatic_failure_count += 1
+                        if context_state.automatic_failure_count >= AUTOMATIC_FAILURE_LIMIT:
+                            context_state.automatic_compaction_disabled = True
+                        logger.exception(
+                            "event=automatic_context_compaction_failed context_id=%s failure_count=%s",
+                            context_state.context_id,
+                            context_state.automatic_failure_count,
+                        )
+                        if estimated_tokens >= self._session.context_window - EMERGENCY_MARGIN:
+                            raise ContextCompactionError(f"自动压缩失败：{exc}") from exc
+                        await self._emit(
+                            queue,
+                            TurnEvent(
+                                kind="progress_updated",
+                                message=self._session.get_message(assistant_message.id),
+                                progress_message="自动压缩失败，本轮将继续处理",
+                            ),
+                        )
+                    else:
+                        context_state.automatic_failure_count = 0
+                        context_state.automatic_compaction_disabled = False
+                        logger.info(
+                            "event=automatic_context_compaction_succeeded context_id=%s before_tokens=%s after_tokens=%s",
+                            context_state.context_id,
+                            compaction_result.before_tokens,
+                            compaction_result.after_tokens,
+                        )
+                        await self._emit(
+                            queue,
+                            TurnEvent(
+                                kind="progress_updated",
+                                message=self._session.get_message(assistant_message.id),
+                                progress_message=(
+                                    "已自动压缩上下文，"
+                                    f"token 从 {compaction_result.before_tokens} "
+                                    f"降至 {compaction_result.after_tokens}"
+                                ),
+                            ),
+                        )
+                        request = self._session.build_request(
+                            visible_tools,
+                            allow_tool_calls=True,
+                            mode=self._session.runtime_mode,
+                            deferred_tool_groups=deferred_tool_groups,
+                        )
+                        request.cancellation_token = cancellation_token
 
                 await self._emit(
                     queue,
@@ -184,34 +279,69 @@ class TurnRunner:
                     ),
                 )
 
-                async for event in self._provider.stream_chat(request):
-                    if event.kind == "thinking_delta" and event.text:
-                        self._session.append_trace_thinking(assistant_message.id, event.text)
+                emergency_attempted = False
+                while True:
+                    assembler = ToolCallAssembler()
+                    collector = _StreamCollector()
+                    try:
+                        loop_usage = await self._stream_request(
+                            request=request,
+                            assembler=assembler,
+                            collector=collector,
+                            assistant_message_id=assistant_message.id,
+                            queue=queue,
+                        )
+                        self._session.update_context_usage(request, loop_usage)
+                        break
+                    except ProviderPromptTooLongError as prompt_error:
+                        if emergency_attempted:
+                            raise
+                        emergency_attempted = True
                         await self._emit(
                             queue,
                             TurnEvent(
                                 kind="progress_updated",
                                 message=self._session.get_message(assistant_message.id),
-                                usage=self._current_message_usage(assistant_message.id),
-                                progress_message="模型正在思考",
+                                progress_message="上下文撞墙，自动压缩中...",
                             ),
                         )
-                    elif event.kind == "text_delta" and event.text:
-                        collector.append(event.text)
-                        self._session.append_message_content(assistant_message.id, event.text)
+                        await self._session.offload_large_tool_results()
+                        try:
+                            result = await self._session.compact_context(
+                                provider=self._provider,
+                                visible_tools=visible_tools,
+                                deferred_tool_groups=deferred_tool_groups,
+                                cancellation_token=cancellation_token,
+                            )
+                        except Exception:
+                            raise prompt_error
+                        if result.after_tokens >= self._session.context_window - EMERGENCY_MARGIN:
+                            raise
+                        logger.info(
+                            "event=emergency_context_compaction_succeeded context_id=%s before_tokens=%s after_tokens=%s dropped_groups=%s",
+                            self._session.context_state.context_id,
+                            result.before_tokens,
+                            result.after_tokens,
+                            result.dropped_groups,
+                        )
                         await self._emit(
                             queue,
                             TurnEvent(
-                                kind="assistant_text_delta",
+                                kind="progress_updated",
                                 message=self._session.get_message(assistant_message.id),
-                                usage=self._current_message_usage(assistant_message.id),
-                                text=event.text,
+                                progress_message=(
+                                    "紧急压缩完成，"
+                                    f"token 从 {result.before_tokens} 降至 {result.after_tokens}"
+                                ),
                             ),
                         )
-                    elif event.kind == "tool_call_delta" and event.tool_call_chunk:
-                        assembler.consume(event.tool_call_chunk)
-                    elif event.kind == "message_end":
-                        loop_usage = event.usage
+                        request = self._session.build_request(
+                            visible_tools,
+                            allow_tool_calls=True,
+                            mode=self._session.runtime_mode,
+                            deferred_tool_groups=deferred_tool_groups,
+                        )
+                        request.cancellation_token = cancellation_token
 
                 try:
                     tool_calls = assembler.finalize()
@@ -286,6 +416,7 @@ class TurnRunner:
                             discovered_tool_names.update(
                                 name for name in discovered if isinstance(name, str)
                             )
+                        self._session.record_read_file_result(result)
                     self._session.append_tool_results(results)
                     self._session.append_trace_tool_results(assistant_message.id, results)
                     for result in results:
@@ -352,6 +483,46 @@ class TurnRunner:
             if auto_save_error:
                 logger.error("event=session_auto_save_failed error=%s", auto_save_error)
             await queue.put(_QUEUE_END)
+
+    async def _stream_request(
+        self,
+        *,
+        request: ChatRequest,
+        assembler: ToolCallAssembler,
+        collector: _StreamCollector,
+        assistant_message_id: str,
+        queue: asyncio.Queue[TurnEvent | object],
+    ) -> MessageUsage:
+        usage = MessageUsage()
+        async for event in self._provider.stream_chat(request):
+            if event.kind == "thinking_delta" and event.text:
+                self._session.append_trace_thinking(assistant_message_id, event.text)
+                await self._emit(
+                    queue,
+                    TurnEvent(
+                        kind="progress_updated",
+                        message=self._session.get_message(assistant_message_id),
+                        usage=self._current_message_usage(assistant_message_id),
+                        progress_message="模型正在思考",
+                    ),
+                )
+            elif event.kind == "text_delta" and event.text:
+                collector.append(event.text)
+                self._session.append_message_content(assistant_message_id, event.text)
+                await self._emit(
+                    queue,
+                    TurnEvent(
+                        kind="assistant_text_delta",
+                        message=self._session.get_message(assistant_message_id),
+                        usage=self._current_message_usage(assistant_message_id),
+                        text=event.text,
+                    ),
+                )
+            elif event.kind == "tool_call_delta" and event.tool_call_chunk:
+                assembler.consume(event.tool_call_chunk)
+            elif event.kind == "message_end":
+                usage = event.usage
+        return usage
 
     async def _request_permission(self, permission_request: PermissionRequest) -> PermissionResolution:
         active_turn = self._active_turn

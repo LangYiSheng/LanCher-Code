@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lancher_code.errors import ProviderRequestError
+from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError
 from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk, ToolDefinition, ToolExecutionResult
 from lancher_code.session import SessionController
 from lancher_code.tools.core.executor import ToolExecutor
@@ -14,6 +14,21 @@ from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.turn_runner import MAX_TOOL_LOOPS, TurnRunner
 
 DelayedEvent = tuple[StreamEvent, float]
+
+
+def _summary_text() -> str:
+    headings = (
+        "主要请求和意图",
+        "关键技术概念",
+        "文件和代码段",
+        "错误与修复",
+        "问题解决过程",
+        "用户消息与明确反馈",
+        "待办任务",
+        "当前工作",
+        "可能的下一步",
+    )
+    return "<summary>" + "\n".join(f"## {heading}\n内容" for heading in headings) + "</summary>"
 
 
 class FakeProvider:
@@ -80,7 +95,7 @@ class DiscoverTool:
 def _runner(provider: FakeProvider, openai_provider_config, tmp_path: Path) -> tuple[TurnRunner, SessionController]:
     registry = ToolRegistry()
     registry.register(EchoTool())
-    session = SessionController(openai_provider_config)
+    session = SessionController(openai_provider_config, cwd=tmp_path)
     executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
     return TurnRunner(provider, session, registry, executor), session
 
@@ -113,6 +128,101 @@ async def test_turn_runner_completes_plain_text_turn(openai_provider_config, tmp
     assert events[-1].message.content == "直接回答"
     assert len(provider.requests) == 1
     assert [message.role for message in session.transcript] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_emergency_compacts_and_retries_once(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            ProviderPromptTooLongError("maximum context length exceeded"),
+            [StreamEvent(kind="text_delta", text=_summary_text()), StreamEvent(kind="message_end")],
+            [
+                StreamEvent(kind="text_delta", text="恢复成功"),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=10, output_tokens=2)),
+            ],
+        ]
+    )
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+
+    events = [event async for event in runner.run_user_turn("继续任务")]
+
+    assert events[-1].kind == "assistant_message_completed"
+    assert events[-1].message is not None and events[-1].message.content == "恢复成功"
+    assert len(provider.requests) == 3
+    assert provider.requests[1].allow_tool_calls is False
+    assert provider.requests[1].tools == []
+    assert provider.requests[2].allow_tool_calls is True
+    assert session.context_state.usage_anchor is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_does_not_create_display_message(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(
+        responses=[
+            [StreamEvent(kind="text_delta", text=_summary_text()), StreamEvent(kind="message_end")]
+        ]
+    )
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+    session.create_user_message("已有任务")
+    session.save_session("manual")
+    message_count = len(session.state.messages)
+
+    result = await runner.compact_context()
+
+    assert result.before_tokens > 0
+    assert len(session.state.messages) == message_count
+    assert provider.requests[0].allow_tool_calls is False
+    restored = SessionController(openai_provider_config, cwd=tmp_path)
+    restored.resume_session("manual")
+    assert restored.transcript[0].blocks[0].text == "以下内容是较早会话的压缩历史。"
+
+
+@pytest.mark.asyncio
+async def test_automatic_compaction_triggers_before_normal_request(openai_provider_config, tmp_path: Path) -> None:
+    openai_provider_config.context_window = 34_000
+    provider = FakeProvider(
+        responses=[
+            [StreamEvent(kind="text_delta", text=_summary_text()), StreamEvent(kind="message_end")],
+            [
+                StreamEvent(kind="text_delta", text="完成"),
+                StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=20, output_tokens=2)),
+            ],
+        ]
+    )
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+
+    events = [event async for event in runner.run_user_turn("x" * 5_000)]
+
+    assert events[-1].kind == "assistant_message_completed"
+    assert provider.requests[0].allow_tool_calls is False
+    assert provider.requests[1].allow_tool_calls is True
+    assert session.context_state.automatic_failure_count == 0
+
+
+@pytest.mark.asyncio
+async def test_automatic_compaction_circuit_breaker_persists_after_three_failures(
+    openai_provider_config,
+    tmp_path: Path,
+) -> None:
+    openai_provider_config.context_window = 34_000
+    responses: list[list[StreamEvent | DelayedEvent] | Exception] = []
+    for _ in range(3):
+        responses.extend(
+            [
+                ProviderRequestError("summary failed"),
+                [StreamEvent(kind="text_delta", text="继续"), StreamEvent(kind="message_end")],
+            ]
+        )
+    responses.append([StreamEvent(kind="text_delta", text="熔断后继续"), StreamEvent(kind="message_end")])
+    provider = FakeProvider(responses=responses)
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+
+    for index in range(4):
+        _ = [event async for event in runner.run_user_turn(f"{index}" + "x" * 5_000)]
+
+    assert session.context_state.automatic_failure_count == 3
+    assert session.context_state.automatic_compaction_disabled is True
+    assert len([request for request in provider.requests if not request.allow_tool_calls]) == 3
 
 
 @pytest.mark.asyncio

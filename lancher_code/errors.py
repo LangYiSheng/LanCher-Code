@@ -29,6 +29,14 @@ class ProviderResponseError(ProviderError):
     """后端返回了无效或错误响应。"""
 
 
+class ProviderPromptTooLongError(ProviderResponseError):
+    """请求超过模型上下文窗口。"""
+
+
+class ContextCompactionError(LanCherError):
+    """上下文压缩失败。"""
+
+
 class StreamProtocolError(ProviderError):
     """流式协议解析失败。"""
 

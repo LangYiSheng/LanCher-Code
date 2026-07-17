@@ -18,6 +18,8 @@ def test_read_file_tool_reads_with_line_numbers(tmp_path: Path) -> None:
     assert "1\thello" in result.content
     assert "2\tworld" in result.content
     assert result.metadata["is_complete"] is True
+    assert result.metadata["normalized_path"] == str(path.resolve())
+    assert result.metadata["source_content"] == "hello\nworld"
 
 
 def test_read_file_tool_returns_error_for_missing_file(tmp_path: Path) -> None:
@@ -56,3 +58,4 @@ def test_read_file_tool_supports_offset_and_limit(tmp_path: Path) -> None:
     assert result.metadata["line_start"] == 11
     assert result.metadata["line_end"] == 13
     assert result.metadata["is_complete"] is False
+    assert result.metadata["source_content"] == "line 10\nline 11\nline 12\n"

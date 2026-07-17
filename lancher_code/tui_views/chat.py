@@ -811,6 +811,34 @@ class LanCherTextualApp(App[int]):
             self.push_screen(SettingsScreen(self._settings_service), self._handle_settings_result)
             return None
 
+        if command_name == "compact":
+            if arguments_text.strip():
+                self.notify("用法：/compact", title="上下文压缩", severity="warning")
+                return None
+            self._is_streaming = True
+            self._status_hint = "正在压缩上下文..."
+            composer = self.query_one("#composer-input", ComposerTextArea)
+            composer.disabled = True
+            self._refresh_status_bar()
+            self.notify("正在压缩上下文...", title="上下文压缩")
+            try:
+                result = await self._turn_runner.compact_context()
+            except Exception as exc:
+                self.notify(str(exc), title="上下文压缩失败", severity="error", timeout=10)
+            else:
+                self.notify(
+                    f"已压缩，token 从 {result.before_tokens} 降至 {result.after_tokens}",
+                    title="上下文压缩",
+                    timeout=10,
+                )
+            finally:
+                self._is_streaming = False
+                self._status_hint = "Ready"
+                composer.disabled = False
+                composer.focus()
+                self._refresh_status_bar()
+            return None
+
         if command_name == "session":
             await self._execute_session_command(arguments_text)
             return None

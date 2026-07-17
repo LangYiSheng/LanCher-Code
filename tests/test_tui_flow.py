@@ -282,7 +282,14 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
 
         menu = app.query_one(SlashCommandMenu)
         assert menu.display
-        assert _visible_slash_commands(app) == ["plan", "mode", "session", "settings", "exit"]
+        assert _visible_slash_commands(app) == [
+            "plan",
+            "mode",
+            "session",
+            "compact",
+            "settings",
+            "exit",
+        ]
 
         composer.text = "/p"
         composer.cursor_location = composer.document.end
@@ -294,6 +301,42 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
         await pilot.pause(0.05)
         assert not menu.display
 
+
+@pytest.mark.asyncio
+async def test_compact_command_uses_summary_request_without_creating_user_message(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+) -> None:
+    headings = (
+        "主要请求和意图",
+        "关键技术概念",
+        "文件和代码段",
+        "错误与修复",
+        "问题解决过程",
+        "用户消息与明确反馈",
+        "待办任务",
+        "当前工作",
+        "可能的下一步",
+    )
+    summary = "<summary>" + "\n".join(f"## {heading}\n内容" for heading in headings) + "</summary>"
+    provider = FakeProvider(
+        responses=[
+            [StreamEvent(kind="text_delta", text=summary), StreamEvent(kind="message_end")]
+        ]
+    )
+    app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+    session.create_user_message("已有历史")
+    message_count = len(session.state.messages)
+
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "/compact")
+        await pilot.pause(0.1)
+
+        assert len(provider.requests) == 1
+        assert provider.requests[0].allow_tool_calls is False
+        assert len(session.state.messages) == message_count
+        assert app.query_one("#composer-input", ComposerTextArea).disabled is False
 
 @pytest.mark.asyncio
 async def test_slash_menu_accepts_selection_without_submitting(

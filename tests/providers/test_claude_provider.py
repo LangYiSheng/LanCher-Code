@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from lancher_code.errors import ProviderResponseError
+from lancher_code.errors import ProviderPromptTooLongError, ProviderResponseError
 from lancher_code.models import ChatRequest, ContentBlock, ConversationMessage, ThinkingConfig, ToolDefinition
 from lancher_code.providers.claude import ClaudeProvider
 
@@ -286,3 +286,29 @@ async def test_claude_provider_raises_response_error(claude_provider_config) -> 
         return [event async for event in provider.stream_chat(_request())]
 
     assert "bad request" in exc_info.value.user_message
+
+
+@pytest.mark.asyncio
+async def test_claude_provider_classifies_stream_prompt_too_long(claude_provider_config) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = _build_sse_payload(
+            [
+                "event: error\n"
+                + "data: "
+                + json.dumps(
+                    {
+                        "type": "error",
+                        "error": {"type": "prompt_too_long", "message": "prompt is too long"},
+                    }
+                )
+                + "\n\n"
+            ]
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    provider = ClaudeProvider(
+        claude_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(ProviderPromptTooLongError):
+        _ = [event async for event in provider.stream_chat(_request())]

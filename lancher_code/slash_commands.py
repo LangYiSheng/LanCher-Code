@@ -255,6 +255,15 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
     )
     registry.register(
         SlashCommandDefinition(
+            name="compact",
+            description="压缩当前会话上下文",
+            usage="/compact",
+            visible_modes=("default", "plan", "acceptEdits", "bypass"),
+            executable_modes=("default", "plan", "acceptEdits", "bypass"),
+        )
+    )
+    registry.register(
+        SlashCommandDefinition(
             name="settings",
             description="打开设置面板",
             usage="/settings",

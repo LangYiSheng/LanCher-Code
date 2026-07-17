@@ -4,7 +4,7 @@ import textwrap
 
 import pytest
 
-from lancher_code.config import load_config
+from lancher_code.config import load_config, load_config_data
 from lancher_code.errors import ConfigError
 
 
@@ -184,3 +184,17 @@ def test_load_config_rejects_invalid_yaml(tmp_path) -> None:
         load_config(str(config_file))
 
     assert "YAML" in exc_info.value.user_message
+
+
+def test_provider_context_window_defaults_and_validates() -> None:
+    base = {"model": "m", "base_url": "https://x", "api_key": "k"}
+    openai = load_config_data({"provider": {**base, "protocol": "openai"}})
+    claude = load_config_data({"provider": {**base, "protocol": "claude"}})
+    assert openai.provider.context_window == 128000
+    assert claude.provider.context_window == 200000
+
+    for value in (True, 0, -1, "128000"):
+        with pytest.raises(ConfigError):
+            load_config_data(
+                {"provider": {**base, "protocol": "openai", "context_window": value}}
+            )

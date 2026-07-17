@@ -60,6 +60,10 @@ def load_config_data(raw_data: Any) -> AppConfig:
     base_url = _expand_env(_require_non_empty_string(provider_data, "base_url"))
     api_key = _expand_env(_require_non_empty_string(provider_data, "api_key"))
     timeout_seconds = _read_positive_float(provider_data.get("timeout_seconds", 60.0), "timeout_seconds")
+    context_window = _read_positive_int(
+        provider_data.get("context_window", 200000 if protocol == "claude" else 128000),
+        "provider.context_window",
+    )
     thinking = _load_thinking(provider_data.get("thinking"))
     ui = _load_ui(ui_data)
     runtime = _load_runtime(runtime_data)
@@ -71,6 +75,7 @@ def load_config_data(raw_data: Any) -> AppConfig:
         api_key=api_key,
         timeout_seconds=timeout_seconds,
         thinking=thinking,
+        context_window=context_window,
     )
     return AppConfig(provider=provider, ui=ui, runtime=runtime)
 

@@ -17,6 +17,7 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
         "base_url": config.provider.base_url,
         "api_key": config.provider.api_key,
         "timeout_seconds": config.provider.timeout_seconds,
+        "context_window": config.provider.context_window,
     }
     if config.provider.thinking is not None:
         thinking_data: dict[str, Any] = {"enabled": config.provider.thinking.enabled}

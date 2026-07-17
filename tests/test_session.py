@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from lancher_code.models import MessageUsage, PermissionRule, ToolCall, ToolDefinition, ToolExecutionResult
+from lancher_code.models import (
+    ContextFileSnapshot,
+    MessageUsage,
+    PermissionRule,
+    ToolCall,
+    ToolDefinition,
+    ToolExecutionResult,
+    ToolResultReplacement,
+)
 from lancher_code.permission_engine import PermissionStorage
 from lancher_code.session import SessionController
 from lancher_code.session_store import SessionStoreError
@@ -329,7 +337,40 @@ def test_v1_session_loads_without_permissions_and_upgrades_on_save(
 
     controller.save_session("legacy")
     metadata = __import__("json").loads(path.read_text(encoding="utf-8").splitlines()[0])
-    assert metadata["version"] == 2
+    assert metadata["version"] == 3
+
+
+def test_v3_session_round_trips_context_management(openai_provider_config, tmp_path: Path) -> None:
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
+    context = controller.context_state
+    original_context_id = context.context_id
+    context.seen_call_ids.add("call-1")
+    context.replacements["call-1"] = ToolResultReplacement(
+        call_id="call-1",
+        preview="preview",
+        relative_path=".lancher/context/demo/tool-results/result.txt",
+        original_bytes=123,
+    )
+    context.recent_files.append(
+        ContextFileSnapshot(
+            path="demo.py",
+            normalized_path=str((tmp_path / "demo.py").resolve()),
+            content="print('ok')",
+            read_at="2026-07-17T00:00:00+00:00",
+        )
+    )
+    context.automatic_failure_count = 2
+    controller.save_session("context")
+
+    restored = SessionController(openai_provider_config, cwd=tmp_path)
+    restored.resume_session("context")
+
+    restored_context = restored.context_state
+    assert restored_context.context_id == original_context_id
+    assert restored_context.seen_call_ids == {"call-1"}
+    assert restored_context.replacements["call-1"].preview == "preview"
+    assert restored_context.recent_files[0].path == "demo.py"
+    assert restored_context.automatic_failure_count == 2
 
 
 def test_invalid_v2_permissions_do_not_change_current_state_or_rules(

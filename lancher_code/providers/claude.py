@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable
 
 import httpx
 
-from lancher_code.errors import ProviderRequestError, ProviderResponseError
+from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
 from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
@@ -110,6 +110,12 @@ class ClaudeProvider(BaseChatProvider):
                                 raw_message = error.get("message")
                                 if isinstance(raw_message, str) and raw_message.strip():
                                     message = raw_message.strip()
+                                raw_code = error.get("type") or error.get("code")
+                                if self.is_prompt_too_long(
+                                    message,
+                                    code=raw_code if isinstance(raw_code, str) else None,
+                                ):
+                                    raise ProviderPromptTooLongError(message)
                             raise ProviderResponseError(message)
 
                     if not saw_end:

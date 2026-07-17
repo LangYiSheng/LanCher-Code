@@ -219,11 +219,14 @@ def build_chat_request_payload(
     transcript: list[ConversationMessage],
     tools: list[ToolDefinition],
     deferred_tool_groups: list[DeferredToolGroup] | None = None,
+    dynamic_context: str | None = None,
 ) -> PromptPayload:
     system = [
         build_system_prompt(),
         build_environment_prompt(context),
     ]
+    if dynamic_context:
+        system.append(dynamic_context)
     deferred_tools_prompt = build_deferred_tools_prompt(deferred_tool_groups or [])
     if deferred_tools_prompt:
         system.append(deferred_tools_prompt)

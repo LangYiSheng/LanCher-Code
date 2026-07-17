@@ -41,6 +41,7 @@ def test_registry_suggests_commands_by_mode() -> None:
         "plan",
         "mode",
         "session",
+        "compact",
         "settings",
         "exit",
     ]

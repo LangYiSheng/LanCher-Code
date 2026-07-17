@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from lancher_code.errors import ProviderAuthError
+from lancher_code.errors import ProviderAuthError, ProviderPromptTooLongError, ProviderResponseError
 from lancher_code.models import ChatRequest, ContentBlock, ConversationMessage, ToolDefinition
 from lancher_code.providers.openai import OpenAIProvider
 
@@ -241,3 +241,29 @@ async def test_openai_provider_raises_auth_error(openai_provider_config) -> None
         return [event async for event in provider.stream_chat(_request())]
 
     assert "bad key" in exc_info.value.user_message
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_classifies_only_known_prompt_too_long_error(openai_provider_config) -> None:
+    def too_long_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"error": {"code": "context_length_exceeded", "message": "too many tokens"}},
+        )
+
+    provider = OpenAIProvider(
+        openai_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(too_long_handler)),
+    )
+    with pytest.raises(ProviderPromptTooLongError):
+        _ = [event async for event in provider.stream_chat(_request())]
+
+    def ordinary_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": "invalid_request", "message": "bad field"}})
+
+    provider = OpenAIProvider(
+        openai_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(ordinary_handler)),
+    )
+    with pytest.raises(ProviderResponseError):
+        _ = [event async for event in provider.stream_chat(_request())]
