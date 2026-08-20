@@ -70,6 +70,18 @@ MODE_STATUS_LABELS: dict[RuntimeMode, str] = {
     "bypass": "完全访问",
 }
 
+CONTEXT_REFRESH_EVENTS: frozenset[str] = frozenset(
+    {
+        "user_message_created",
+        "usage_updated",
+        "tool_result_received",
+        "progress_updated",
+        "assistant_message_completed",
+        "turn_cancelled",
+        "turn_failed",
+    }
+)
+
 
 class LanCherTextualApp(App[int]):
     CSS = """
@@ -420,6 +432,7 @@ class LanCherTextualApp(App[int]):
         self._refresh_composer_placeholder()
         await self._refresh_command_ui()
         self._refresh_status_bar()
+        self._refresh_context_usage()
         if self._mcp_manager is not None:
             self._mcp_manager.add_progress_callback(self._handle_mcp_progress)
             if self._mcp_manager.has_servers:
@@ -450,6 +463,8 @@ class LanCherTextualApp(App[int]):
 
     def _handle_mcp_progress(self, progress: MCPInitializationProgress) -> None:
         self.query_one(BannerWidget).update_mcp_progress(progress)
+        if progress.state == "complete":
+            self._refresh_context_usage()
 
     def on_resize(self) -> None:
         self.call_after_refresh(self._update_composer_height)
@@ -571,6 +586,32 @@ class LanCherTextualApp(App[int]):
         status_center.update(center_text)
         status_right.update(self._format_usage_text(usage))
 
+    def _refresh_context_usage(self) -> None:
+        banner = self.query_one(BannerWidget)
+        try:
+            visible_tools = []
+            deferred_tool_groups = []
+            if self._tool_registry is not None:
+                visible_tools = self._tool_registry.list_definitions(
+                    discovered_names=set(),
+                    mode=self._session_controller.runtime_mode,
+                )
+                deferred_tool_groups = self._tool_registry.list_deferred_index(
+                    mode=self._session_controller.runtime_mode
+                )
+            request = self._session_controller.build_request(
+                visible_tools,
+                allow_tool_calls=True,
+                mode=self._session_controller.runtime_mode,
+                deferred_tool_groups=deferred_tool_groups,
+            )
+            used_tokens = self._session_controller.estimate_request_tokens(request)
+        except Exception:
+            logger.exception("event=tui_context_usage_estimate_failed")
+            banner.update_context_usage(None, self._session_controller.context_window)
+            return
+        banner.update_context_usage(used_tokens, self._session_controller.context_window)
+
     def _status_left_text(self) -> str:
         mode = self._session_controller.runtime_mode
         if mode == "default":
@@ -607,6 +648,8 @@ class LanCherTextualApp(App[int]):
                 self._turn_runner.resolve_permission_request(resolution)
         self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
         self._refresh_status_bar()
+        if event.kind in CONTEXT_REFRESH_EVENTS:
+            self._refresh_context_usage()
 
     async def _request_inline_permission(self, request: PermissionRequest) -> PermissionResolution:
         composer = self.query_one("#composer", Horizontal)
@@ -783,11 +826,13 @@ class LanCherTextualApp(App[int]):
         if command_name == "do":
             self._apply_turn_event(self._turn_runner.restore_mode_after_plan())
             self._refresh_status_bar()
+            self._refresh_context_usage()
             return None
 
         if command_name == "plan":
             self._apply_turn_event(self._turn_runner.set_mode("plan"))
             self._refresh_status_bar()
+            self._refresh_context_usage()
             payload = arguments_text.strip()
             if not payload:
                 return None
@@ -801,6 +846,7 @@ class LanCherTextualApp(App[int]):
                 return None
             self._apply_turn_event(self._turn_runner.set_mode(requested_mode))  # type: ignore[arg-type]
             self._refresh_status_bar()
+            self._refresh_context_usage()
             return None
 
         if command_name == "settings":
@@ -837,6 +883,7 @@ class LanCherTextualApp(App[int]):
                 composer.disabled = False
                 composer.focus()
                 self._refresh_status_bar()
+                self._refresh_context_usage()
             return None
 
         if command_name == "session":
@@ -917,6 +964,7 @@ class LanCherTextualApp(App[int]):
         self._refresh_mode_chrome()
         self._refresh_composer_placeholder()
         self._refresh_status_bar()
+        self._refresh_context_usage()
         chat_view.scroll_end(animate=False)
 
     def _handle_settings_result(self, result: SettingsResult | None) -> None:

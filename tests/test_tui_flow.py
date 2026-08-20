@@ -12,7 +12,16 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 
 from lancher_code.errors import ProviderRequestError
-from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk, ToolDefinition, ToolExecutionResult, TraceEntry
+from lancher_code.models import (
+    ChatRequest,
+    MessageUsage,
+    StreamEvent,
+    ToolCallChunk,
+    ToolDefinition,
+    ToolExecutionResult,
+    TraceEntry,
+    TurnEvent,
+)
 from lancher_code.session import SessionController
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
@@ -30,6 +39,7 @@ from lancher_code.tui import (
 )
 from lancher_code.mcp.manager import MCPInitializationProgress
 from lancher_code.turn_runner import TurnRunner
+from lancher_code.tui_views.chat import CONTEXT_REFRESH_EVENTS
 
 DelayedEvent = tuple[StreamEvent, float]
 
@@ -80,6 +90,7 @@ def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Pat
         provider_config=provider_config,
         session_controller=session,
         ui_config=ui_config,
+        tool_registry=registry,
     )
     return app, session
 
@@ -89,6 +100,71 @@ async def _submit_message(app: LanCherTextualApp, pilot, value: str) -> None:
     input_widget.text = value
     input_widget.focus()
     await pilot.press("enter")
+
+
+@pytest.mark.parametrize(
+    ("used_tokens", "context_window", "expected"),
+    [
+        (0, 1_000, "上下文 0%"),
+        (1, 1_000, "上下文 1%"),
+        (370, 1_000, "上下文 37%"),
+        (1_001, 1_000, "上下文 100%"),
+        (None, 1_000, "上下文 --"),
+        (100, 0, "上下文 --"),
+    ],
+)
+def test_banner_formats_context_window_usage(
+    tmp_path: Path,
+    used_tokens: int | None,
+    context_window: int,
+    expected: str,
+) -> None:
+    banner = BannerWidget(tmp_path)
+
+    banner.update_context_usage(used_tokens, context_window)
+
+    assert banner._context_usage_status == expected
+
+
+def test_context_usage_refresh_events_exclude_streaming_text_deltas() -> None:
+    assert {
+        "user_message_created",
+        "usage_updated",
+        "tool_result_received",
+        "progress_updated",
+        "assistant_message_completed",
+    } <= CONTEXT_REFRESH_EVENTS
+    assert "assistant_text_delta" not in CONTEXT_REFRESH_EVENTS
+
+
+@pytest.mark.asyncio
+async def test_context_usage_is_not_reestimated_for_streaming_text_delta(
+    openai_provider_config,
+    ui_config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, session = _build_app(
+        FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path
+    )
+    estimate_calls = 0
+
+    def estimate_request_tokens(_request: ChatRequest) -> int:
+        nonlocal estimate_calls
+        estimate_calls += 1
+        return 37_000
+
+    monkeypatch.setattr(session, "estimate_request_tokens", estimate_request_tokens)
+
+    async with app.run_test():
+        initial_calls = estimate_calls
+        assert app.query_one(BannerWidget)._context_usage_status == "上下文 29%"
+
+        await app._consume_turn_event(TurnEvent(kind="assistant_text_delta"))
+        assert estimate_calls == initial_calls
+
+        await app._consume_turn_event(TurnEvent(kind="usage_updated"))
+        assert estimate_calls == initial_calls + 1
 
 
 @pytest.mark.asyncio
@@ -307,6 +383,7 @@ async def test_compact_command_uses_summary_request_without_creating_user_messag
     openai_provider_config,
     ui_config,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     headings = (
         "主要请求和意图",
@@ -328,8 +405,18 @@ async def test_compact_command_uses_summary_request_without_creating_user_messag
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
     session.create_user_message("已有历史")
     message_count = len(session.state.messages)
+    context_refresh_count = 0
+    original_refresh = app._refresh_context_usage
+
+    def track_context_refresh() -> None:
+        nonlocal context_refresh_count
+        context_refresh_count += 1
+        original_refresh()
+
+    monkeypatch.setattr(app, "_refresh_context_usage", track_context_refresh)
 
     async with app.run_test() as pilot:
+        refresh_count_before_compact = context_refresh_count
         await _submit_message(app, pilot, "/compact")
         await pilot.pause(0.1)
 
@@ -337,6 +424,8 @@ async def test_compact_command_uses_summary_request_without_creating_user_messag
         assert provider.requests[0].allow_tool_calls is False
         assert len(session.state.messages) == message_count
         assert app.query_one("#composer-input", ComposerTextArea).disabled is False
+        assert context_refresh_count == refresh_count_before_compact + 1
+
 
 @pytest.mark.asyncio
 async def test_slash_menu_accepts_selection_without_submitting(
@@ -671,6 +760,8 @@ async def test_banner_collapses_after_first_submission(
         assert "LanCher Code" in header_text
         assert "cwd:" in header_text
         assert "MCP 0/0" in header_text
+        assert "上下文 " in header_text
+        assert "%" in header_text
         assert app.query_one("#chat-view", VerticalScroll).has_class("-banner-collapsed")
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from rich.console import Group, RenderableType
@@ -32,6 +33,7 @@ class BannerWidget(Static):
         self._mcp_compact_status = "MCP 0/0"
         self._mcp_has_issues = False
         self._mcp_progress: MCPInitializationProgress | None = None
+        self._context_usage_status = "上下文 --"
         self._spinner_frame = 0
 
     def on_mount(self) -> None:
@@ -79,6 +81,14 @@ class BannerWidget(Static):
             )
         self.refresh()
 
+    def update_context_usage(self, used_tokens: int | None, context_window: int) -> None:
+        if used_tokens is None or context_window <= 0:
+            self._context_usage_status = "上下文 --"
+        else:
+            percentage = math.ceil(max(0, used_tokens) * 100 / context_window)
+            self._context_usage_status = f"上下文 {min(100, percentage)}%"
+        self.refresh()
+
     def _advance_spinner(self) -> None:
         progress = self._mcp_progress
         if progress is None or progress.state == "complete":
@@ -106,7 +116,11 @@ class BannerWidget(Static):
         left.append(str(self._cwd), style="#c8d5e3")
 
         mcp_style = "#ff9b6b" if self._mcp_has_issues else "#7f9ab8"
-        header.add_row(left, Text(self._mcp_compact_status, style=mcp_style))
+        right = Text()
+        right.append(self._mcp_compact_status, style=mcp_style)
+        right.append(" · ", style="#526980")
+        right.append(self._context_usage_status, style="#7f9ab8")
+        header.add_row(left, right)
         return header
 
     def _render_mcp_panel(self) -> RenderableType:
