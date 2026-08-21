@@ -1,6 +1,3 @@
-# 项目文档（当前不纳入版本控制）
-docs/
-
 # Python 缓存与构建产物
 __pycache__/
 *.py[cod]
