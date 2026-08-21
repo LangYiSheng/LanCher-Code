@@ -226,6 +226,84 @@ async def test_claude_provider_serializes_multi_block_user_content(claude_provid
 
 
 @pytest.mark.asyncio
+async def test_claude_provider_serializes_parallel_tool_results_in_next_user_message(
+    claude_provider_config,
+) -> None:
+    request = ChatRequest(
+        model="claude-test",
+        messages=[
+            ConversationMessage(
+                role="assistant",
+                blocks=[
+                    ContentBlock.tool_use_block(call_id="call-1", name="glob", input={"pattern": "*"}),
+                    ContentBlock.tool_use_block(
+                        call_id="call-2", name="grep", input={"pattern": "context"}
+                    ),
+                ],
+            ),
+            ConversationMessage(
+                role="tool",
+                blocks=[
+                    ContentBlock.tool_result_block(
+                        call_id="call-1", text="找到 9 个文件", is_error=False
+                    ),
+                    ContentBlock.tool_result_block(
+                        call_id="call-2", text="找到 436 条命中", is_error=False
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    def handler(raw_request: httpx.Request) -> httpx.Response:
+        payload = json.loads(raw_request.content.decode("utf-8"))
+        assert len(payload["messages"]) == 2
+        assert payload["messages"][1] == {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "找到 9 个文件",
+                    "is_error": False,
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-2",
+                    "content": "找到 436 条命中",
+                    "is_error": False,
+                },
+            ],
+        }
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_build_sse_payload(
+                [
+                    "event: message_start\n"
+                    + "data: "
+                    + json.dumps({"type": "message_start"})
+                    + "\n\n",
+                    "event: message_stop\n"
+                    + "data: "
+                    + json.dumps({"type": "message_stop"})
+                    + "\n\n",
+                ]
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    provider = ClaudeProvider(
+        claude_provider_config,
+        client_factory=lambda: httpx.AsyncClient(transport=transport, timeout=30.0),
+    )
+
+    events = [event async for event in provider.stream_chat(request)]
+
+    assert [event.kind for event in events] == ["message_start", "message_end"]
+
+
+@pytest.mark.asyncio
 async def test_claude_provider_disables_thinking_when_config_disabled(claude_provider_config) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))

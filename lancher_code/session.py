@@ -258,19 +258,22 @@ class SessionController:
         self._transcript.append(ConversationMessage(role="assistant", blocks=blocks))
 
     def append_tool_results(self, results: list[ToolExecutionResult]) -> None:
-        for result in results:
-            self._transcript.append(
-                ConversationMessage(
-                    role="tool",
-                    blocks=[
-                        ContentBlock.tool_result_block(
-                            call_id=result.call_id,
-                            text=self._tool_result_content(result),
-                            is_error=result.is_error,
-                        )
-                    ],
-                )
+        if not results:
+            return
+
+        self._transcript.append(
+            ConversationMessage(
+                role="tool",
+                blocks=[
+                    ContentBlock.tool_result_block(
+                        call_id=result.call_id,
+                        text=self._tool_result_content(result),
+                        is_error=result.is_error,
+                    )
+                    for result in results
+                ],
             )
+        )
 
     def complete_message(self, message_id: str, usage: MessageUsage | None = None) -> SessionMessage:
         message = self.get_message(message_id)

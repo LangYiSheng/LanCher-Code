@@ -211,6 +211,27 @@ def test_session_controller_appends_transcript_tool_calls_and_results(openai_pro
     assert controller.transcript[2].blocks[0].kind == "tool_result"
 
 
+def test_session_controller_groups_parallel_tool_results_in_one_message(openai_provider_config) -> None:
+    controller = SessionController(openai_provider_config)
+    controller.create_user_message("并行检查项目")
+    controller.append_assistant_tool_calls(
+        [
+            ToolCall(0, "call-1", "glob", {"pattern": "*"}, '{"pattern":"*"}'),
+            ToolCall(1, "call-2", "grep", {"pattern": "context"}, '{"pattern":"context"}'),
+        ]
+    )
+    controller.append_tool_results(
+        [
+            ToolExecutionResult("call-1", "glob", content="找到 9 个文件", is_error=False),
+            ToolExecutionResult("call-2", "grep", content="找到 436 条命中", is_error=False),
+        ]
+    )
+
+    assert [message.role for message in controller.transcript] == ["user", "assistant", "tool"]
+    assert [block.call_id for block in controller.transcript[2].blocks] == ["call-1", "call-2"]
+    assert all(block.kind == "tool_result" for block in controller.transcript[2].blocks)
+
+
 def test_session_save_and_resume_restores_ui_and_protocol_state(openai_provider_config, tmp_path) -> None:
     controller = SessionController(openai_provider_config, cwd=tmp_path)
     controller.create_user_message("先检查项目")
