@@ -37,8 +37,9 @@ sequenceDiagram
                 EX-->>TR: 结构化错误结果
             end
             TOOL-->>EX: ToolExecutionResult
-            EX-->>TR: 结果列表
-            TR->>S: append_tool_results + 轨迹；记录 discovered_tool_names
+            EX-->>TR: 每项状态与完成结果（完成顺序）
+            TR->>S: 追加工具结果并更新同一调用；记录 discovered_tool_names
+            TR-->>T: progress_updated / tool_result_received
             TR->>TR: 未知工具熔断检查；continue（下一轮）
         else 无工具调用（最终回答）
             TR->>S: complete_message(usage)
@@ -64,18 +65,28 @@ sequenceDiagram
 
 ### 3. 流式消费（`TurnRunner._stream_request`）
 
-- `text_delta` → 追加消息内容，TUI 显示打字机效果
-- `thinking_delta` → 写入思考轨迹，TUI 显示"模型正在思考"
+- `text_delta` → 追加消息内容与有序正文段，TUI 在当前位置逐步显示正文
+- `thinking_delta` → 追加有序思考段，TUI 以灰色展开内容，不增加“思考”标题
 - `tool_call_delta` → `ToolCallAssembler` 按 `call_index` 拼接名称与参数 JSON
-- `message_end` → 取出 usage
+- 段类型变化或响应结束 → 封口当前段，不能跨中间正文或下一次响应合并思考
+- `message_end` → 取出 usage，表示当前模型响应结束，不代表整个任务结束
 - 模型报"上下文超长"（`ProviderPromptTooLongError`）→ 紧急压缩后重试一次
 
 ### 4. 工具执行（`ToolExecutor.execute_calls`）
 
 - 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、阶段不可用（`phase_disallowed`）。讨论／计划禁止普通写入与通用 Shell
 - 并发安全工具批量并行，非安全工具串行
-- 每个调用：`PermissionEngine.evaluate()` → deny 直接返回错误；ask 走弹窗
+- 每个调用：`PermissionEngine.evaluate()` → deny 直接返回错误；ask 通过非阻塞内联审批面板等待结果
+- 每项启动、等待批准和完成时立即通知界面；安全工具可以同时显示执行中，先完成的调用立即显示结果，不等待整组最慢的工具
 - 统一 `asyncio.wait_for` 超时（默认 10 秒），异常归一化为 `ToolExecutionResult(is_error=True)`
+
+### 有序记录与折叠
+
+新消息使用 `timeline_version=1`，`trace.entries` 按实际输出顺序保存思考段、正文段与工具调用。每次调用保存 `call_id` 与 `group_id`，结果按 `call_id` 回到原调用位置显示，即使并发完成顺序不同，也不打乱工具列表。正文段与思考段保存输出状态；工具保存排队、执行、等待批准及终止状态，结果保留完整内容及错误码供详情查看。
+
+执行时展开工具组及所有调用行，每条调用的参数和结果可独立展开；正常完成的多工具组默认收成一行数量摘要，单工具直接保留调用行，不嵌套两层折叠。思考在输出期间展开，结束后默认显示灰色首行摘要。手动展开／收起状态优先于后续流式刷新；失败和待批准操作直接可见。
+
+旧消息未保存完整交替顺序时，按已有轨迹顺序呈现，并在末尾保留原正文。不能从旧数据中推断或补造已丢失的流式顺序。
 
 ### 5. 循环终止条件
 
@@ -92,9 +103,11 @@ sequenceDiagram
 ```text
 user_message_created
 assistant_message_started
-（循环内）progress_updated / assistant_text_delta* / usage_updated / tool_call_started / tool_result_received*
-（可能）permission_request_created → permission_request_resolved
-assistant_message_completed | turn_cancelled | turn_failed
+（循环内）progress_updated / assistant_text_delta* / usage_updated
+（每组）tool_call_started / progress_updated* / tool_result_received*
+（可能）permission_request_created → permission_request_closed
+assistant_message_completed（消息段结束）
+turn_completed | turn_cancelled | turn_failed（任务结束）
 ```
 
 ## 失败与取消后的状态

@@ -343,7 +343,7 @@ async def test_turn_runner_executes_multiple_tool_calls_in_one_reply(openai_prov
     assert sum(event.kind == "tool_call_started" for event in events) == 2
     assert sum(event.kind == "tool_result_received" for event in events) == 2
     entries = session.state.messages[-1].trace.entries
-    assert [entry.kind for entry in entries] == ["thinking", "tool_call", "tool_call", "tool_result", "tool_result"]
+    assert [entry.kind for entry in entries] == ["thinking", "tool_call", "tool_call", "tool_result", "tool_result", "text"]
     assert session.state.messages[-1].content == "最终回答"
 
 
@@ -386,6 +386,7 @@ async def test_turn_runner_loops_until_text_after_multiple_batches(openai_provid
         "thinking",
         "tool_call",
         "tool_result",
+        "text",
     ]
 
 
@@ -595,3 +596,134 @@ async def test_turn_runner_can_cancel_active_turn(openai_provider_config, tmp_pa
 
     assert events[-1].kind == "turn_cancelled"
     assert session.state.messages[-1].status == "cancelled"
+    assert session.state.messages[-1].trace.entries[0].metadata["state"] == "cancelled"
+    assert session.state.messages[-1].trace.entries[-1].kind == "notice"
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_keeps_thinking_text_and_tool_batches_in_output_order(openai_provider_config, tmp_path: Path) -> None:
+    provider = FakeProvider(responses=[
+        [
+            StreamEvent(kind="thinking_delta", text="检查入口"),
+            StreamEvent(kind="text_delta", text="先定位配置"),
+            StreamEvent(kind="thinking_delta", text="再查保存"),
+            StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(
+                call_index=0, provider_call_id="call-1", name_delta="echo_tool", arguments_delta='{"value":"a"}')),
+            StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=2, output_tokens=3)),
+        ],
+        [
+            StreamEvent(kind="text_delta", text="已经定位"),
+            StreamEvent(kind="thinking_delta", text="核对结果"),
+            StreamEvent(kind="text_delta", text="最终总结"),
+            StreamEvent(kind="message_end", usage=MessageUsage(input_tokens=4, output_tokens=5)),
+        ],
+    ])
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+    _ = [event async for event in runner.run_user_turn("检查配置")]
+    entries = session.state.messages[-1].trace.entries
+    assert [entry.kind for entry in entries] == [
+        "thinking", "text", "thinking", "tool_call", "tool_result", "text", "thinking", "text",
+    ]
+    assert [entry.text for entry in entries if entry.kind in {"thinking", "text"}] == [
+        "检查入口", "先定位配置", "再查保存", "已经定位", "核对结果", "最终总结",
+    ]
+    assert all(entry.metadata["state"] == "complete" for entry in entries)
+    assert session.total_usage().input_tokens == 6
+    assert session.total_usage().output_tokens == 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_after_first", [False, True])
+async def test_turn_runner_reports_each_parallel_result_and_never_duplicates_on_cancel(
+    openai_provider_config, tmp_path: Path, cancel_after_first: bool,
+) -> None:
+    release = asyncio.Event()
+
+    class ControlledEcho(EchoTool):
+        async def execute(self, arguments, context):
+            if arguments["value"] == "slow":
+                await release.wait()
+            return await super().execute(arguments, context)
+
+    provider = FakeProvider(responses=[
+        [
+            StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(
+                call_index=0, provider_call_id="slow", name_delta="echo_tool", arguments_delta='{"value":"slow"}')),
+            StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(
+                call_index=1, provider_call_id="fast", name_delta="echo_tool", arguments_delta='{"value":"fast"}')),
+            StreamEvent(kind="message_end"),
+        ],
+        [StreamEvent(kind="text_delta", text="完成"), StreamEvent(kind="message_end")],
+    ])
+    registry = ToolRegistry()
+    registry.register(ControlledEcho())
+    session = SessionController(openai_provider_config, cwd=tmp_path)
+    runner = TurnRunner(provider, session, registry, ToolExecutor(registry, cwd=tmp_path))
+    first_result_observed = False
+
+    async def collect():
+        nonlocal first_result_observed
+        async for event in runner.run_user_turn("并行读取"):
+            if event.kind == "tool_result_received" and event.tool_result.call_id == "fast":
+                first_result_observed = True
+                call_entries = [entry for entry in event.message.trace.entries if entry.kind == "tool_call"]
+                assert [entry.metadata["state"] for entry in call_entries] == ["running", "complete"]
+                assert call_entries[0].metadata["group_id"] == call_entries[1].metadata["group_id"]
+                assert len(provider.requests) == 1
+                if cancel_after_first:
+                    runner.cancel_active_turn()
+                else:
+                    release.set()
+
+    await asyncio.wait_for(collect(), 3)
+    assert first_result_observed
+    results = [entry for entry in session.state.messages[-1].trace.entries if entry.kind == "tool_result"]
+    assert [entry.call_id for entry in results] == ["fast", "slow"]
+    assert results[0].ok is True
+    assert results[0].metadata["started"] is True
+    assert results[1].metadata["started"] is True
+    assert results[1].metadata["state"] == ("cancelled" if cancel_after_first else "complete")
+    protocol_results = [block for item in session.transcript for block in item.blocks if block.kind == "tool_result"]
+    assert sorted(block.call_id for block in protocol_results) == ["fast", "slow"]
+    assert len(protocol_results) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_argument_stream_notifies_thinking_finished_before_arguments_complete(openai_provider_config, tmp_path):
+    release_arguments = asyncio.Event()
+
+    class GatedProvider(FakeProvider):
+        async def stream_chat(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                yield StreamEvent(kind="thinking_delta", text="先读取入口")
+                yield StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(
+                    call_index=0, provider_call_id="read", name_delta="echo_tool"))
+                # 参数尚未输出时，界面就应收到思考结束的刷新通知。
+                await release_arguments.wait()
+                yield StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(
+                    call_index=0, arguments_delta='{"value":'))
+                yield StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(
+                    call_index=0, arguments_delta='"done"}'))
+            else:
+                yield StreamEvent(kind="text_delta", text="完成")
+            yield StreamEvent(kind="message_end")
+
+    provider = GatedProvider(responses=[])
+    runner, session = _runner(provider, openai_provider_config, tmp_path)
+    notifications = []
+
+    async def collect():
+        async for event in runner.run_user_turn("读取入口"):
+            if event.kind == "progress_updated" and event.progress_message == "正在准备工具调用":
+                notifications.append(event)
+                assert not release_arguments.is_set()
+                assert [entry.kind for entry in event.message.trace.entries] == ["thinking"]
+                assert event.message.trace.entries[0].metadata["state"] == "complete"
+                assert session.state.messages[-1].status == "streaming"
+                release_arguments.set()
+
+    await asyncio.wait_for(collect(), 3)
+    assert len(notifications) == 1
+    assert len(provider.requests) == 2
+    assert session.state.messages[-1].status == "complete"

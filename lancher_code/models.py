@@ -511,6 +511,8 @@ class SessionMessage:
     timestamp: datetime
     usage: MessageUsage = field(default_factory=MessageUsage)
     trace: ThinkingTrace = field(default_factory=ThinkingTrace)
+    # 0 为旧版分离正文；1 表示 trace 已按输出顺序包含全部正文。
+    timeline_version: int = 0
 
 
 @dataclass(slots=True)

@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import math
 from pathlib import Path
 
 from rich.console import Group, RenderableType
 from rich.text import Text
-from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.events import Click
 from textual.widgets import Static
 
 from lancher_code.models import SessionMessage, TraceEntry
 from lancher_code.mcp.manager import MCPInitializationProgress, MCPServerInitialization
 from lancher_code.tui_views.theme import TerminalMarkdown, theme_palette
+from lancher_code.tui_views.timeline import (
+    ThinkingTraceWidget, ToolActivityWidget, ToolCallWidget, timeline_blocks,
+)
 
 BANNER_TEXT = r"""
     __                ________                 ______          __
@@ -162,76 +164,6 @@ class BannerWidget(Static):
         return row
 
 
-class TraceSection(Vertical):
-    can_focus = True
-    BINDINGS = [("enter", "toggle_details", "展开/收起"), ("space", "toggle_details", "展开/收起")]
-
-    def __init__(self, entries: list[TraceEntry], *, collapsed: bool = True, kind: str = "thinking") -> None:
-        super().__init__(classes=f"trace-section {kind}-trace")
-        self._entries = list(entries)
-        self._collapsed = collapsed
-        self._kind = kind
-
-    @property
-    def collapsed(self) -> bool:
-        return self._collapsed
-
-    def compose(self) -> ComposeResult:
-        yield Static(classes=f"trace-header {self._kind}-trace-header")
-        yield Static(classes=f"trace-body {self._kind}-trace-body")
-
-    def on_mount(self) -> None:
-        self._sync_view()
-
-    @on(Click, ".trace-header")
-    def toggle_collapsed(self) -> None:
-        self._collapsed = not self._collapsed
-        self._sync_view()
-
-    def action_toggle_details(self) -> None:
-        self.toggle_collapsed()
-
-    def set_collapsed(self, collapsed: bool) -> None:
-        if self._collapsed == collapsed:
-            return
-        self._collapsed = collapsed
-        self._sync_view()
-
-    def update_entries(self, entries: list[TraceEntry]) -> None:
-        self._entries = list(entries)
-        self._sync_view()
-
-    def _sync_view(self) -> None:
-        header = self.query_one(".trace-header", Static)
-        body = self.query_one(".trace-body", Static)
-        marker = "▶" if self._collapsed else "▼"
-        colors = theme_palette(self.app.theme)
-        if self._kind == "thinking":
-            summary = f"思考 ({len(self._entries)})"
-        else:
-            calls = sum(entry.kind == "tool_call" for entry in self._entries)
-            results = [entry for entry in self._entries if entry.kind == "tool_result"]
-            errors = sum(entry.ok is False for entry in results)
-            summary = f"工具 {len(results)}/{calls}" if calls else "工作记录"
-            if errors:
-                summary += f" · {errors} 项未完成"
-        failed = self._kind == "tool" and any(entry.kind == "tool_result" and entry.ok is False for entry in self._entries)
-        header.update(Text(f"{marker} {summary}", style=colors["error"] if failed else colors["muted"]))
-        body.display = bool(self._entries) and not self._collapsed
-        if body.display:
-            body.update(_format_trace_entries(self._entries, colors=colors))
-
-
-class ThinkingTraceWidget(TraceSection):
-    def __init__(self, entries: list[TraceEntry], *, collapsed: bool = True) -> None:
-        super().__init__(entries, collapsed=collapsed)
-
-
-class ToolActivityWidget(TraceSection):
-    def __init__(self, entries: list[TraceEntry]) -> None:
-        super().__init__(entries, collapsed=True, kind="tool")
-
-
 def _format_trace_entries(entries: list[TraceEntry], *, colors: dict[str, str] | None = None) -> Text:
     colors = colors or theme_palette()
     renderable = Text()
@@ -297,24 +229,31 @@ class MessageWidget(Vertical):
         self.status = message.status
         self.trace_entries = list(message.trace.entries)
         self.trace_collapsed = message.trace.collapsed
+        self._message = message
+        self._sync_lock = asyncio.Lock()
+        self._blocks: dict[str, Static | ThinkingTraceWidget | ToolActivityWidget] = {}
 
     def compose(self) -> ComposeResult:
         yield Static(classes="message-label")
+        yield Vertical(classes="message-timeline")
         yield Static(classes="message-body")
-        yield ToolActivityWidget([])
-        yield ThinkingTraceWidget([], collapsed=True)
 
-    def on_mount(self) -> None:
-        self._sync_view()
+    async def on_mount(self) -> None:
+        await self._sync_view()
 
-    def update_from_message(self, message: SessionMessage) -> None:
+    async def update_from_message(self, message: SessionMessage) -> None:
         self.role = message.role
         self.content = message.content
         self.status = message.status
         self.trace_entries = list(message.trace.entries)
-        self._sync_view()
+        self._message = message
+        await self._sync_view()
 
-    def _sync_view(self) -> None:
+    async def _sync_view(self) -> None:
+        async with self._sync_lock:
+            await self._update_view()
+
+    async def _update_view(self) -> None:
         self.set_class(self.status == "error", "-error")
 
         label_widget = self.query_one(".message-label", Static)
@@ -322,20 +261,40 @@ class MessageWidget(Vertical):
         label_widget.styles.color = self._label_color()
         label_widget.styles.text_style = "bold" if self.status == "error" else "none"
 
-        trace_widget = self.query_one(ThinkingTraceWidget)
-        thinking = [entry for entry in self.trace_entries if entry.kind == "thinking"]
-        tools = [entry for entry in self.trace_entries if entry.kind != "thinking"]
-        activity = self.query_one(ToolActivityWidget)
-        activity.display = self.role == "assistant" and bool(tools)
-        if activity.display:
-            activity.update_entries(tools)
-        trace_visible = self._show_trace() and bool(thinking)
-        trace_widget.display = trace_visible
-        if trace_visible:
-            trace_widget.update_entries(thinking)
+        timeline = self.query_one(".message-timeline", Vertical)
+        blocks = timeline_blocks(self._message) if self.role == "assistant" else []
+        wanted = {block.key for block in blocks}
+        for key in list(self._blocks):
+            if key not in wanted:
+                await self._blocks.pop(key).remove()
+        # 增量更新原有控件；不要在每个 delta 重建并丢掉焦点和展开选择。
+        for block in blocks:
+            widget = self._blocks.get(block.key)
+            if widget is None:
+                if block.kind == "thinking":
+                    widget = ThinkingTraceWidget(block.entries, collapsed=block.entries[0].metadata.get("state") != "streaming")
+                elif block.kind == "tool":
+                    widget = ToolActivityWidget(block.entries, status=self.status)
+                else:
+                    widget = Static(classes=f"timeline-text timeline-{block.kind}")
+                self._blocks[block.key] = widget
+                await timeline.mount(widget)
+            if isinstance(widget, ThinkingTraceWidget):
+                widget.display = self._show_thinking
+                widget.update_entries(block.entries)
+            elif isinstance(widget, ToolActivityWidget):
+                await widget.update_entries(block.entries, status=self.status)
+            else:
+                text = block.entries[0].text
+                if block.kind == "text":
+                    widget.update(TerminalMarkdown(text, self.app.theme))
+                else:
+                    colors = theme_palette(self.app.theme)
+                    widget.update(Text(text, style=colors["error"] if self.status == "error" else colors["warning"]))
 
         body_widget = self.query_one(".message-body", Static)
-        body_text = self._body_text()
+        # 新记录的正文已经在时间线里；旧会话的最终正文继续放在末尾。
+        body_text = "" if self.role == "assistant" and self._message.timeline_version and blocks else self._body_text()
         body_widget.display = bool(body_text)
         if body_text:
             body_widget.styles.color = self._body_color()

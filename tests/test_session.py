@@ -181,6 +181,84 @@ def test_session_controller_appends_trace_tool_calls_and_results(openai_provider
     assert controller.get_message(assistant_message.id).trace.collapsed is True
 
 
+def test_timeline_preserves_interleaved_stream_segments_and_tool_details(openai_provider_config, tmp_path) -> None:
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
+    assistant = controller.create_assistant_message()
+    controller.append_trace_thinking(assistant.id, "先调查")
+    controller.append_message_content(assistant.id, "说明")
+    controller.append_trace_thinking(assistant.id, "再确认")
+    controller.append_trace_thinking(assistant.id, "边界")
+    controller.append_trace_tool_calls(assistant.id, [ToolCall(0, "read-1", "read_file", {}, "{}")])
+    controller.set_trace_tool_state(assistant.id, "read-1", "running")
+    controller.append_trace_tool_results(assistant.id, [ToolExecutionResult(
+        "read-1", "read_file", content="完整结果\n第二行", is_error=False, summary="读取完成",
+    )])
+    controller.clear_message_content(assistant.id)
+    controller.append_message_content(assistant.id, "最终回答")
+    controller.complete_message(assistant.id)
+    controller.save_session("timeline")
+
+    restored = SessionController(openai_provider_config, cwd=tmp_path)
+    restored.resume_session("timeline")
+    message = restored.state.messages[-1]
+    entries = message.trace.entries
+    assert message.timeline_version == 1
+    assert message.content == "最终回答"
+    assert [entry.kind for entry in entries] == ["thinking", "text", "thinking", "tool_call", "tool_result", "text"]
+    assert entries[2].text == "再确认边界"
+    assert all(entry.metadata["state"] == "complete" for entry in entries)
+    assert entries[3].metadata["group_id"] == entries[4].metadata["group_id"]
+    assert entries[4].text == "读取完成"
+    assert entries[4].metadata["content"] == "完整结果\n第二行"
+
+
+@pytest.mark.parametrize("state", ["error", "cancelled"])
+def test_timeline_direct_terminal_update_keeps_notice_and_partial_output(openai_provider_config, state) -> None:
+    controller = SessionController(openai_provider_config)
+    assistant = controller.create_assistant_message()
+    controller.append_message_content(assistant.id, "部分输出")
+    if state == "error":
+        controller.fail_message(assistant.id, "连接中断")
+    else:
+        controller.cancel_message(assistant.id, "已停止")
+    entries = assistant.trace.entries
+    assert [entry.kind for entry in entries] == ["text", "notice"]
+    assert entries[0].text == "部分输出"
+    assert entries[0].metadata["state"] == state
+    assert entries[-1].text == ("连接中断" if state == "error" else "已停止")
+
+
+def test_timeline_resume_marks_unfinished_segments_and_tools_cancelled(openai_provider_config, tmp_path) -> None:
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
+    assistant = controller.create_assistant_message()
+    call = ToolCall(0, "read-1", "read_file", {}, "{}")
+    controller.append_trace_tool_calls(assistant.id, [call])
+    controller.append_assistant_tool_calls([call])
+    controller.set_trace_tool_state(assistant.id, call.call_id, "running")
+    controller.save_session("interrupted")
+    restored = SessionController(openai_provider_config, cwd=tmp_path)
+    restored.resume_session("interrupted")
+    message = restored.state.messages[-1]
+    assert message.status == "cancelled"
+    assert message.trace.entries[0].metadata["state"] == "cancelled"
+    assert message.trace.entries[1].metadata["error_code"] == "tool_result_interrupted"
+    assert message.trace.entries[1].metadata["state"] == "cancelled"
+    assert message.trace.entries[-1].kind == "notice"
+    assert len([block for item in restored.transcript for block in item.blocks if block.kind == "tool_result"]) == 1
+
+
+def test_message_without_timeline_version_keeps_legacy_format(openai_provider_config) -> None:
+    from dataclasses import asdict
+
+    controller = SessionController(openai_provider_config)
+    message = controller.create_assistant_message()
+    data = asdict(message)
+    data["timestamp"] = message.timestamp.isoformat()
+    data.pop("timeline_version")
+    restored = controller._decode_message(data)
+    assert restored.timeline_version == 0
+
+
 def test_session_controller_appends_transcript_tool_calls_and_results(openai_provider_config) -> None:
     controller = SessionController(openai_provider_config)
     controller.create_user_message("帮我读文件")

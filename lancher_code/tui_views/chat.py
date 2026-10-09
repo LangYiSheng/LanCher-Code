@@ -125,10 +125,16 @@ class LanCherTextualApp(App[int]):
     .message--user, .message--assistant, .message--system, .message.-error { border: none; }
     .message--user { border-left: solid $panel; padding-left: 1; }
     .message-label { color: $text-muted; }
-    .trace-section { height: auto; width: 1fr; margin: 0; }
-    .trace-header, .trace-body { height: auto; width: 1fr; }
-    .trace-section:focus .trace-header { color: $primary; text-style: underline; }
-    .trace-body { margin: 0 0 1 2; color: $text-muted; }
+    .message-timeline { height: auto; width: 1fr; }
+    .timeline-text { height: auto; width: 1fr; margin-bottom: 1; }
+    .trace-section { height: auto; width: 1fr; margin: 0 0 1 0; }
+    .trace-header { height: 1; width: 1fr; color: $text-muted; }
+    .trace-header:focus { text-style: bold underline; }
+    .trace-body { height: auto; width: 1fr; padding-left: 2; color: $text-muted; }
+    .tool-calls { height: auto; width: 1fr; padding-left: 2; }
+    .tool-calls.-single { padding-left: 0; }
+    .tool-call-trace { margin: 0; }
+    .tool-call-body { padding-bottom: 1; }
     #composer-region { margin: 0 2; max-height: 75%; }
     #composer { border-top: solid $panel; padding: 0; }
     #composer:focus-within { border-top: solid $primary; }
@@ -603,9 +609,9 @@ class LanCherTextualApp(App[int]):
         self._message_widgets[message.id] = widget
         await chat_view.mount(widget)
 
-    def _sync_message_widget(self, message_id: str) -> None:
+    async def _sync_message_widget(self, message_id: str) -> None:
         widget = self._message_widgets[message_id]
-        widget.update_from_message(self._session_controller.get_message(message_id))
+        await widget.update_from_message(self._session_controller.get_message(message_id))
 
     async def _consume_turn_event(self, event: TurnEvent) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)
@@ -614,7 +620,7 @@ class LanCherTextualApp(App[int]):
         if event.message is not None and event.kind in {"user_message_created", "assistant_message_started"}:
             await self._mount_message_widget(event.message)
         elif event.message is not None:
-            self._sync_message_widget(event.message.id)
+            await self._sync_message_widget(event.message.id)
         if event.kind == "permission_request_created" and event.permission_request is not None:
             await self._request_inline_permission(event.permission_request)
         if event.kind in {"permission_request_closed", "permission_request_resolved"}:
@@ -877,7 +883,7 @@ class LanCherTextualApp(App[int]):
         apply_theme(self, getattr(ui_config, "theme", "dark"))
         for widget in self._message_widgets.values():
             widget._show_thinking = ui_config.show_thinking_status
-            widget._sync_view()
+            self.call_later(widget._sync_view)
         self.query_one(BannerWidget).refresh()
         self._refresh_status_bar()
 

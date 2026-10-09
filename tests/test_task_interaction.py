@@ -129,6 +129,8 @@ async def test_steering_closes_pending_approval_without_writing_or_allow_rule(op
 
     def handle(event):
         if event.kind == "permission_request_created":
+            assert event.message is not None
+            assert event.message.trace.entries[-1].metadata["state"] == "awaiting_permission"
             request_ids.append(event.permission_request.request_id)
             runner.enqueue_input("不要写入", "steer")
 
@@ -138,6 +140,32 @@ async def test_steering_closes_pending_approval_without_writing_or_allow_rule(op
     assert any(e.tool_result and e.tool_result.error_code == "steering_superseded" for e in events)
     assert not (tmp_path / "new.txt").exists()
     assert runner.resolve_permission_request(PermissionResolution(request_id=request_ids[0], outcome="allow_project")) is False
+    original_assistant = next(message for message in session.state.messages if message.role == "assistant")
+    result = next(entry for entry in original_assistant.trace.entries if entry.kind == "tool_result")
+    assert result.metadata["state"] == "skipped"
+    assert result.metadata["error_code"] == "steering_superseded"
+    assert result.metadata["started"] is False
+
+
+@pytest.mark.asyncio
+async def test_denied_approval_is_recorded_without_claiming_tool_executed(openai_provider_config, tmp_path):
+    provider = Provider([calls(("write_file", {"path": "new.txt", "content": "不应写入"})), reply("已拒绝")])
+    runner, session = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
+
+    def handle(event):
+        if event.kind == "permission_request_created":
+            assert event.message.trace.entries[-1].metadata["started"] is False
+            runner.resolve_permission_request(PermissionResolution(event.permission_request.request_id, "deny"))
+
+    events = await asyncio.wait_for(collect(runner, "修改文件", handle), 3)
+    assert not (tmp_path / "new.txt").exists()
+    assert not any(event.kind == "progress_updated" and event.tool_call is not None for event in events)
+    entries = session.state.messages[-1].trace.entries
+    call = next(entry for entry in entries if entry.kind == "tool_call")
+    result = next(entry for entry in entries if entry.kind == "tool_result")
+    assert call.metadata["started"] is False
+    assert result.metadata["started"] is False
+    assert result.metadata["error_code"] == "permission_user_denied"
 
 
 @pytest.mark.asyncio

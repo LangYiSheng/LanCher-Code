@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lancher_code.tui_views.message import ToolActivityWidget
+from lancher_code.tui_views.message import ToolActivityWidget, ToolCallWidget
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -756,14 +756,14 @@ async def test_thinking_trace_is_collapsed_by_default_and_can_expand(
 
         assistant = session.state.messages[-1]
         assert assistant.content == "这是正式回答"
-        assert [entry.kind for entry in assistant.trace.entries] == ["thinking"]
+        assert [entry.kind for entry in assistant.trace.entries] == ["thinking", "text"]
 
         trace_widget = list(app.query(ThinkingTraceWidget))[-1]
         assert trace_widget.collapsed is True
         trace_widget.toggle_collapsed()
         await pilot.pause(0.05)
         assert trace_widget.collapsed is False
-        rendered = trace_widget.query_one(".thinking-trace-body", Static).render()
+        rendered = trace_widget.query_one(".thinking-trace-header", Static).render()
         assert "先整理一下思路" in rendered.plain
         assert "思考：" not in rendered.plain
 
@@ -777,7 +777,7 @@ async def test_thinking_trace_is_collapsed_by_default_and_can_expand(
 
 
 @pytest.mark.asyncio
-async def test_tui_separates_tool_flow_from_thinking_trace(
+async def test_tui_interleaves_tool_flow_and_separate_thinking_segments(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
@@ -812,19 +812,24 @@ async def test_tui_separates_tool_flow_from_thinking_trace(
             "tool_call",
             "tool_result",
             "thinking",
+            "text",
         ]
 
-        trace_widget = list(app.query(ThinkingTraceWidget))[-1]
+        trace_widget = list(app.query(ThinkingTraceWidget))[0]
         trace_widget.toggle_collapsed()
         await pilot.pause(0.05)
-        rendered = trace_widget.query_one(".thinking-trace-body", Static).render()
+        rendered = trace_widget.query_one(".thinking-trace-header", Static).render()
         assert "先调用工具" in rendered.plain
         assert "echo_tool" not in rendered.plain
         activity = list(app.query(ToolActivityWidget))[-1]
-        activity.toggle_collapsed()
-        tool_rendered = activity.query_one(".tool-trace-body", Static).render()
-        assert "● echo_tool(value=hello)" in tool_rendered.plain
-        assert "✓ 执行成功: hello" in tool_rendered.plain
+        call = activity.query_one(ToolCallWidget)
+        call.toggle_collapsed()
+        tool_rendered = call.query_one(".tool-call-body", Static).render()
+        assert '"value": "hello"' in tool_rendered.plain
+        assert "执行成功: hello" in tool_rendered.plain
+        assert "工具结果: hello" in tool_rendered.plain
+        timeline = activity.parent
+        assert [type(widget) for widget in timeline.children] == [ThinkingTraceWidget, ToolActivityWidget, ThinkingTraceWidget, Static]
 
         formatted = _format_trace_entries(assistant.trace.entries)
         assert isinstance(formatted, Text)
@@ -861,6 +866,8 @@ async def test_thinking_trace_preserves_user_expansion_across_updates(
         await pilot.pause(0.05)
 
         trace_widget = list(app.query(ThinkingTraceWidget))[-1]
+        assert trace_widget.collapsed is False
+        trace_widget.toggle_collapsed()
         assert trace_widget.collapsed is True
         trace_widget.toggle_collapsed()
         assert trace_widget.collapsed is False

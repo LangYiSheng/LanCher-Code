@@ -5,6 +5,7 @@ import copy
 from datetime import date, datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
+from typing import Literal
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from lancher_code.models import (
@@ -273,6 +274,7 @@ class SessionController:
             content="",
             status="streaming",
             timestamp=self._now(),
+            timeline_version=1,
         )
         self._state.messages.append(message)
         self._mark_dirty()
@@ -281,6 +283,8 @@ class SessionController:
     def append_message_content(self, message_id: str, delta: str) -> SessionMessage:
         message = self.get_message(message_id)
         message.content += delta
+        if message.timeline_version == 1:
+            self.append_trace_text(message_id, delta)
         return message
 
     def clear_message_content(self, message_id: str) -> SessionMessage:
@@ -296,31 +300,42 @@ class SessionController:
         return message
 
     def append_trace_thinking(self, message_id: str, delta: str) -> SessionMessage:
-        message = self.get_message(message_id)
-        self._expand_trace_on_first_entry(message)
-        entries = message.trace.entries
-        if entries and entries[-1].kind == "thinking":
-            entries[-1].text += delta
-        else:
-            entries.append(TraceEntry(kind="thinking", text=delta))
-        return message
+        return self._append_stream_segment(message_id, "thinking", delta)
 
     def append_trace_text(self, message_id: str, text: str) -> SessionMessage:
+        return self._append_stream_segment(message_id, "text", text)
+
+    def _append_stream_segment(self, message_id: str, kind: Literal["text", "thinking"], text: str) -> SessionMessage:
         message = self.get_message(message_id)
         if text:
             self._expand_trace_on_first_entry(message)
-            message.trace.entries.append(TraceEntry(kind="text", text=text))
+            entries = message.trace.entries
+            if entries and entries[-1].kind == kind and entries[-1].metadata.get("state") == "streaming":
+                entries[-1].text += text
+            else:
+                self.finish_trace_segment(message_id)
+                entries.append(TraceEntry(kind=kind, text=text, metadata={"state": "streaming"}))
+        return message
+
+    def finish_trace_segment(self, message_id: str, state: str = "complete") -> SessionMessage:
+        """封口当前输出段，下一条同类输出也不会跨响应合并。"""
+        message = self.get_message(message_id)
+        if message.trace.entries:
+            entry = message.trace.entries[-1]
+            if entry.kind in {"thinking", "text"} and entry.metadata.get("state") == "streaming":
+                entry.metadata["state"] = state
         return message
 
     def append_trace_notice(self, message_id: str, text: str) -> SessionMessage:
-        message = self.get_message(message_id)
+        message = self.finish_trace_segment(message_id)
         self._expand_trace_on_first_entry(message)
         message.trace.entries.append(TraceEntry(kind="notice", text=text))
         return message
 
     def append_trace_tool_calls(self, message_id: str, tool_calls: list[ToolCall]) -> SessionMessage:
-        message = self.get_message(message_id)
+        message = self.finish_trace_segment(message_id)
         self._expand_trace_on_first_entry(message)
+        group_id = uuid4().hex
         for call in tool_calls:
             message.trace.entries.append(
                 TraceEntry(
@@ -328,21 +343,45 @@ class SessionController:
                     call_id=call.call_id,
                     tool_name=call.tool_name,
                     arguments=call.arguments,
+                    metadata={"group_id": group_id, "state": "queued", "started": False},
                 )
             )
+        return message
+
+    def set_trace_tool_state(self, message_id: str, call_id: str, state: str) -> SessionMessage:
+        message = self.get_message(message_id)
+        for entry in reversed(message.trace.entries):
+            if entry.kind == "tool_call" and entry.call_id == call_id:
+                entry.metadata["state"] = state
+                if state == "running":
+                    entry.metadata["started"] = True
+                break
         return message
 
     def append_trace_tool_results(self, message_id: str, results: list[ToolExecutionResult]) -> SessionMessage:
         message = self.get_message(message_id)
         self._expand_trace_on_first_entry(message)
         for result in results:
+            call_entry = next((entry for entry in reversed(message.trace.entries)
+                               if entry.kind == "tool_call" and entry.call_id == result.call_id), None)
+            state = "complete" if result.ok else "error"
+            if result.error_code == "steering_superseded":
+                state = "skipped"
+            elif result.error_code == "tool_result_interrupted":
+                state = "cancelled"
+            metadata = {**result.metadata, "content": result.content, "state": state,
+                        "error_code": result.error_code, "error_message": result.error_message}
+            if call_entry is not None:
+                call_entry.metadata["state"] = state
+                metadata["group_id"] = call_entry.metadata.get("group_id")
+                metadata["started"] = call_entry.metadata.get("started", False)
             message.trace.entries.append(
                 TraceEntry(
                     kind="tool_result",
                     call_id=result.call_id,
                     tool_name=result.tool_name,
                     text=result.summary if result.ok else (result.error_message or result.summary),
-                    metadata=result.metadata,
+                    metadata=metadata,
                     ok=result.ok,
                 )
             )
@@ -362,22 +401,22 @@ class SessionController:
         if not results:
             return
 
-        self._transcript.append(
-            ConversationMessage(
-                role="tool",
-                blocks=[
-                    ContentBlock.tool_result_block(
-                        call_id=result.call_id,
-                        text=self._tool_result_content(result),
-                        is_error=result.is_error,
-                    )
-                    for result in results
-                ],
+        blocks = [
+            ContentBlock.tool_result_block(
+                call_id=result.call_id,
+                text=self._tool_result_content(result),
+                is_error=result.is_error,
             )
-        )
+            for result in results
+        ]
+        # 实时结果仍归入同一批协议消息，保存/恢复时不会拆散调用配对。
+        if self._transcript and self._transcript[-1].role == "tool":
+            self._transcript[-1].blocks.extend(blocks)
+        else:
+            self._transcript.append(ConversationMessage(role="tool", blocks=blocks))
 
     def complete_message(self, message_id: str, usage: MessageUsage | None = None) -> SessionMessage:
-        message = self.get_message(message_id)
+        message = self.finish_trace_segment(message_id)
         message.status = "complete"
         message.trace.collapsed = True
         message.usage = usage or MessageUsage()
@@ -387,7 +426,9 @@ class SessionController:
         return message
 
     def fail_message(self, message_id: str, error_text: str) -> SessionMessage:
-        message = self.get_message(message_id)
+        message = self.finish_trace_segment(message_id, "error")
+        if message.timeline_version == 1 and not self._has_last_notice(message, error_text):
+            self.append_trace_notice(message_id, error_text)
         message.status = "error"
         message.content = error_text
         message.trace.collapsed = True
@@ -395,13 +436,20 @@ class SessionController:
         return message
 
     def cancel_message(self, message_id: str, notice_text: str = "本轮已取消。") -> SessionMessage:
-        message = self.get_message(message_id)
+        message = self.finish_trace_segment(message_id, "cancelled")
+        if message.timeline_version == 1 and not self._has_last_notice(message, notice_text):
+            self.append_trace_notice(message_id, notice_text)
         message.status = "cancelled"
         if not message.content.strip():
             message.content = notice_text
         message.trace.collapsed = True
         self._active_dynamic_context = None
         return message
+
+    @staticmethod
+    def _has_last_notice(message: SessionMessage, text: str) -> bool:
+        return bool(message.trace.entries and message.trace.entries[-1].kind == "notice"
+                    and message.trace.entries[-1].text == text)
 
     def get_message(self, message_id: str) -> SessionMessage:
         for message in self._state.messages:
@@ -654,6 +702,19 @@ class SessionController:
                 message.trace.collapsed = True
                 if not message.content.strip():
                     message.content = "上次任务已中断。"
+                for entry in list(message.trace.entries):
+                    if entry.kind in {"text", "thinking"} and entry.metadata.get("state") == "streaming":
+                        entry.metadata["state"] = "cancelled"
+                    elif entry.kind == "tool_call" and entry.metadata.get("state") in {"queued", "running", "awaiting_permission"}:
+                        entry.metadata["state"] = "cancelled"
+                        message.trace.entries.append(TraceEntry(
+                            kind="tool_result", call_id=entry.call_id, tool_name=entry.tool_name,
+                            text="工具结果未完成", ok=False,
+                            metadata={"group_id": entry.metadata.get("group_id"), "state": "cancelled",
+                                      "started": entry.metadata.get("started", False),
+                                      "error_code": "tool_result_interrupted",
+                                      "content": "上次任务已中断，未获得完整结果；请先检查操作的实际状态。"},
+                        ))
                 message.trace.entries.append(TraceEntry(
                     kind="notice", text="会话恢复前的任务已中断；请先检查工具操作的实际状态。",
                 ))
@@ -957,6 +1018,7 @@ class SessionController:
             status=str(value["status"]),  # type: ignore[arg-type]
             timestamp=datetime.fromisoformat(str(value["timestamp"])),
             usage=MessageUsage(**usage),
+            timeline_version=1 if value.get("timeline_version") == 1 else 0,
             trace=ThinkingTrace(
                 entries=[TraceEntry(**entry) for entry in entries if isinstance(entry, dict)],
                 collapsed=bool(trace.get("collapsed", True)),

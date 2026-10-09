@@ -57,6 +57,7 @@ class _ActiveTurn:
     task_id: str = field(default_factory=lambda: uuid4().hex)
     accepting_input: bool = True
     pending_permissions: dict[str, asyncio.Future[PermissionResolution]] = field(default_factory=dict)
+    assistant_message_id: str | None = None
 
 
 class _StreamCollector:
@@ -328,6 +329,7 @@ class TurnRunner:
             await self._emit(queue, TurnEvent(kind="user_message_created", message=user))
             await self._emit(queue, TurnEvent(kind="steering_applied", pending_input_id=item.id, text=item.text))
         assistant = self._session.create_assistant_message()
+        active.assistant_message_id = assistant.id
         await self._emit(queue, TurnEvent(kind="assistant_message_started", message=assistant))
         return assistant.id
 
@@ -469,6 +471,8 @@ class TurnRunner:
             await self._emit(queue, TurnEvent(kind="user_message_created", message=user_message))
 
             assistant_message = self._session.create_assistant_message()
+            if self._active_turn is not None:
+                self._active_turn.assistant_message_id = assistant_message.id
             await self._emit(queue, TurnEvent(kind="assistant_message_started", message=assistant_message))
             await self._emit(
                 queue,
@@ -484,7 +488,6 @@ class TurnRunner:
                 self._raise_if_cancelled(cancellation_token)
                 if loop_count > self._max_tool_loops:
                     error_text = f"本轮工具循环达到上限（{self._max_tool_loops} 次），已停止继续执行。"
-                    self._session.append_trace_notice(assistant_message.id, error_text)
                     message = self._session.fail_message(assistant_message.id, error_text)
                     await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
                     return
@@ -687,7 +690,6 @@ class TurnRunner:
 
                 if tool_calls:
                     if collector.text:
-                        self._session.append_trace_text(assistant_message.id, collector.text)
                         self._session.clear_message_content(assistant_message.id)
 
                     self._session.append_assistant_tool_calls(tool_calls)
@@ -714,6 +716,24 @@ class TurnRunner:
                         ),
                     )
 
+                    recorded_ids: set[str] = set()
+
+                    async def report_started(call: ToolCall) -> None:
+                        message = self._session.set_trace_tool_state(assistant_message.id, call.call_id, "running")
+                        await self._emit(queue, TurnEvent(kind="progress_updated", message=message,
+                            tool_call=call, progress_message=f"正在执行 {call.tool_name}"))
+
+                    async def report_result(result: ToolExecutionResult) -> None:
+                        # 回调与返回列表共用幂等入口，取消只补齐尚未收到的结果。
+                        if result.call_id in recorded_ids:
+                            return
+                        recorded_ids.add(result.call_id)
+                        self._session.append_tool_results([result])
+                        pending_tool_calls[:] = [call for call in pending_tool_calls if call.call_id != result.call_id]
+                        message = self._session.append_trace_tool_results(assistant_message.id, [result])
+                        await self._emit(queue, TurnEvent(kind="tool_result_received", message=message,
+                            usage=self._current_message_usage(assistant_message.id), tool_result=result))
+
                     results = precomputed_results or await self._tool_executor.execute_calls(
                         tool_calls,
                         mode=self._session.runtime_mode,
@@ -724,9 +744,12 @@ class TurnRunner:
                         permission_resolver=self._request_permission,
                         available_tool_names={tool.name for tool in visible_tools},
                         should_interrupt=self._has_steering,
+                        on_call_started=report_started,
+                        on_result=report_result,
                     )
                     calls_by_id = {call.call_id: call for call in tool_calls}
                     for result in results:
+                        await report_result(result)
                         discovered = result.metadata.get("discovered_tool_names")
                         if isinstance(discovered, list):
                             discovered_tool_names.update(
@@ -738,21 +761,6 @@ class TurnRunner:
                             if isinstance(plan_content, str):
                                 snapshot = self._session.set_plan_snapshot(plan_content, source_message_id=assistant_message.id)
                                 written_plan_digest = snapshot.digest if snapshot else None
-                    self._session.append_tool_results(results)
-                    recorded_ids = {result.call_id for result in results}
-                    pending_tool_calls = [call for call in pending_tool_calls if call.call_id not in recorded_ids]
-                    self._session.append_trace_tool_results(assistant_message.id, results)
-                    for result in results:
-                        await self._emit(
-                            queue,
-                            TurnEvent(
-                                kind="tool_result_received",
-                                message=self._session.get_message(assistant_message.id),
-                                usage=self._current_message_usage(assistant_message.id),
-                                tool_result=result,
-                            ),
-                        )
-
                     next_message_id = await self._apply_steering(assistant_message.id, total_usage, queue)
                     if next_message_id is not None:
                         assistant_message = self._session.get_message(next_message_id)
@@ -767,7 +775,6 @@ class TurnRunner:
                             f"连续请求未知工具已达到 {self._unknown_tool_streak_limit} 次，"
                             "为避免无效循环，本轮已停止。"
                         )
-                        self._session.append_trace_notice(assistant_message.id, error_text)
                         message = self._session.fail_message(assistant_message.id, error_text)
                         await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
                         return
@@ -800,7 +807,6 @@ class TurnRunner:
             cancellation_token.cancel()
             if assistant_message is not None:
                 self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮已取消")
-                self._session.append_trace_notice(assistant_message.id, "本轮已取消。")
                 message = self._session.cancel_message(assistant_message.id)
                 await self._emit(
                     queue,
@@ -815,7 +821,6 @@ class TurnRunner:
         except LanCherError as exc:
             if assistant_message is not None:
                 self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮异常中断")
-                self._session.append_trace_notice(assistant_message.id, exc.user_message)
                 message = self._session.fail_message(assistant_message.id, exc.user_message)
                 await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=exc.user_message))
         except Exception as exc:
@@ -823,7 +828,6 @@ class TurnRunner:
             error_text = f"发生未预期异常: {exc}"
             if assistant_message is not None:
                 self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮异常中断")
-                self._session.append_trace_notice(assistant_message.id, error_text)
                 message = self._session.fail_message(assistant_message.id, error_text)
                 await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
         finally:
@@ -893,9 +897,20 @@ class TurnRunner:
                     ),
                 )
             elif event.kind == "tool_call_delta" and event.tool_call_chunk:
+                message = self._session.get_message(assistant_message_id)
+                entries = message.trace.entries
+                if entries and entries[-1].kind in {"thinking", "text"} and entries[-1].metadata.get("state") == "streaming":
+                    self._session.finish_trace_segment(assistant_message_id)
+                    await self._emit(queue, TurnEvent(
+                        kind="progress_updated", message=message,
+                        usage=self._current_message_usage(assistant_message_id),
+                        progress_message="正在准备工具调用",
+                    ))
                 assembler.consume(event.tool_call_chunk)
             elif event.kind == "message_end":
+                self._session.finish_trace_segment(assistant_message_id)
                 usage = event.usage
+        self._session.finish_trace_segment(assistant_message_id)
         return usage
 
     async def _request_permission(self, permission_request: PermissionRequest) -> PermissionResolution:
@@ -907,18 +922,22 @@ class TurnRunner:
 
         future: asyncio.Future[PermissionResolution] = asyncio.get_running_loop().create_future()
         active_turn.pending_permissions[permission_request.request_id] = future
-        await self._emit(active_turn.queue, TurnEvent(kind="permission_request_created", permission_request=permission_request))
+        message = (self._session.set_trace_tool_state(active_turn.assistant_message_id, permission_request.call_id, "awaiting_permission")
+                   if active_turn.assistant_message_id else None)
+        await self._emit(active_turn.queue, TurnEvent(kind="permission_request_created", message=message,
+            permission_request=permission_request))
         try:
             resolution = await future
             if resolution.outcome != "superseded":
                 await self._emit(
                     active_turn.queue,
-                    TurnEvent(kind="permission_request_resolved", permission_resolution=resolution),
+                    TurnEvent(kind="permission_request_resolved", message=message, permission_resolution=resolution),
                 )
             return resolution
         finally:
             active_turn.pending_permissions.pop(permission_request.request_id, None)
-            await self._emit(active_turn.queue, TurnEvent(kind="permission_request_closed", permission_request=permission_request))
+            await self._emit(active_turn.queue, TurnEvent(kind="permission_request_closed", message=message,
+                permission_request=permission_request))
 
     @staticmethod
     async def _emit(queue: asyncio.Queue[TurnEvent | object], event: TurnEvent) -> None:

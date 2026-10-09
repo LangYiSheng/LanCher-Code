@@ -25,6 +25,8 @@ from lancher_code.tools.core.registry import ToolRegistry
 logger = get_logger("tools.executor")
 
 PermissionResolver = Callable[[PermissionRequest], Awaitable[PermissionResolution]]
+ToolStartedCallback = Callable[[ToolCall], Awaitable[None]]
+ToolResultCallback = Callable[[ToolExecutionResult], Awaitable[None]]
 
 
 class ToolExecutor:
@@ -54,6 +56,8 @@ class ToolExecutor:
         permission_resolver: PermissionResolver | None = None,
         available_tool_names: set[str] | None = None,
         should_interrupt: Callable[[], bool] | None = None,
+        on_call_started: ToolStartedCallback | None = None,
+        on_result: ToolResultCallback | None = None,
     ) -> list[ToolExecutionResult]:
         context = ToolContext(
             cwd=self._cwd,
@@ -72,23 +76,23 @@ class ToolExecutor:
         for index, call in enumerate(calls):
             self._raise_if_cancelled(context)
             if should_interrupt is not None and should_interrupt():
-                results.extend(self._superseded(item) for item in [*safe_batch, *calls[index:]])
+                results.extend(await self._skip_calls([*safe_batch, *calls[index:]], on_result))
                 return results
             try:
                 tool = self._registry.get(call.tool_name)
             except ToolNotFoundError:
                 if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
+                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
                     safe_batch = []
-                results.append(await self._execute_one(call, context, permission_resolver, should_interrupt))
+                results.append(await self._execute_one(call, context, permission_resolver, should_interrupt, on_call_started, on_result))
                 continue
 
             if not tool_available_in_phase(tool.definition, context.work_phase):
                 if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
+                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
                     safe_batch = []
                 results.append(
-                    ToolExecutionResult(
+                    await self._report_result(ToolExecutionResult(
                         call_id=call.call_id,
                         tool_name=call.tool_name,
                         content=f"{call.tool_name} 在当前模式下不可用。",
@@ -97,25 +101,25 @@ class ToolExecutor:
                         summary=f"{call.tool_name} 在当前模式下不可用",
                         error_code="phase_disallowed",
                         error_message=f"{call.tool_name} 在当前模式下不可用。",
-                    )
+                    ), on_result)
                 )
                 continue
 
             if available_tool_names is not None and call.tool_name not in available_tool_names:
                 if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
+                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
                     safe_batch = []
                 if should_interrupt is not None and should_interrupt():
-                    results.extend(self._superseded(item) for item in calls[index:])
+                    results.extend(await self._skip_calls(calls[index:], on_result))
                     return results
                 results.append(
-                    ToolExecutionResult(
+                    await self._report_result(ToolExecutionResult(
                         call_id=call.call_id, tool_name=call.tool_name,
                         content=f"{call.tool_name} 尚未加载。请先调用 tool_search，再在下一次模型请求中调用该工具。",
                         is_error=True, metadata={"requires_tool_search": True},
                         summary=f"{call.tool_name} 尚未加载", error_code="tool_not_found",
                         error_message=f"{call.tool_name} 尚未加载。",
-                    )
+                    ), on_result)
                 )
                 continue
 
@@ -124,12 +128,12 @@ class ToolExecutor:
                 continue
 
             if safe_batch:
-                results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
+                results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
                 safe_batch = []
-            results.append(await self._execute_one(call, context, permission_resolver, should_interrupt))
+            results.append(await self._execute_one(call, context, permission_resolver, should_interrupt, on_call_started, on_result))
 
         if safe_batch:
-            results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
+            results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
 
         return results
 
@@ -139,13 +143,19 @@ class ToolExecutor:
         context: ToolContext,
         permission_resolver: PermissionResolver | None,
         should_interrupt: Callable[[], bool] | None = None,
+        on_call_started: ToolStartedCallback | None = None,
+        on_result: ToolResultCallback | None = None,
     ) -> list[ToolExecutionResult]:
         if should_interrupt is not None and should_interrupt():
-            return [self._superseded(call) for call in calls]
-        tasks = [asyncio.create_task(self._execute_one(call, context, permission_resolver, should_interrupt)) for call in calls]
+            return await self._skip_calls(calls, on_result)
+        tasks = [
+            asyncio.create_task(self._execute_one(call, context, permission_resolver, should_interrupt, on_call_started, on_result))
+            for call in calls
+        ]
         try:
             return list(await asyncio.gather(*tasks))
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception):
+            # 回调失败也必须收束已启动的同组工具，不能留下后台操作。
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -157,6 +167,20 @@ class ToolExecutor:
         context: ToolContext,
         permission_resolver: PermissionResolver | None,
         should_interrupt: Callable[[], bool] | None = None,
+        on_call_started: ToolStartedCallback | None = None,
+        on_result: ToolResultCallback | None = None,
+    ) -> ToolExecutionResult:
+        # 每个调用完成时立即报告，不等待并发组中其他工具；返回值仍按输入排序。
+        result = await self._run_one(call, context, permission_resolver, should_interrupt, on_call_started)
+        return await self._report_result(result, on_result)
+
+    async def _run_one(
+        self,
+        call: ToolCall,
+        context: ToolContext,
+        permission_resolver: PermissionResolver | None,
+        should_interrupt: Callable[[], bool] | None = None,
+        on_call_started: ToolStartedCallback | None = None,
     ) -> ToolExecutionResult:
         self._raise_if_cancelled(context)
         if should_interrupt is not None and should_interrupt():
@@ -186,6 +210,13 @@ class ToolExecutor:
         )
         if maybe_denied is not None:
             return maybe_denied
+
+        self._raise_if_cancelled(context)
+        if should_interrupt is not None and should_interrupt():
+            return self._superseded(call)
+        if on_call_started is not None:
+            await on_call_started(call)
+        self._raise_if_cancelled(context)
 
         try:
             result = await asyncio.wait_for(
@@ -284,6 +315,22 @@ class ToolExecutor:
             error_code="permission_user_denied",
             error_message="用户拒绝了本次工具调用。",
         )
+
+    @staticmethod
+    async def _report_result(
+        result: ToolExecutionResult,
+        on_result: ToolResultCallback | None,
+    ) -> ToolExecutionResult:
+        if on_result is not None:
+            await on_result(result)
+        return result
+
+    async def _skip_calls(
+        self,
+        calls: list[ToolCall],
+        on_result: ToolResultCallback | None,
+    ) -> list[ToolExecutionResult]:
+        return [await self._report_result(self._superseded(call), on_result) for call in calls]
 
     @staticmethod
     def _superseded(call: ToolCall) -> ToolExecutionResult:
