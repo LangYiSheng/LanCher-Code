@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from rich.console import Console, ConsoleOptions, RenderResult
-from rich.markdown import Markdown
+from pygments.token import Comment, Error, Generic, Keyword, Name, Number, String, Token
+from rich.markdown import CodeBlock, Markdown
+from rich.style import Style
+from rich.syntax import Syntax, SyntaxTheme
 from rich.theme import Theme as RichTheme
 from textual.app import App
 from textual.theme import Theme
@@ -27,13 +30,55 @@ def theme_palette(theme_name: str = "dark") -> dict[str, str]:
     return PALETTES["light" if theme_name in {"light", "lancher-light"} else "dark"]
 
 
+class _TerminalSyntaxTheme(SyntaxTheme):
+    """代码的默认文字、底色和语法色均绑定当前应用主题。"""
+
+    def __init__(self, theme_name: str) -> None:
+        colors = theme_palette(theme_name)
+        self._base = Style(color=colors["text"], bgcolor=colors["surface"])
+        self._tokens = {
+            Token: self._base,
+            Comment: self._base + Style(color=colors["muted"]),
+            Keyword: self._base + Style(color=colors["primary"], bold=True),
+            Name.Function: self._base + Style(color=colors["primary"]),
+            Name.Class: self._base + Style(color=colors["primary"]),
+            String: self._base + Style(color=colors["success"]),
+            Number: self._base + Style(color=colors["warning"]),
+            Generic.Inserted: self._base + Style(color=colors["success"]),
+            Generic.Deleted: self._base + Style(color=colors["error"]),
+            Generic.Heading: self._base + Style(bold=True),
+            Generic.Subheading: self._base + Style(bold=True),
+            Error: self._base + Style(color=colors["error"], underline=True),
+        }
+
+    def get_style_for_token(self, token_type: tuple[str, ...]) -> Style:
+        # 未单独着色的 token 继承应用正文色，避免 Pygments 回退成纯黑。
+        while token_type not in self._tokens:
+            token_type = token_type[:-1]
+        return self._tokens[token_type]
+
+    def get_background_style(self) -> Style:
+        # 未知语言没有 lexer，Syntax 会直接使用此基础样式绘制整段。
+        return self._base
+
+
+class _TerminalCodeBlock(CodeBlock):
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        yield Syntax(
+            str(self.text).rstrip(), self.lexer_name,
+            theme=_TerminalSyntaxTheme(self.theme), word_wrap=True, padding=1,
+        )
+
+
 class TerminalMarkdown(Markdown):
     """正文、标题与代码沿用应用主题，不引入另一套终端强调色。"""
 
+    # 单独复制映射；保留普通 Rich Markdown 以及其他实例的默认行为。
+    elements = {**Markdown.elements, "fence": _TerminalCodeBlock, "code_block": _TerminalCodeBlock}
+
     def __init__(self, text: str, theme_name: str = "dark") -> None:
         colors = theme_palette(theme_name)
-        light = theme_name in {"light", "lancher-light"}
-        super().__init__(text, code_theme="default" if light else "monokai", style=colors["text"])
+        super().__init__(text, code_theme=theme_name, style=colors["text"])
         self._text_theme = RichTheme({
             **{f"markdown.h{level}": "bold " + colors["text"] for level in range(1, 8)},
             "markdown.h1.border": colors["panel"],

@@ -39,6 +39,7 @@ class TraceSection(Vertical):
         super().__init__(classes=f"trace-section {kind}-trace")
         self._collapsed = collapsed
         self._manual = False
+        self._completion_collapsed = False
         self.header = TraceHeader(self.toggle_collapsed, kind=kind)
 
     @property
@@ -52,6 +53,13 @@ class TraceSection(Vertical):
         self._manual = True
         self._collapsed = collapsed
         self._sync_view()
+
+    def collapse_for_completion(self) -> None:
+        """任务完成时统一收起一次，之后仍允许用户展开阅读。"""
+        if self._completion_collapsed:
+            return
+        self._completion_collapsed = True
+        self.set_collapsed(True)
 
     def _default_collapsed(self, collapsed: bool) -> None:
         if not self._manual:
@@ -80,14 +88,31 @@ class ThinkingTraceWidget(TraceSection):
         self._sync_view()
 
     def _sync_view(self) -> None:
-        text = "\n".join(entry.text for entry in self._entries)
-        first, _, remaining = text.strip().partition("\n")
+        first, remaining = _thinking_display_parts(self._entries)
         label = f"▸ {first}…" if self._collapsed else f"▾ {first}"
+        self.header.display = bool(first)
         self.header.styles.height = 1 if self._collapsed else "auto"
         self.header.update(Text(label, style=theme_palette(self.app.theme)["muted"],
                                 no_wrap=self._collapsed, overflow="ellipsis"))
         self.body.display = bool(remaining) and not self._collapsed
         self.body.update(Text(remaining, style=theme_palette(self.app.theme)["muted"]))
+
+
+def _thinking_display_parts(entries: list[TraceEntry]) -> tuple[str, str]:
+    """摘要使用首个可读行，仅在展示层清理边界空白，保留原始记录。"""
+    text = "\n".join(entry.text for entry in entries)
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").expandtabs(4).split("\n")
+    first_index = next((index for index, line in enumerate(lines) if line.strip()), None)
+    if first_index is None:
+        return "", ""
+    first = " ".join(lines[first_index].split())
+    body_lines = lines[first_index + 1:]
+    # Header 已占一行；段首换行不应再制造一条看似空白的思考。
+    while body_lines and not body_lines[0].strip():
+        body_lines.pop(0)
+    while body_lines and not body_lines[-1].strip():
+        body_lines.pop()
+    return first, "\n".join(body_lines)
 
 
 TOOL_LABELS = {
@@ -216,6 +241,14 @@ class ToolActivityWidget(TraceSection):
     async def on_mount(self) -> None:
         await self.update_entries(self._entries, status=self.status)
 
+    def collapse_for_completion(self) -> None:
+        if self._completion_collapsed:
+            return
+        # 单次调用没有父标题，也必须同步折叠自己的详情。
+        for widget in self._calls.values():
+            widget.collapse_for_completion()
+        super().collapse_for_completion()
+
     async def update_entries(self, entries: list[TraceEntry], *, status: str = "complete") -> None:
         self._entries, self.status = entries, status
         for index, (call, result) in enumerate(_calls_with_results(entries)):
@@ -225,6 +258,8 @@ class ToolActivityWidget(TraceSection):
                 widget = ToolCallWidget(call, result, status=status, on_toggle=self._refresh_collapse)
                 self._calls[key] = widget
                 await self.body.mount(widget)
+                if self._completion_collapsed:
+                    widget.collapse_for_completion()
             else:
                 widget.update_call(call, result, status=status)
         self._refresh_collapse()
@@ -284,6 +319,10 @@ def timeline_blocks(message: SessionMessage) -> list[TimelineBlock]:
     call_groups: dict[str, TimelineBlock] = {}
     legacy_group: TimelineBlock | None = None
     for index, entry in enumerate(message.trace.entries):
+        if entry.kind == "thinking" and not entry.text.strip():
+            # 流式响应可先发来换行；保留记录，但不挂载空白折叠入口。
+            legacy_group = None
+            continue
         if entry.kind == "tool_call":
             group_id = entry.metadata.get("group_id")
             key = f"group-{group_id}" if group_id else legacy_group.key if legacy_group else f"legacy-group-{index}"

@@ -844,7 +844,7 @@ async def test_tui_interleaves_tool_flow_and_separate_thinking_segments(
 
 
 @pytest.mark.asyncio
-async def test_thinking_trace_preserves_user_expansion_across_updates(
+async def test_thinking_trace_preserves_user_expansion_until_task_completes(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
@@ -875,8 +875,11 @@ async def test_thinking_trace_preserves_user_expansion_across_updates(
         await pilot.pause(0.35)
 
         trace_widget = list(app.query(ThinkingTraceWidget))[-1]
-        assert trace_widget.collapsed is False
+        assert trace_widget.collapsed is True
         assert session.state.messages[-1].trace.collapsed is True
+        trace_widget.toggle_collapsed()
+        await app._sync_message_widget(session.state.messages[-1].id)
+        assert trace_widget.collapsed is False
 
 
 def test_format_trace_entries_renders_edit_preview_lines() -> None:

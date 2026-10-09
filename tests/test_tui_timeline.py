@@ -9,6 +9,7 @@ from textual.widgets import Static
 from lancher_code.models import TraceEntry, TurnEvent, UIConfig
 from lancher_code.tui_views.message import ThinkingTraceWidget, ToolActivityWidget, ToolCallWidget
 from lancher_code.tui_views.theme import theme_palette
+from lancher_code.tui_views.timeline import _thinking_display_parts, timeline_blocks
 from test_tui_flow import FakeProvider, _build_app
 
 
@@ -42,6 +43,89 @@ def _text(widget: Static) -> str:
     output = StringIO()
     Console(file=output, width=140, color_system=None).print(widget.content)
     return output.getvalue()
+
+
+@pytest.mark.parametrize("raw", ["", " \t ", "\r\n\r\n", "\n  \n\t\r"])
+def test_blank_thinking_keeps_raw_trace_without_empty_timeline_row(openai_provider_config, tmp_path, raw):
+    _, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    message = session.create_assistant_message()
+    entry = _segment("thinking", raw, state="streaming")
+    message.trace.entries = [entry]
+    assert timeline_blocks(message) == []
+    assert message.trace.entries == [entry]
+    assert entry.text == raw
+    assert _thinking_display_parts([entry]) == ("", "")
+
+
+@pytest.mark.parametrize("raw, first, remaining", [
+    ("\r\n\t\r\n  先检查\t保存入口 \r\n\r\n\t\r\n再查看调用方\r\n", "先检查 保存入口", "再查看调用方"),
+    ("\r  第一行\r\r第二行\r\r第三行\r", "第一行", "第二行\n\n第三行"),
+    ("\n\n第一行\n  \n    保留正文缩进\n\n第二段", "第一行", "    保留正文缩进\n\n第二段"),
+    ("  只有一行\t摘要  ", "只有一行 摘要", ""),
+])
+def test_thinking_summary_uses_first_readable_line_and_removes_boundary_blank_lines(raw, first, remaining):
+    entry = _segment("thinking", raw)
+    assert _thinking_display_parts([entry]) == (first, remaining)
+    assert entry.text == raw
+
+
+@pytest.mark.asyncio
+async def test_blank_streaming_thinking_appears_only_after_readable_content(openai_provider_config, tmp_path):
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    message = session.create_assistant_message()
+    message.trace.entries = [_segment("thinking", "\r\n\t\r\n", state="streaming")]
+    async with app.run_test() as pilot:
+        await app._mount_message_widget(message)
+        widget = app._message_widgets[message.id]
+        assert not widget.query(ThinkingTraceWidget)
+        message.trace.entries[0].text += "首个可读内容\r\n\r\n下一段内容"
+        await widget.update_from_message(message)
+        await pilot.pause()
+        thinking = widget.query_one(ThinkingTraceWidget)
+        assert not thinking.collapsed
+        assert _header(thinking).content.plain == "▾ 首个可读内容"
+        assert thinking.body.content.plain == "下一段内容"
+        assert thinking.body.region.y == _header(thinking).region.bottom
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call_count", [1, 2])
+async def test_completion_collapses_process_and_call_details_once(openai_provider_config, tmp_path, call_count):
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    message = session.create_assistant_message()
+    message.trace.entries = [_segment("thinking", "先检查保存入口\n查看调用方")]
+    for index in range(call_count):
+        message.trace.entries.extend([_call(str(index), state="complete"), _result(str(index))])
+    async with app.run_test() as pilot:
+        await app._mount_message_widget(message)
+        await pilot.pause()
+        widget = app._message_widgets[message.id]
+        thinking = widget.query_one(ThinkingTraceWidget)
+        group = widget.query_one(ToolActivityWidget)
+        calls = list(group.query(ToolCallWidget))
+        thinking.set_collapsed(False)
+        for call in calls:
+            call.set_collapsed(False)
+        assert not thinking.collapsed and not group.collapsed
+        assert all(not call.collapsed for call in calls)
+
+        thinking.collapse_for_completion()
+        group.collapse_for_completion()
+        assert thinking.collapsed and group.collapsed
+        assert all(call.collapsed and not call.body.display for call in calls)
+
+        # 完成后的刷新不会因旧流式标记重新展开，也不会干预随后手动阅读。
+        message.trace.entries[0].metadata["state"] = "streaming"
+        await widget.update_from_message(message)
+        assert thinking.collapsed and group.collapsed
+        thinking.set_collapsed(False)
+        group.set_collapsed(False)
+        calls[0].set_collapsed(False)
+        thinking.collapse_for_completion()
+        group.collapse_for_completion()
+        await widget.update_from_message(message)
+        assert not thinking.collapsed and not group.collapsed
+        assert not calls[0].collapsed and calls[0].body.display
 
 
 @pytest.mark.asyncio

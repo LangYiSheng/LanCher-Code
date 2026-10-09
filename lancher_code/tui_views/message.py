@@ -232,6 +232,8 @@ class MessageWidget(Vertical):
         self._message = message
         self._sync_lock = asyncio.Lock()
         self._blocks: dict[str, Static | ThinkingTraceWidget | ToolActivityWidget] = {}
+        self._completion_collapsed = False
+        self._restored_complete = message.role == "assistant" and message.status == "complete"
 
     def compose(self) -> ComposeResult:
         yield Static(classes="message-label")
@@ -240,6 +242,8 @@ class MessageWidget(Vertical):
 
     async def on_mount(self) -> None:
         await self._sync_view()
+        if self._restored_complete:
+            self.collapse_for_completion()
 
     async def update_from_message(self, message: SessionMessage) -> None:
         self.role = message.role
@@ -257,9 +261,9 @@ class MessageWidget(Vertical):
         self.set_class(self.status == "error", "-error")
 
         label_widget = self.query_one(".message-label", Static)
-        label_widget.update(self._label_text())
+        label_widget.update(Text(self._label_text(), style="bold " + self._label_color()))
         label_widget.styles.color = self._label_color()
-        label_widget.styles.text_style = "bold" if self.status == "error" else "none"
+        label_widget.styles.text_style = "bold"
 
         timeline = self.query_one(".message-timeline", Vertical)
         blocks = timeline_blocks(self._message) if self.role == "assistant" else []
@@ -268,6 +272,7 @@ class MessageWidget(Vertical):
             if key not in wanted:
                 await self._blocks.pop(key).remove()
         # 增量更新原有控件；不要在每个 delta 重建并丢掉焦点和展开选择。
+        previous_kind: str | None = None
         for block in blocks:
             widget = self._blocks.get(block.key)
             if widget is None:
@@ -291,26 +296,39 @@ class MessageWidget(Vertical):
                 else:
                     colors = theme_palette(self.app.theme)
                     widget.update(Text(text, style=colors["error"] if self.status == "error" else colors["warning"]))
+            # 相邻过程紧凑排列；仅在正文/提示与其他块之间留一行。
+            separated = previous_kind is not None and (block.kind in {"text", "notice"} or previous_kind in {"text", "notice"})
+            widget.set_class(separated, "timeline-separator")
+            if widget.display:
+                previous_kind = block.kind
 
         body_widget = self.query_one(".message-body", Static)
         # 新记录的正文已经在时间线里；旧会话的最终正文继续放在末尾。
         body_text = "" if self.role == "assistant" and self._message.timeline_version and blocks else self._body_text()
         body_widget.display = bool(body_text)
+        body_widget.set_class(bool(body_text) and previous_kind is not None, "timeline-separator")
         if body_text:
             body_widget.styles.color = self._body_color()
             body_widget.update(TerminalMarkdown(body_text, self.app.theme) if self.role == "assistant" and self.status != "error" else Text(body_text))
 
-    def _show_trace(self) -> bool:
-        return self._show_thinking and self.role == "assistant" and bool(self.trace_entries)
+    def collapse_for_completion(self) -> None:
+        """任务成功结束只收起一次，用户随后重新查看时不再干预。"""
+        if self._completion_collapsed or self.role != "assistant" or self.status != "complete":
+            return
+        self._completion_collapsed = True
+        for widget in self._blocks.values():
+            if isinstance(widget, (ThinkingTraceWidget, ToolActivityWidget)):
+                widget.collapse_for_completion()
 
     def _label_text(self) -> str:
+        name = self.ROLE_LABELS.get(self.role, self.role.upper())
         if self.status in self.STATUS_LABELS:
-            return self.STATUS_LABELS[self.status]
-        return self.ROLE_LABELS.get(self.role, self.role.upper())
+            return f"{name} · {self.STATUS_LABELS[self.status]}"
+        return name
 
     def _label_color(self) -> str:
         colors = theme_palette(self.app.theme)
-        return colors["error"] if self.status == "error" else colors["muted"]
+        return colors["error"] if self.status == "error" else colors["primary"] if self.role in {"user", "assistant"} else colors["muted"]
 
     def _body_text(self) -> str:
         if self.status == "error":

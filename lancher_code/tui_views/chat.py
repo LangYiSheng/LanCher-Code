@@ -123,18 +123,19 @@ class LanCherTextualApp(App[int]):
     #chat-view { margin: 1 1 0 1; padding: 0 1; }
     .message { padding: 0; margin: 0 0 1 0; border: none; }
     .message--user, .message--assistant, .message--system, .message.-error { border: none; }
-    .message--user { border-left: solid $panel; padding-left: 1; }
-    .message-label { color: $text-muted; }
+    .message--user, .message--assistant { padding: 0; }
+    .message-label { color: $primary; text-style: bold; }
     .message-timeline { height: auto; width: 1fr; }
-    .timeline-text { height: auto; width: 1fr; margin-bottom: 1; }
-    .trace-section { height: auto; width: 1fr; margin: 0 0 1 0; }
+    .timeline-text { height: auto; width: 1fr; margin: 0; }
+    .trace-section { height: auto; width: 1fr; margin: 0; }
+    .timeline-separator { margin-top: 1; }
     .trace-header { height: 1; width: 1fr; color: $text-muted; }
     .trace-header:focus { text-style: bold underline; }
     .trace-body { height: auto; width: 1fr; padding-left: 2; color: $text-muted; }
     .tool-calls { height: auto; width: 1fr; padding-left: 2; }
     .tool-calls.-single { padding-left: 0; }
     .tool-call-trace { margin: 0; }
-    .tool-call-body { padding-bottom: 1; }
+    .tool-call-body { padding-bottom: 0; }
     #composer-region { margin: 0 2; max-height: 75%; }
     #composer { border-top: solid $panel; padding: 0; }
     #composer:focus-within { border-top: solid $primary; }
@@ -211,6 +212,7 @@ class LanCherTextualApp(App[int]):
         self._is_streaming = False
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
+        self._task_message_ids: set[str] = set()
         self._status_hint = "就绪"
         self._slash_menu_matches: list[SlashCompletionCandidate] = []
         self._slash_menu_index = 0
@@ -408,6 +410,7 @@ class LanCherTextualApp(App[int]):
 
         self._is_streaming = True
         self._turn_succeeded = False
+        self._task_message_ids.clear()
         self._status_hint = "正在处理"
         self._refresh_composer_placeholder()
         self._refresh_status_bar()
@@ -619,8 +622,15 @@ class LanCherTextualApp(App[int]):
         self._apply_turn_event(event)
         if event.message is not None and event.kind in {"user_message_created", "assistant_message_started"}:
             await self._mount_message_widget(event.message)
+            if event.kind == "assistant_message_started":
+                self._task_message_ids.add(event.message.id)
         elif event.message is not None:
             await self._sync_message_widget(event.message.id)
+        if event.kind == "turn_completed":
+            for message_id in self._task_message_ids:
+                widget = self._message_widgets.get(message_id)
+                if widget is not None:
+                    widget.collapse_for_completion()
         if event.kind == "permission_request_created" and event.permission_request is not None:
             await self._request_inline_permission(event.permission_request)
         if event.kind in {"permission_request_closed", "permission_request_resolved"}:
@@ -1178,6 +1188,7 @@ class LanCherTextualApp(App[int]):
         for child in list(chat_view.children):
             await child.remove()
         self._message_widgets.clear()
+        self._task_message_ids.clear()
         for message in self._session_controller.state.messages:
             await self._mount_message_widget(message)
 
