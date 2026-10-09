@@ -11,6 +11,7 @@ from lancher_code.config import (
     resolve_config_bootstrap_state,
 )
 from lancher_code.errors import ConfigError
+from lancher_code.model_catalog import resolve_model
 from lancher_code.config_system.paths import get_global_mcp_config_path, get_project_mcp_config_path
 from lancher_code.mcp import MCPClientManager, load_mcp_config
 from lancher_code.logging_system import get_logger, register_sensitive_values
@@ -43,15 +44,16 @@ async def run_app() -> int:
         console.print(f"[错误] {exc.user_message}", style="bold red")
         return 1
 
-    provider = create_provider(config.provider)
-    register_sensitive_values([config.provider.api_key])
+    active_config = resolve_model(config)
+    provider = create_provider(active_config)
+    register_sensitive_values([active_config.api_key])
     cwd = Path.cwd()
     permission_storage = PermissionStorage(
         project_rules_path=get_project_permissions_path(cwd),
         user_rules_path=get_global_permissions_path(),
     )
     session_controller = SessionController(
-        config.provider,
+        active_config,
         cwd=cwd,
         plan_file_path=Path(config.runtime.plan_file_path),
         initial_runtime_mode=config.runtime.permission_mode,
@@ -90,9 +92,10 @@ async def run_app() -> int:
         max_tool_loops=config.runtime.tool_loop_limit,
         unknown_tool_streak_limit=config.runtime.unknown_tool_streak_limit,
     )
+    turn_runner.configure_models(config)
     tui = ChatTUI(
         turn_runner=turn_runner,
-        provider_config=config.provider,
+        provider_config=active_config,
         session_controller=session_controller,
         ui_config=config.ui,
     )

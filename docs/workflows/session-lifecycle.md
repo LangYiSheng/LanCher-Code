@@ -16,13 +16,15 @@ LanCher Code 支持**按项目**保存 / 恢复会话。会话文件存放在启
 
 | 类型 | 内容 |
 |---|---|
-| `metadata` | 格式版本、会话名、项目根、创建/更新时间、消息数、会话权限规则数、上下文治理状态（v3） |
+| `metadata` | 格式版本、会话名、项目根、创建/更新时间、消息数、会话权限规则数、上下文治理状态（v3）、可选 `model_ref` |
 | `state` | 运行模式、previous 模式、plan 恢复模式、plan 轮次计数、待处理 plan 提醒 |
 | `permissions` | 会话级权限规则列表 |
 | `message` | 界面消息（`SessionMessage`，含 usage 与 trace） |
 | `transcript` | 协议无关消息（`ConversationMessage`） |
 
 版本兼容：当前写版本 `3`（`SESSION_FORMAT_VERSION`），支持读取 `1 / 2 / 3`；v1 无 permissions 记录，v2/v3 必须恰好一条 permissions 记录，v3 额外带 `context_management` 元数据。
+
+`model_ref` 保存稳定的 `供应商ID/模型ID`，不保存 API Key、Base URL 或解析后的连接快照。恢复时从当前全局目录解析最新连接参数。旧记录没有此字段仍可正常读取，使用默认模型并提示；原引用已删除时也回退默认模型。
 
 写入方式：临时文件逐行写入 → `flush` + `fsync` → `os.replace` 原子替换。
 
@@ -44,6 +46,7 @@ LanCher Code 支持**按项目**保存 / 恢复会话。会话文件存放在启
   · 读取 JSONL → 解码 state / messages / transcript / permissions / context_management
   · 校验：名称一致、项目根一致、消息数与 metadata 一致、权限规则数一致
   · 当前对话有未保存改动且未加 --force → 抛 SessionStoreError
+  · TurnRunner 先解析保存的模型引用；不存在则准备默认模型并给出提示
   · 替换会话规则（PermissionStorage.replace_session_rules，notify=False）
   · 替换 state 与 transcript；TUI 重建消息列表
   │
@@ -63,6 +66,7 @@ LanCher Code 支持**按项目**保存 / 恢复会话。会话文件存放在启
 | resume 保护 | 有未保存改动时必须 `--force` |
 | 项目隔离 | 恢复时校验 `metadata.project_root` 与当前 cwd 一致，跨项目会话拒绝加载 |
 | 权限随行 | 会话级规则随会话保存/恢复（`permission_rule_count` 校验） |
+| 模型随行 | `metadata.model_ref` 随会话保存；恢复时使用当前目录，不把连接密钥写入会话 |
 | 上下文状态 | v3 恢复 `context_management`（卸载结果引用）；若卸载文件已丢失，只记 warning，不阻断 |
 
 ## 自动保存时机
@@ -73,6 +77,8 @@ LanCher Code 支持**按项目**保存 / 恢复会话。会话文件存放在启
 - 模式切换（`set_runtime_mode` 内直接调用 `auto_save()`）
 - 会话级权限规则变更
 - 每轮对话结束后（`TurnRunner._run_turn` finally 中 `auto_save()`）
+
+`/model` 切换在已绑定会话中会立即保存引用，写入失败则回滚此次模型切换。切换或恢复模型会清除旧模型的 token 用量锚点和自动压缩失败状态，按当前模型的上下文窗口重新估算；消息历史与文件卸载引用保留。
 
 ## 恢复后的界面行为
 
@@ -88,5 +94,6 @@ LanCher Code 支持**按项目**保存 / 恢复会话。会话文件存放在启
 
 - `session_store.ProjectSessionStore`：文件 IO（save / load / list / remove / rename）
 - `SessionController`：业务编排（校验、状态合并、脏标记）
+- `TurnRunner`：恢复前准备目标模型适配器，并协调会话引用与有效连接配置
 - `PermissionStorage`：会话级规则随会话走
 - `tui_views/chat.py`：`/session` 命令交互与界面重建

@@ -6,7 +6,7 @@ LanCher Code 的配置来源有：**YAML 配置文件**、**环境变量**（通
 
 | 文件 | 用途 | 生成方式 |
 |---|---|---|
-| `~/.lancher/lancher.yaml` | 全局主配置（Provider / UI / Runtime） | 首次启动引导界面写入，或手动创建 |
+| `~/.lancher/lancher.yaml` | 全局主配置（供应商目录 / 默认模型 / UI / Runtime） | 首次启动引导界面或设置页写入，也可手动创建 |
 | `~/.lancher/permissions.yaml` | 用户级权限规则 | 首次产生用户级规则时自动写入 |
 | `~/.lancher/mcp.yaml` | 全局 MCP Server 配置 | 引导界面保存时自动生成模板（`mcp/template.py`） |
 | `./.lancher/permissions.yaml` | 项目级权限规则（`./` 为当前工作目录） | 首次产生项目级规则时自动写入 |
@@ -19,20 +19,60 @@ LanCher Code 的配置来源有：**YAML 配置文件**、**环境变量**（通
 
 ## 主配置 `lancher.yaml`
 
-顶层结构为 `provider`、`ui`、`runtime` 三节。解析与校验逻辑在 `lancher_code/config_system/loader.py`。
+顶层结构为 `providers`、`default_model`、`ui`、`runtime`。解析与校验逻辑在 `lancher_code/config_system/loader.py`，模型继承解析在 `lancher_code/model_catalog.py`。
 
-### `provider`（必填节）
+### 供应商目录与默认模型
+
+`providers` 是按稳定 ID 索引的供应商对象，每个供应商的 `models` 也是按稳定 ID 索引的对象。供应商名称、API 模型名、模型显示名称都可以修改，ID 不随改名变化。`default_model` 使用 `供应商ID/模型ID`，用于新会话启动。
+
+```yaml
+providers:
+  deepseek:
+    name: DeepSeek
+    protocol: openai
+    base_url: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+    models:
+      chat:
+        model_name: deepseek-chat
+        display_name: 日常编程
+      reasoner:
+        model_name: deepseek-reasoner
+default_model: deepseek/chat
+```
+
+供应商与模型 ID 只能含中文、字母、数字、下划线、短横线。配置必须包含可解析的默认模型；可以保留暂时没有模型的供应商。相同 API 模型名可存在于不同供应商下，通过完整引用区分。
+
+### `providers.<供应商ID>`
 
 | 配置项 | 类型 | 默认值 | 必填 | 作用 |
 |---|---|---|---|---|
-| `provider.protocol` | str | - | 是 | `openai` 或 `claude`，二选一 |
-| `provider.model` | str | - | 是 | 模型名称，支持 `${ENV}` 展开 |
-| `provider.base_url` | str | - | 是 | API 地址，支持 `${ENV}` 展开，加载时去掉末尾 `/` |
-| `provider.api_key` | str | - | 是 | API 密钥，支持 `${ENV}` 展开。**只写变量名，不要写真实密钥** |
-| `provider.timeout_seconds` | float | `60.0` | 否 | 单次请求超时秒数，必须为正数 |
-| `provider.context_window` | int | `128000`（openai）/ `200000`（claude） | 否 | 上下文窗口大小，用于压缩阈值估算 |
-| `provider.thinking.enabled` | bool | `false` | 否 | 是否启用 Claude thinking（仅 claude 生效） |
-| `provider.thinking.budget_tokens` | int | 无（未设置时请求阶段默认 2048） | 否 | thinking 预算 token，必须为正整数 |
+| `name` | str | - | 是 | 自定义供应商显示名称，如 DeepSeek |
+| `protocol` | str | - | 是 | `openai` 或 `claude`；界面将后者显示为 Anthropic |
+| `base_url` | str | - | 是 | 公共 API 基址，支持环境变量；有效值去掉末尾 `/` |
+| `api_key` | str | - | 是 | 公共密钥，支持 `${ENV}`；示例采用环境变量引用 |
+| `timeout_seconds` | float | `60.0` | 否 | 公共请求超时，必须为有限正数 |
+| `models` | object | `{}` | 否 | 该供应商下的模型目录 |
+
+### `providers.<供应商ID>.models.<模型ID>`
+
+| 配置项 | 类型 | 缺省行为 | 作用 |
+|---|---|---|---|
+| `model_name` | str | 必填 | 请求 API 使用的模型名，支持环境变量 |
+| `display_name` | str | 空字符串 | 有值时用于界面，否则显示 `model_name (供应商名称)` |
+| `protocol` | str / null | 继承供应商 | 覆盖为 `openai` 或 `claude` |
+| `base_url` | str / null | 继承供应商 | 单独覆盖 API 基址，支持环境变量 |
+| `api_key` | str / null | 继承供应商 | 单独覆盖 API 密钥，支持环境变量 |
+| `timeout_seconds` | float / null | 继承供应商 | 单独覆盖请求超时 |
+| `context_window` | int / null | 按有效协议取 `128000` / `200000` | 上下文窗口，必须为正整数 |
+| `thinking.enabled` | bool | `false` | 启用 Anthropic thinking，仅 `claude` 协议生效 |
+| `thinking.budget_tokens` | int | 请求阶段默认 `2048` | thinking 预算，必须为正整数 |
+
+继承按字段独立解析：修改模型的 Base URL 不会取消其密钥或协议继承。省略字段或写 `null` 表示继承，连接字段的空字符串不是继承标记。上下文窗口和 thinking 是模型设置，不属于供应商公共字段。
+
+### 旧配置兼容与备份
+
+旧顶层 `provider` 仍可加载，内存中映射为 `legacy/default`，供应商显示名称为“原有供应商”。首次保存改写为目录格式前，保留原文件为同目录 `lancher.yaml.bak`；已有备份不会被覆盖。只读取不会迁移文件。`provider` 和 `providers` 同时存在会报错。
 
 ### `ui`
 
@@ -52,7 +92,8 @@ LanCher Code 的配置来源有：**YAML 配置文件**、**环境变量**（通
 
 ### 环境变量展开
 
-- Provider 字段：`model`、`base_url`、`api_key` 使用 `os.path.expandvars` 展开（`${NAME}` 或 `$NAME` 形式），未定义的环境变量会**原样保留**（例如 `${TEST_OPENAI_KEY}` 未被替换时不报错，见 `tests/test_config.py`）。
+- 供应商与模型的 `base_url`、`api_key`，以及模型 `model_name` 在生成有效连接时使用 `os.path.expandvars` 展开（`${NAME}` 或 `$NAME` 形式）。配置目录保留变量原文；保存设置不会把密钥变量替换成环境变量值，也不会把继承值写成模型覆盖。
+- 未定义的环境变量仍原样保留；已定义但展开后为空的有效连接值会报错。没有 `OPENAI_API_KEY` 等隐式覆盖，须在 YAML 中显式引用。
 - MCP 的 `env` / `headers` 值：使用 `mcp/config.py` 的正则 `\${NAME}` 展开，**缺失的环境变量会导致该 Server 配置校验失败**（仅该 Server 被跳过，见 `mcp/config.py` `_expand_map`）。
 
 ## 权限规则文件
@@ -117,11 +158,15 @@ mcp_servers:
 
 运行时可以通过 `/settings` 打开 Textual 设置面板（`tui_views/settings.py` + `settings_service.py`），四个标签页：
 
-- **模型设置**：协议、模型名、Base URL、API Key（留空不覆盖原值）、超时、thinking
+- **模型设置**：增删改供应商及其多个模型，选择新会话默认模型；模型连接字段可独立继承或覆盖。API Key 留空保留原值，勾选“继承供应商”才会清除模型自己的密钥覆盖。模型高级选项包含上下文窗口和 thinking。
 - **MCP 服务器**：全局 / 项目两层，增删改 Server
 - **项目权限 / 全局权限**：增删改、上下移规则
 
-保存逻辑（`SettingsService.save()`）：先做**全量校验**，再以"临时文件 + 原子替换"方式批量写盘，最后才热切换内存中的权限规则。模型与 MCP 的修改提示**重启后生效**。
+“应用条目”只修改设置草稿，底部“保存”才写入文件。删除默认模型或其供应商前须先指定另一个默认模型；删除供应商会确认其下模型列表。
+
+保存逻辑（`SettingsService.save()`）：先校验整个目录与其余配置，备份旧格式，再以临时文件和逐文件原子替换方式写盘，最后更新权限规则。模型目录保存后立即可用；修改默认值不覆盖当前会话已选模型。当前模型仍存在时继续使用它，并更新其连接配置；已删除时回退新默认模型并提示。MCP 的修改仍需重启生效。
+
+聊天中使用 `/model` 打开选择器，或 `/model 供应商ID/模型ID` 直接切换。仅切换当前会话，保留历史和权限，不修改全局默认模型；已保存会话会记住所选引用。详见 [cli-and-interaction.md](cli-and-interaction.md)。
 
 ## 日志
 
@@ -133,4 +178,4 @@ mcp_servers:
 | 脱敏 | 注册的敏感值替换为 `[REDACTED]`；Authorization / Bearer / api_key / token 等模式自动脱敏 | `register_sensitive_values()` + `RedactingFormatter` |
 | 降级 | 日志目录不可写时回退到 stderr | `configure_logging()` |
 
-程序启动时会把 `api_key` 及 MCP 配置中的 env/headers 值注册为敏感值，避免泄漏到日志。
+程序启动和模型目录更新时会注册所有供应商及模型的密钥原文与展开值；模型切换时再次注册有效密钥。MCP 配置中的 env/headers 值也注册为敏感值。

@@ -51,6 +51,27 @@ async def test_config_bootstrap_app_saves_minimal_required_fields(tmp_path) -> N
     assert config.provider.base_url == "https://api.openai.com/v1"
     assert config.provider.api_key == "test-key"
     assert config.provider.timeout_seconds == 60.0
+    provider_id, model_id = config.default_model.split("/", 1)
+    assert config.providers[provider_id].models[model_id].model_name == "gpt-4.1-mini"
+    assert config.providers[provider_id].models[model_id].api_key is None
+
+
+@pytest.mark.asyncio
+async def test_config_bootstrap_saves_custom_provider_and_model_display_name(tmp_path) -> None:
+    config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
+    app = ConfigBootstrapApp(config_path)
+    async with app.run_test() as pilot:
+        app.query_one("#provider-name-input", Input).value = "DeepSeek"
+        app.query_one("#model-input", Input).value = "deepseek-chat"
+        app.query_one("#model-display-input", Input).value = "日常编程"
+        app.query_one("#api-key-input", Input).value = "${DEEPSEEK_KEY}"
+        app._save()
+        await pilot.pause()
+    config = load_config(config_path)
+    assert config.default_model == "deepseek/deepseek-chat"
+    assert config.providers["deepseek"].name == "DeepSeek"
+    assert config.providers["deepseek"].models["deepseek-chat"].display_name == "日常编程"
+    assert "${DEEPSEEK_KEY}" in config_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,8 @@ from typing import Any, Literal
 import yaml
 
 from lancher_code.config_system.loader import load_config_data
-from lancher_code.config_system.writer import serialize_config
+from lancher_code.config_system.writer import backup_legacy_config, serialize_config
+from lancher_code.errors import ConfigError
 from lancher_code.models import AppConfig, PermissionRule
 from lancher_code.permission_engine import PermissionStorage
 
@@ -63,7 +64,10 @@ class SettingsService:
     def save(self, snapshot: SettingsSnapshot) -> None:
         config_data = serialize_config(snapshot.config)
         # 复用正式 loader 做完整模型配置校验。
-        load_config_data(config_data)
+        try:
+            load_config_data(config_data)
+        except ConfigError as exc:
+            raise SettingsError(exc.user_message) from exc
         self._validate_mcp(snapshot.global_mcp, "全局 MCP")
         self._validate_mcp(snapshot.project_mcp, "项目 MCP")
         self._validate_rules(snapshot.project_rules)
@@ -80,7 +84,11 @@ class SettingsService:
             raise SettingsError("权限规则文件路径未配置。")
         payloads[project_rules_path] = self._rules_data(snapshot.project_rules)
         payloads[user_rules_path] = self._rules_data(snapshot.user_rules)
-        self._atomic_write_many(payloads)
+        try:
+            backup_legacy_config(self.config_path)
+            self._atomic_write_many(payloads)
+        except (ConfigError, OSError) as exc:
+            raise SettingsError(f"无法保存设置：{exc}") from exc
         # 全部文件成功落盘后才切换当前会话使用的规则。
         self.permission_storage.replace_rules("project", snapshot.project_rules, persist=False)
         self.permission_storage.replace_rules("user", snapshot.user_rules, persist=False)

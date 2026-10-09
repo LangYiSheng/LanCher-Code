@@ -38,6 +38,9 @@ class _FakeTurnRunner:
         self.args = args
         self.kwargs = kwargs
 
+    def configure_models(self, config) -> None:
+        self.model_config = config
+
 
 def _bootstrap_state(tmp_path: Path, *, needs_setup: bool, legacy_exists: bool = False) -> ConfigBootstrapState:
     config_path = (tmp_path / "home" / ".lancher" / "lancher.yaml").resolve()

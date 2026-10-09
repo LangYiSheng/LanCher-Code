@@ -12,6 +12,8 @@ class SlashCompletionContext:
     mode: RuntimeMode
     session_names: tuple[str, ...] = ()
     active_session_name: str | None = None
+    model_choices: tuple[tuple[str, str], ...] = ()
+    active_model_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +275,16 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
     )
     registry.register(
         SlashCommandDefinition(
+            name="model",
+            description="选择当前会话的主模型",
+            usage="/model [供应商ID/模型ID]",
+            argument_hint="不带参数打开搜索面板，或输入模型标识直接切换",
+            insert_trailing_space=True,
+            argument_completer=_complete_model_arguments,
+        )
+    )
+    registry.register(
+        SlashCommandDefinition(
             name="exit",
             description="退出当前会话",
             usage="/exit",
@@ -309,6 +321,19 @@ def _complete_mode_arguments(
     return [
         SlashArgumentSuggestion(value=mode, description=f"切换到 {mode} 模式")
         for mode in ("default", "plan", "acceptEdits", "bypass")
+    ]
+
+
+def _complete_model_arguments(
+    completed: tuple[str, ...],
+    _prefix: str,
+    context: SlashCompletionContext,
+) -> list[SlashArgumentSuggestion]:
+    if completed:
+        return []
+    return [
+        SlashArgumentSuggestion(ref, label + (" · 当前" if ref == context.active_model_ref else ""))
+        for ref, label in context.model_choices
     ]
 
 

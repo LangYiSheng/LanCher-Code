@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -88,10 +89,61 @@ class ProviderConfig:
 
 
 @dataclass(slots=True)
+class ModelDefinition:
+    """保存用户填写的模型配置；可选连接字段为 None 时继承供应商。"""
+
+    model_name: str
+    display_name: str = ""
+    protocol: ProviderProtocol | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    timeout_seconds: float | None = None
+    context_window: int | None = None
+    thinking: ThinkingConfig | None = None
+
+
+@dataclass(slots=True)
+class ProviderDefinition:
+    name: str
+    protocol: ProviderProtocol
+    base_url: str
+    api_key: str
+    timeout_seconds: float = 60.0
+    models: dict[str, ModelDefinition] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class AppConfig:
-    provider: ProviderConfig
+    # 仅兼容旧调用方读取默认模型快照，配置编辑和持久化以 providers 为准。
+    provider: ProviderConfig | None = None
     ui: UIConfig = field(default_factory=UIConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    providers: dict[str, ProviderDefinition] = field(default_factory=dict)
+    default_model: str = ""
+    legacy_format: bool = False
+
+    def __post_init__(self) -> None:
+        if self.providers or self.provider is None:
+            return
+        previous = self.provider
+        self.providers = {
+            "legacy": ProviderDefinition(
+                name="原有供应商",
+                protocol=previous.protocol,
+                base_url=previous.base_url,
+                api_key=previous.api_key,
+                timeout_seconds=previous.timeout_seconds,
+                models={
+                    "default": ModelDefinition(
+                        model_name=previous.model,
+                        thinking=deepcopy(previous.thinking),
+                        context_window=previous.context_window,
+                    )
+                },
+            )
+        }
+        self.default_model = "legacy/default"
+        self.legacy_format = True
 
 
 @dataclass(slots=True)

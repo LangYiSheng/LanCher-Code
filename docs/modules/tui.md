@@ -68,12 +68,13 @@ ComposerSubmitted（Enter）
 - 四个标签页：模型设置 / MCP 服务器 / 项目权限 / 全局权限（左右键或点击切换）
 - 数据来自 `SettingsService.load()`（快照）；保存走 `SettingsService.save()`（原子写盘 + 热切换权限）
 - 有未保存修改时按 Esc/取消会弹出"放弃修改"确认
-- 模型与 MCP 修改保存后提示重启生效
+- 模型目录由 `model_settings.py` 管理，供应商与模型分层编辑、逐字段继承、默认模型选择；保存后热更新，MCP 仍需重启
+- `/model` 打开 `model_picker.py` 的模型选择器，可按供应商、API 模型名或显示名搜索，标记当前/默认模型
 
 ### 首次引导（`bootstrap.py`）
 
 - 仅在 `~/.lancher/lancher.yaml` 不存在时出现
-- 字段：protocol / model / base_url / api_key / 超时 / thinking
+- 字段：供应商名称 / protocol / model_name / display_name / base_url / api_key / 超时 / thinking
 - 保存时调用 `write_config_data()` 写全局配置，并生成全局 `mcp.yaml` 模板
 - 窄终端（宽度 < 48）自动切换按钮竖排布局
 

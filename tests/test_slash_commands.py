@@ -43,6 +43,7 @@ def test_registry_suggests_commands_by_mode() -> None:
         "session",
         "compact",
         "settings",
+        "model",
         "exit",
     ]
     assert [command.name for command in registry.suggest("d", "default")] == []

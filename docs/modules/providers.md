@@ -2,9 +2,19 @@
 
 ## 作用
 
-供应商层把**不同厂商的流式 API 统一成一个接口**：`ChatProvider.stream_chat(request) -> AsyncIterator[StreamEvent]`。这样上层（TurnRunner / 会话层）完全不知道后端是 OpenAI 还是 Claude。
+供应商配置目录管理自定义厂商及其模型；协议适配层把流式 API 统一成 `ChatProvider.stream_chat(request) -> AsyncIterator[StreamEvent]`。自定义厂商名称（如 DeepSeek）与协议类型分开，一个厂商的不同模型可以使用不同协议。
 
 实现位置：`lancher_code/providers/`。
+
+## 配置与模型解析
+
+- `models.ProviderDefinition` 保存供应商名称、公共协议、Base URL、API Key、超时和模型目录。
+- `models.ModelDefinition` 保存 API 模型名、可选显示名、连接覆盖以及上下文窗口/thinking。`None` 表示继承供应商的对应连接字段。
+- `AppConfig.providers` 与 `default_model` 是配置源；旧 `AppConfig.provider` 仅兼容默认模型的有效快照，编辑它不会写回目录。
+- `model_catalog.resolve_model(config, ref)` 逐字段合并覆盖、展开环境变量，产生独立的 `ProviderConfig`。原配置保留变量原文和缺省字段，`ref` 为稳定的 `供应商ID/模型ID`。
+- `model_display_name()` 优先显示模型的 `display_name`，否则显示 `model_name (供应商名称)`；显示名称不发送给 API。
+
+配置文件可读旧单 `provider` 格式，保存时迁移并保留 `.bak`。详细 schema 见 [configuration.md](../configuration.md)。
 
 ## 接口与实现
 
@@ -38,7 +48,7 @@
 - 思考：`delta.reasoning_content` 或 `delta.reasoning`
 - 结束标记：SSE 数据 `[DONE]`；用量从 `chunk.usage` 读取（含 `prompt_tokens_details.cached_tokens`）
 
-### Claude（`claude.py`）
+### Anthropic（内部协议值 `claude`，`claude.py`）
 
 - URL：`{base_url}/messages`，Header：`x-api-key: <api_key>`、`anthropic-version: 2023-06-01`
 - Payload：`model`、`system`（字符串拼接）、`max_tokens: 4096`（固定）、`stream: true`、`thinking`（enabled/disabled + budget_tokens）、可选 `tools`（`input_schema`）
@@ -68,18 +78,21 @@
 
 ## 与其他模块的关系
 
-- ← `factory.py` ← `app.py`：启动时按配置创建
+- ← `factory.py` ← `app.py`：启动时解析默认模型后创建
+- ← `TurnRunner.configure_models/switch_model/reload_models`：协调模型目录、协议适配器和会话有效配置的切换；正在响应或压缩时禁止切换
 - ← `turn_runner.py`：`_stream_request()` 消费流事件
 - ← `context_management.py`：摘要压缩请求也走 `stream_chat()`
 - ← `session.py`：`_request_thinking()` 只在 claude 协议下启用 thinking
+
+切换保留协议无关 transcript、消息、工具结果和权限；模型、thinking、context_window 一起更新，同时清除旧模型的 token 校准锚点和压缩失败计数。工具历史由当前协议重新序列化，OpenAI 会把同一批工具结果逐条展开为 `tool` 消息。摘要压缩也使用当前主模型，不另设摘要模型。
 
 ## 如何新增一个协议
 
 1. 在 `providers/` 新增实现类，继承 `BaseChatProvider`，实现 `stream_chat()`
 2. 在 `models.py` 的 `ProviderProtocol` Literal 中增加协议名
 3. 在 `factory.py` 中按协议分发
-4. 在 `config_system/loader.py` 的 `SUPPORTED_PROTOCOLS` 中登记
-5. 参考 `tests/providers/` 用 `httpx.MockTransport` 补测试
+4. 在 `config_system/loader.py` 的 `SUPPORTED_PROTOCOLS` 与 `model_catalog.resolve_model()` 中登记，并更新默认上下文窗口策略
+5. 更新设置与引导界面的协议选项，参考 `tests/providers/` 和 `tests/test_model_config.py` 补测试
 
 ## 注意事项
 

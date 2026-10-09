@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-import os
+import math
+import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from lancher_code.errors import ConfigError
+from lancher_code.model_catalog import iter_model_refs, resolve_model
 from lancher_code.models import (
     AppConfig,
-    ProviderConfig,
+    ModelDefinition,
+    ProviderDefinition,
     ProviderProtocol,
     RuntimeConfig,
     RuntimeMode,
@@ -42,7 +45,8 @@ def load_config_data(raw_data: Any) -> AppConfig:
     if not isinstance(raw_data, dict):
         raise ConfigError("配置文件顶层必须是对象。")
 
-    provider_data = _require_mapping(raw_data, "provider")
+    if "provider" in raw_data and "providers" in raw_data:
+        raise ConfigError("provider 与 providers 不能同时存在，请只保留一种配置格式。")
     ui_data = raw_data.get("ui", {})
     runtime_data = raw_data.get("runtime", {})
 
@@ -55,43 +59,108 @@ def load_config_data(raw_data: Any) -> AppConfig:
     if not isinstance(runtime_data, dict):
         raise ConfigError("runtime 配置必须是对象。")
 
-    protocol = _require_protocol(provider_data, "protocol")
-    model = _require_non_empty_string(provider_data, "model")
-    base_url = _expand_env(_require_non_empty_string(provider_data, "base_url"))
-    api_key = _expand_env(_require_non_empty_string(provider_data, "api_key"))
-    timeout_seconds = _read_positive_float(provider_data.get("timeout_seconds", 60.0), "timeout_seconds")
-    context_window = _read_positive_int(
-        provider_data.get("context_window", 200000 if protocol == "claude" else 128000),
-        "provider.context_window",
+    legacy_format = "provider" in raw_data
+    if legacy_format:
+        provider_data = _require_mapping(raw_data, "provider")
+        protocol = _require_protocol(provider_data, "protocol", "provider.protocol")
+        providers = {
+            "legacy": ProviderDefinition(
+                name="原有供应商",
+                protocol=protocol,
+                base_url=_require_non_empty_string(provider_data, "base_url", "provider.base_url"),
+                api_key=_require_non_empty_string(provider_data, "api_key", "provider.api_key"),
+                timeout_seconds=_read_positive_float(provider_data.get("timeout_seconds", 60.0), "provider.timeout_seconds"),
+                models={
+                    "default": ModelDefinition(
+                        model_name=_require_non_empty_string(provider_data, "model", "provider.model"),
+                        context_window=_read_positive_int(provider_data["context_window"], "provider.context_window") if "context_window" in provider_data else None,
+                        thinking=_load_thinking(provider_data.get("thinking"), "provider.thinking"),
+                    )
+                },
+            )
+        }
+        default_model = "legacy/default"
+    else:
+        providers_data = _require_mapping(raw_data, "providers")
+        if not providers_data:
+            raise ConfigError("providers 至少需要一个供应商。")
+        providers = {}
+        for provider_id, data in providers_data.items():
+            _require_entry_id(provider_id, "providers")
+            providers[provider_id] = _load_provider(data, f"providers.{provider_id}")
+        default_model = _require_non_empty_string(raw_data, "default_model")
+
+    config = AppConfig(
+        providers=providers,
+        default_model=default_model,
+        legacy_format=legacy_format,
+        ui=_load_ui(ui_data),
+        runtime=_load_runtime(runtime_data),
     )
-    thinking = _load_thinking(provider_data.get("thinking"))
-    ui = _load_ui(ui_data)
-    runtime = _load_runtime(runtime_data)
+    # 检查全部模型，而不只是默认模型；只生成快照，不把继承值填回目录。
+    for reference in iter_model_refs(config):
+        resolve_model(config, reference)
+    config.provider = resolve_model(config)
+    return config
 
-    provider = ProviderConfig(
-        protocol=protocol,
-        model=_expand_env(model),
-        base_url=base_url.rstrip("/"),
-        api_key=api_key,
-        timeout_seconds=timeout_seconds,
-        thinking=thinking,
-        context_window=context_window,
+
+def _require_entry_id(value: Any, path: str) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[\w-]+", value):
+        raise ConfigError(f"{path} 的 ID 只能包含中文、字母、数字、下划线和短横线。")
+
+
+def _load_provider(raw: Any, path: str) -> ProviderDefinition:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path} 必须是对象。")
+    models_data = raw.get("models", {})
+    if not isinstance(models_data, dict):
+        raise ConfigError(f"{path}.models 必须是对象。")
+    models: dict[str, ModelDefinition] = {}
+    for model_id, data in models_data.items():
+        _require_entry_id(model_id, f"{path}.models")
+        models[model_id] = _load_model(data, f"{path}.models.{model_id}")
+    return ProviderDefinition(
+        name=_require_non_empty_string(raw, "name", f"{path}.name"),
+        protocol=_require_protocol(raw, "protocol", f"{path}.protocol"),
+        base_url=_require_non_empty_string(raw, "base_url", f"{path}.base_url"),
+        api_key=_require_non_empty_string(raw, "api_key", f"{path}.api_key"),
+        timeout_seconds=_read_positive_float(raw.get("timeout_seconds", 60.0), f"{path}.timeout_seconds"),
+        models=models,
     )
-    return AppConfig(provider=provider, ui=ui, runtime=runtime)
 
 
-def _load_thinking(raw_value: Any) -> ThinkingConfig | None:
+def _load_model(raw: Any, path: str) -> ModelDefinition:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path} 必须是对象。")
+    display_name = raw.get("display_name", "")
+    if not isinstance(display_name, str):
+        raise ConfigError(f"{path}.display_name 必须是字符串。")
+    return ModelDefinition(
+        model_name=_require_non_empty_string(raw, "model_name", f"{path}.model_name"),
+        display_name=display_name.strip(),
+        protocol=_require_protocol(raw, "protocol", f"{path}.protocol") if raw.get("protocol") is not None else None,
+        base_url=_require_non_empty_string(raw, "base_url", f"{path}.base_url") if raw.get("base_url") is not None else None,
+        api_key=_require_non_empty_string(raw, "api_key", f"{path}.api_key") if raw.get("api_key") is not None else None,
+        timeout_seconds=_read_positive_float(raw["timeout_seconds"], f"{path}.timeout_seconds") if raw.get("timeout_seconds") is not None else None,
+        context_window=_read_positive_int(raw["context_window"], f"{path}.context_window") if raw.get("context_window") is not None else None,
+        thinking=_load_thinking(raw.get("thinking"), f"{path}.thinking"),
+    )
+
+
+def _load_thinking(raw_value: Any, path: str = "thinking") -> ThinkingConfig | None:
     if raw_value is None:
         return None
     if not isinstance(raw_value, dict):
-        raise ConfigError("thinking 配置必须是对象。")
+        raise ConfigError(f"{path} 配置必须是对象。")
 
-    enabled = bool(raw_value.get("enabled", False))
+    enabled = raw_value.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"{path}.enabled 必须是布尔值。")
     budget_tokens_raw = raw_value.get("budget_tokens")
     budget_tokens: int | None = None
     if budget_tokens_raw is not None:
-        if not isinstance(budget_tokens_raw, int) or budget_tokens_raw <= 0:
-            raise ConfigError("thinking.budget_tokens 必须是正整数。")
+        if isinstance(budget_tokens_raw, bool) or not isinstance(budget_tokens_raw, int) or budget_tokens_raw <= 0:
+            raise ConfigError(f"{path}.budget_tokens 必须是正整数。")
         budget_tokens = budget_tokens_raw
 
     return ThinkingConfig(enabled=enabled, budget_tokens=budget_tokens)
@@ -129,23 +198,23 @@ def _require_mapping(raw_data: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
-def _require_protocol(raw_data: dict[str, Any], key: str) -> ProviderProtocol:
-    value = _require_non_empty_string(raw_data, key).lower()
+def _require_protocol(raw_data: dict[str, Any], key: str, path: str | None = None) -> ProviderProtocol:
+    value = _require_non_empty_string(raw_data, key, path).lower()
     if value not in SUPPORTED_PROTOCOLS:
         supported = ", ".join(SUPPORTED_PROTOCOLS)
-        raise ConfigError(f"{key} 必须是以下值之一: {supported}")
+        raise ConfigError(f"{path or key} 必须是以下值之一: {supported}")
     return value  # type: ignore[return-value]
 
 
-def _require_non_empty_string(raw_data: dict[str, Any], key: str) -> str:
+def _require_non_empty_string(raw_data: dict[str, Any], key: str, path: str | None = None) -> str:
     value = raw_data.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{key} 是必填字符串。")
+        raise ConfigError(f"{path or key} 是必填字符串。")
     return value.strip()
 
 
 def _read_positive_float(raw_value: Any, key: str) -> float:
-    if isinstance(raw_value, (int, float)) and raw_value > 0:
+    if not isinstance(raw_value, bool) and isinstance(raw_value, (int, float)) and math.isfinite(raw_value) and raw_value > 0:
         return float(raw_value)
     raise ConfigError(f"{key} 必须是正数。")
 
@@ -164,7 +233,3 @@ def _read_runtime_mode(raw_value: Any, key: str) -> RuntimeMode:
         supported = ", ".join(SUPPORTED_RUNTIME_MODES)
         raise ConfigError(f"{key} 必须是以下值之一: {supported}")
     return normalized
-
-
-def _expand_env(value: str) -> str:
-    return os.path.expandvars(value)

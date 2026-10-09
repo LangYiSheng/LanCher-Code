@@ -11,8 +11,9 @@ from textual.widgets import Button, Checkbox, Collapsible, Input, Select, Static
 from lancher_code.config import write_config_data
 from lancher_code.errors import ConfigError
 from lancher_code.mcp.template import ensure_user_mcp_config
+from lancher_code.model_catalog import new_entry_id
 
-PROTOCOL_OPTIONS = [("OpenAI", "openai"), ("Claude", "claude")]
+PROTOCOL_OPTIONS = [("OpenAI", "openai"), ("Anthropic", "claude")]
 DEFAULT_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "claude": "https://api.anthropic.com/v1",
@@ -147,6 +148,10 @@ class ConfigBootstrapApp(App[int]):
                 yield Static("", id="bootstrap-error")
 
                 with Vertical(classes="field"):
+                    yield Static("供应商名称", classes="field-label")
+                    yield Input(value="自定义供应商", placeholder="例如 DeepSeek", id="provider-name-input", classes="field-input")
+
+                with Vertical(classes="field"):
                     yield Static("提供商协议", classes="field-label")
                     yield Select(
                         PROTOCOL_OPTIONS,
@@ -157,12 +162,16 @@ class ConfigBootstrapApp(App[int]):
                     )
 
                 with Vertical(classes="field"):
-                    yield Static("模型名称", classes="field-label")
+                    yield Static("API 模型名称", classes="field-label")
                     yield Input(
                         placeholder=MODEL_PLACEHOLDERS["openai"],
                         id="model-input",
                         classes="field-input",
                     )
+
+                with Vertical(classes="field"):
+                    yield Static("模型显示名称（可选）", classes="field-label")
+                    yield Input(placeholder="留空显示 API 模型名称和供应商", id="model-display-input", classes="field-input")
 
                 with Vertical(classes="field"):
                     yield Static("Base URL", classes="field-label")
@@ -182,7 +191,7 @@ class ConfigBootstrapApp(App[int]):
                         yield Input(value="60", id="timeout-input", classes="field-input")
 
                     with Vertical(id="claude-thinking"):
-                        yield Checkbox("启用 Claude thinking", id="thinking-enabled")
+                        yield Checkbox("启用 Anthropic thinking", id="thinking-enabled")
                         with Vertical(classes="field"):
                             yield Static("thinking budget_tokens（可选）", classes="field-label")
                             yield Input(
@@ -253,12 +262,21 @@ class ConfigBootstrapApp(App[int]):
             "timeout_seconds",
         )
 
+        provider_name = self.query_one("#provider-name-input", Input).value.strip()
+        model_name = self.query_one("#model-input", Input).value.strip()
+        provider_id = new_entry_id(provider_name, ())
+        model_id = new_entry_id(model_name, ())
+        model: dict[str, Any] = {
+            "model_name": model_name,
+            "display_name": self.query_one("#model-display-input", Input).value.strip(),
+        }
         provider: dict[str, Any] = {
+            "name": provider_name,
             "protocol": protocol,
-            "model": self.query_one("#model-input", Input).value,
             "base_url": self.query_one("#base-url-input", Input).value,
             "api_key": self.query_one("#api-key-input", Input).value,
             "timeout_seconds": timeout_seconds,
+            "models": {model_id: model},
         }
 
         if protocol == "claude":
@@ -268,9 +286,9 @@ class ConfigBootstrapApp(App[int]):
                 thinking: dict[str, Any] = {"enabled": thinking_enabled}
                 if budget_raw:
                     thinking["budget_tokens"] = self._parse_positive_int(budget_raw, "thinking.budget_tokens")
-                provider["thinking"] = thinking
+                model["thinking"] = thinking
 
-        return {"provider": provider}
+        return {"providers": {provider_id: provider}, "default_model": f"{provider_id}/{model_id}"}
 
     def _read_select_value(self) -> str:
         value = self.query_one("#protocol-select", Select).value

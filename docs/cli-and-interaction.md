@@ -28,6 +28,7 @@ uv run lancher --help     # 仅显示程序名与描述，无其他选项
 | `/plan` | `/plan [任务]` | 进入 Plan Mode；带参数时把参数作为本轮用户请求提交 |
 | `/do` | `/do` | 退出 Plan Mode，恢复到进入 plan 前的最近一个非 plan 模式 |
 | `/mode` | `/mode <default\|plan\|acceptEdits\|bypass>` | 直接切换权限模式 |
+| `/model` | `/model [供应商ID/模型ID]` | 打开模型选择器，或按完整模型引用切换当前主模型 |
 | `/session` | `/session <list\|save\|remove\|rename\|resume> [名称]` | 管理项目会话（见下） |
 | `/compact` | `/compact` | 手动压缩当前会话上下文（不创建显示消息） |
 | `/settings` | `/settings` | 打开设置面板 |
@@ -44,6 +45,16 @@ uv run lancher --help     # 仅显示程序名与描述，无其他选项
 | `resume <名称> [--force]` | 恢复会话；若当前对话有未保存改动，需要 `--force` 强制丢弃 |
 
 会话文件存放在 `./.lancher/session/<名称>.jsonl`，恢复时会同时恢复会话级权限规则。详见 [workflows/session-lifecycle.md](workflows/session-lifecycle.md)。
+
+### `/model` 模型选择
+
+- `/model` 打开已配置模型的选择器，显示供应商、模型标签和稳定引用，标记当前模型与全局默认模型。
+- `/model deepseek/chat` 直接切换；参数补全来自配置目录，可按模型标签或引用匹配。选择器还可搜索供应商名称与 API 模型名。
+- 切换仅影响当前会话，下一次请求立即使用新模型，保留已有对话、工具历史和权限规则。全局默认模型在 `/settings` 中修改。
+- 已绑定保存文件的会话会同步保存所选模型引用；恢复时原模型已删除则使用全局默认并提示。旧会话没有引用时也使用默认模型。
+- 正在响应、运行工具或压缩上下文时不能切换。解析配置、创建连接适配器或保存会话失败时保留原模型；切换不额外发起 API 探测请求。
+
+模型的 `display_name` 只用于界面；未填写时显示 `model_name (供应商名称)`。输入稳定引用可区分同名模型。
 
 ### 模式可见性
 

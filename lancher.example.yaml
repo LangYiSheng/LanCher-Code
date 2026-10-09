@@ -1,15 +1,44 @@
-provider:
-  # 可选: openai | claude
-  protocol: openai
-  model: gpt-4.1-mini
-  base_url: https://api.openai.com/v1
-  api_key: ${OPENAI_API_KEY}
-  timeout_seconds: 60
-  context_window: 128000
+# 供应商和模型的 ID 创建后保持稳定，显示名称可以随时修改。
+providers:
+  deepseek:
+    name: DeepSeek
+    # 可选: openai | claude（界面显示为 Anthropic）
+    protocol: openai
+    base_url: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+    timeout_seconds: 60
+    models:
+      chat:
+        model_name: deepseek-chat
+        display_name: 日常编程
+        # 未填写的连接参数继承供应商。
+      reasoner:
+        model_name: deepseek-reasoner
+        # 未填显示名时显示 deepseek-reasoner (DeepSeek)。
+        timeout_seconds: 120
+  gateway:
+    name: 自定义网关
+    protocol: openai
+    base_url: https://your-gateway.example/v1
+    api_key: ${GATEWAY_API_KEY}
+    models:
+      main:
+        model_name: your-openai-compatible-model
+        context_window: 128000
+      anthropic:
+        model_name: your-anthropic-compatible-model
+        display_name: 网关 Anthropic 模型
+        # 每个字段可以单独覆盖，删除该字段或写 null 即恢复继承。
+        protocol: claude
+        base_url: https://your-anthropic-gateway.example/v1
+        api_key: ${ANTHROPIC_GATEWAY_API_KEY}
+        context_window: 200000
+        thinking:
+          enabled: false
+          budget_tokens: 2048
 
-  thinking:
-    enabled: false
-    budget_tokens: 2048
+# 新会话默认主模型；/model 切换当前会话不会修改这里。
+default_model: deepseek/chat
 
 ui:
   show_timestamps: false

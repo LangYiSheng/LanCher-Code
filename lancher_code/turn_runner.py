@@ -1,31 +1,38 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import os
+from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from uuid import uuid4
 
 from lancher_code.context_management import AUTOMATIC_FAILURE_LIMIT, EMERGENCY_MARGIN, automatic_threshold
 from lancher_code.errors import (
+    ConfigError,
     ContextCompactionError,
     LanCherError,
     ProviderPromptTooLongError,
     ToolCallParseError,
 )
-from lancher_code.logging_system import get_logger
+from lancher_code.logging_system import get_logger, register_sensitive_values
+from lancher_code.model_catalog import iter_model_refs, model_display_name, resolve_model
 from lancher_code.models import (
+    AppConfig,
     CancellationToken,
     ChatRequest,
     ContextCompactionResult,
     MessageUsage,
     PermissionRequest,
     PermissionResolution,
+    ProviderConfig,
     RuntimeMode,
     ToolCall,
     ToolExecutionResult,
     TurnEvent,
 )
 from lancher_code.providers.base import ChatProvider
+from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
 from lancher_code.tool_call_parser import ToolCallAssembler
 from lancher_code.tools.core.executor import ToolExecutor
@@ -76,6 +83,108 @@ class TurnRunner:
         self._max_tool_loops = max_tool_loops
         self._unknown_tool_streak_limit = unknown_tool_streak_limit
         self._active_turn: _ActiveTurn | None = None
+        self._manual_compaction = False
+        self._model_config: AppConfig | None = None
+        self._provider_factory: Callable[[ProviderConfig], ChatProvider] = create_provider
+        self._model_notice = ""
+
+    def configure_models(
+        self,
+        config: AppConfig,
+        provider_factory: Callable[[ProviderConfig], ChatProvider] = create_provider,
+    ) -> None:
+        """绑定启动时的模型目录，复用应用已经创建的 provider。"""
+        self._ensure_model_idle()
+        snapshot = deepcopy(config)
+        resolved = resolve_model(snapshot)
+        self._register_model_secrets(snapshot)
+        self._session.set_model(resolved, snapshot.default_model, initial=True)
+        self._model_config = snapshot
+        self._provider_factory = provider_factory
+        self._model_notice = ""
+
+    @property
+    def model_config(self) -> AppConfig | None:
+        return self._model_config
+
+    def _require_model_config(self) -> AppConfig:
+        if self._model_config is None:
+            raise ConfigError("尚未配置模型目录。")
+        return self._model_config
+
+    @staticmethod
+    def _register_model_secrets(config: AppConfig) -> None:
+        values: list[str] = []
+        for provider in config.providers.values():
+            candidates = [provider.api_key, *(model.api_key for model in provider.models.values())]
+            for candidate in candidates:
+                if isinstance(candidate, str):
+                    values.extend((candidate, os.path.expandvars(candidate).strip()))
+        register_sensitive_values(values)
+
+    @property
+    def model_ref(self) -> str | None:
+        return self._session.selected_model_ref
+
+    @property
+    def model_notice(self) -> str:
+        return self._model_notice
+
+    def _ensure_model_idle(self) -> None:
+        if self.has_active_turn or self._manual_compaction:
+            raise ConfigError("模型正在响应或压缩上下文，请等待完成后再切换模型。")
+
+    def _prepare_model(self, config: AppConfig, model_ref: str) -> tuple[ProviderConfig, ChatProvider]:
+        resolved = resolve_model(config, model_ref)
+        # 工厂创建失败时也可能记录错误，必须提前注册已经解析的密钥。
+        register_sensitive_values([resolved.api_key])
+        return resolved, self._provider_factory(resolved)
+
+    def switch_model(self, model_ref: str) -> None:
+        self._ensure_model_idle()
+        resolved, provider = self._prepare_model(self._require_model_config(), model_ref)
+        self._session.set_model(resolved, model_ref)
+        self._provider = provider
+        self._model_notice = ""
+
+    def reload_models(self, config: AppConfig) -> bool:
+        """热更新目录；修改默认值不会覆盖会话中已经选择的模型。"""
+        self._ensure_model_idle()
+        snapshot = deepcopy(config)
+        self._register_model_secrets(snapshot)
+        resolve_model(snapshot)
+        fallback = self.model_ref not in iter_model_refs(snapshot)
+        target = snapshot.default_model if fallback else self.model_ref
+        assert target is not None
+        resolved = resolve_model(snapshot, target)
+        if target != self.model_ref or resolved != self._session.provider_config:
+            resolved, provider = self._prepare_model(snapshot, target)
+            self._session.set_model(resolved, target)
+            self._provider = provider
+        self._model_config = snapshot
+        self._model_notice = (
+            f"当前模型已被删除，已切换到默认模型：{model_display_name(snapshot, target)}。"
+            if fallback else ""
+        )
+        return fallback
+
+    def resume_session(self, name: str, *, force: bool = False) -> int:
+        self._ensure_model_idle()
+        saved_ref = self._session.read_session_model_ref(name, force=force)
+        config = self._require_model_config()
+        target = saved_ref if saved_ref in iter_model_refs(config) else config.default_model
+        resolved, provider = self._prepare_model(config, target)
+        permission_count = self._session.resume_session(
+            name, force=force, resolved_model=(resolved, target)
+        )
+        self._provider = provider
+        if saved_ref is None:
+            self._model_notice = f"旧会话未记录模型，已使用默认模型：{model_display_name(config, target)}。"
+        elif saved_ref != target:
+            self._model_notice = f"会话原模型已不存在，已使用默认模型：{model_display_name(config, target)}。"
+        else:
+            self._model_notice = ""
+        return permission_count
 
     def set_mode(self, mode: RuntimeMode) -> TurnEvent:
         self._session.set_runtime_mode(mode)
@@ -112,22 +221,27 @@ class TurnRunner:
         return self._active_turn is not None
 
     async def compact_context(self) -> ContextCompactionResult:
-        if self.has_active_turn:
+        if self.has_active_turn or self._manual_compaction:
             raise ContextCompactionError("模型正在响应，暂时不能压缩上下文。")
-        visible_tools = self._tool_registry.list_definitions(
-            discovered_names=set(),
-            mode=self._session.runtime_mode,
-        )
-        return await self._session.compact_context(
-            provider=self._provider,
-            visible_tools=visible_tools,
-            deferred_tool_groups=self._tool_registry.list_deferred_index(
-                mode=self._session.runtime_mode
-            ),
-            persist=True,
-        )
+        self._manual_compaction = True
+        try:
+            visible_tools = self._tool_registry.list_definitions(
+                discovered_names=set(),
+                mode=self._session.runtime_mode,
+            )
+            return await self._session.compact_context(
+                provider=self._provider,
+                visible_tools=visible_tools,
+                deferred_tool_groups=self._tool_registry.list_deferred_index(
+                    mode=self._session.runtime_mode
+                ),
+                persist=True,
+            )
+        finally:
+            self._manual_compaction = False
 
     async def run_user_turn(self, text: str) -> AsyncIterator[TurnEvent]:
+        self._ensure_model_idle()
         queue: asyncio.Queue[TurnEvent | object] = asyncio.Queue()
         cancellation_token = CancellationToken()
         active_turn = _ActiveTurn(
@@ -160,6 +274,7 @@ class TurnRunner:
         loop_count = 0
         unknown_tool_streak = 0
         discovered_tool_names: set[str] = set()
+        pending_tool_calls: list[ToolCall] = []
 
         try:
             user_message = self._session.create_user_message(text)
@@ -380,6 +495,7 @@ class TurnRunner:
                         self._session.clear_message_content(assistant_message.id)
 
                     self._session.append_assistant_tool_calls(tool_calls)
+                    pending_tool_calls = list(tool_calls)
                     self._session.append_trace_tool_calls(assistant_message.id, tool_calls)
                     for call in tool_calls:
                         await self._emit(
@@ -418,6 +534,8 @@ class TurnRunner:
                             )
                         self._session.record_read_file_result(result)
                     self._session.append_tool_results(results)
+                    recorded_ids = {result.call_id for result in results}
+                    pending_tool_calls = [call for call in pending_tool_calls if call.call_id not in recorded_ids]
                     self._session.append_trace_tool_results(assistant_message.id, results)
                     for result in results:
                         await self._emit(
@@ -452,6 +570,7 @@ class TurnRunner:
         except asyncio.CancelledError:
             cancellation_token.cancel()
             if assistant_message is not None:
+                self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮已取消")
                 self._session.append_trace_notice(assistant_message.id, "本轮已取消。")
                 message = self._session.cancel_message(assistant_message.id)
                 await self._emit(
@@ -466,6 +585,7 @@ class TurnRunner:
             return
         except LanCherError as exc:
             if assistant_message is not None:
+                self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮异常中断")
                 self._session.append_trace_notice(assistant_message.id, exc.user_message)
                 message = self._session.fail_message(assistant_message.id, exc.user_message)
                 await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=exc.user_message))
@@ -473,6 +593,7 @@ class TurnRunner:
             logger.exception("event=turn_failed_unexpected exception_type=%s", type(exc).__name__)
             error_text = f"发生未预期异常: {exc}"
             if assistant_message is not None:
+                self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮异常中断")
                 self._session.append_trace_notice(assistant_message.id, error_text)
                 message = self._session.fail_message(assistant_message.id, error_text)
                 await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
@@ -483,6 +604,27 @@ class TurnRunner:
             if auto_save_error:
                 logger.error("event=session_auto_save_failed error=%s", auto_save_error)
             await queue.put(_QUEUE_END)
+
+    def _close_pending_tool_calls(self, message_id: str, pending: list[ToolCall], reason: str) -> None:
+        if not pending:
+            return
+        # 仅补齐尚未记录结果的调用，不能把中断误报为工具完全没有执行。
+        message = f"{reason}，未获得此工具调用的完整结果。操作可能已部分执行，请先检查当前状态，勿直接重复执行。"
+        results = [
+            ToolExecutionResult(
+                call_id=call.call_id,
+                tool_name=call.tool_name,
+                content=message,
+                is_error=True,
+                summary="工具结果未完成",
+                error_code="tool_result_interrupted",
+                error_message=message,
+            )
+            for call in pending
+        ]
+        self._session.append_tool_results(results)
+        pending.clear()
+        self._session.append_trace_tool_results(message_id, results)
 
     async def _stream_request(
         self,

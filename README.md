@@ -11,7 +11,8 @@
 ## 当前能力
 
 - 终端内多轮对话，支持流式输出。
-- 支持 `OpenAI` 与 `Claude` 两类协议后端。
+- 支持配置多个自定义供应商，每个供应商可添加多个模型；兼容 `OpenAI` 与 `Anthropic` 两类协议。
+- 支持供应商公共连接参数、模型逐字段覆盖、默认主模型，以及聊天中通过 `/model` 切换。
 - 内置工具：`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`bash`、`write_plan_file`。
 - 支持 ReAct 式多轮工具循环、工具轨迹展示、Token 用量展示。
 - 支持 `Plan Mode`、`/do` 恢复、`/mode` 模式切换。
@@ -45,10 +46,10 @@ python -m lancher_code
 ~/.lancher/lancher.yaml
 ```
 
-首次启动如果不存在该文件，会自动进入 Textual 引导界面，要求填写：
+首次启动如果不存在该文件，会自动进入 Textual 引导界面，创建第一个供应商和默认模型，要求填写：
 
-- `protocol`
-- `model`
+- 供应商名称和 `protocol`（`openai` / `claude`，界面显示 Anthropic）
+- API 模型名称 `model_name`，以及可选显示名称 `display_name`
 - `base_url`
 - `api_key`
 
@@ -57,6 +58,10 @@ python -m lancher_code
 ```text
 lancher.example.yaml
 ```
+
+之后用 `/settings` 管理供应商及模型，选择新会话的默认主模型。模型默认继承供应商的协议、Base URL、API Key、超时，也可以逐项覆盖。显示名称不影响 API 调用；未填写时显示 `model_name (供应商名称)`。
+
+配置采用 `providers` 目录和 `default_model: 供应商ID/模型ID`，详见 [配置说明](docs/configuration.md)。原有单 `provider` 配置仍能读取；第一次保存新格式前自动备份为 `lancher.yaml.bak`。环境变量引用和继承关系会保留。
 
 ### 运行时配置
 
@@ -110,6 +115,12 @@ rules:
   退出 Plan Mode，恢复到进入 `plan` 前的最近一个非 `plan` 模式。
 - `/mode <default|plan|acceptEdits|bypass>`
   直接切换权限模式。
+- `/model [供应商ID/模型ID]`
+  打开模型选择器，或直接切换当前会话的主模型；保留对话历史，不修改全局默认值。
+- `/settings`
+  管理供应商、模型、MCP 和权限。模型配置保存后立即生效，MCP 修改需重启。
+- `/session <list|save|remove|rename|resume> [名称]`
+  管理项目会话；保存与恢复会同时记住所选模型引用。
 - `/exit`
   退出当前会话。
 

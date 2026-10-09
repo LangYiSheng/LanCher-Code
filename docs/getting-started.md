@@ -60,11 +60,12 @@ python main.py          # 仓库根入口（依赖 main.py）
 
 需要填写：
 
-- **提供商协议**：`OpenAI` 或 `Claude`
-- **模型名称**：例如 `gpt-4.1-mini` 或 `claude-sonnet`
+- **供应商名称**：例如 DeepSeek 或自己的网关名称
+- **提供商协议**：`OpenAI` 或 `Anthropic`（配置中的值是 `claude`）
+- **API 模型名称**：例如 `gpt-4.1-mini` 或 `claude-sonnet`，可另填仅用于界面的显示名称
 - **Base URL**：切换协议时会自动填入对应官方地址，可改为你自己的网关地址
 - **API Key**：模型供应商的密钥（输入时隐藏显示）
-- 高级选项（可折叠展开）：请求超时秒数（默认 60）、Claude thinking 开关与 `budget_tokens`
+- 高级选项（可折叠展开）：请求超时秒数（默认 60）、Anthropic thinking 开关与 `budget_tokens`
 
 点击「保存并启动」后，配置写入 `~/.lancher/lancher.yaml`，同时自动创建 `~/.lancher/mcp.yaml` 模板文件。之后正常进入聊天界面。
 
@@ -81,13 +82,18 @@ python main.py          # 仓库根入口（依赖 main.py）
 结构参考仓库中的 `lancher.example.yaml`（该文件不含真实密钥）：
 
 ```yaml
-provider:
-  protocol: openai            # openai | claude
-  model: gpt-4.1-mini
-  base_url: https://api.openai.com/v1
-  api_key: ${OPENAI_API_KEY}  # 支持 ${ENV_VAR} 环境变量展开
-  timeout_seconds: 60
-  context_window: 128000
+providers:
+  openai:
+    name: OpenAI
+    protocol: openai         # openai | claude
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}
+    timeout_seconds: 60
+    models:
+      mini:
+        model_name: gpt-4.1-mini
+        context_window: 128000
+default_model: openai/mini
 ui:
   show_timestamps: false
   show_thinking_status: true
@@ -98,7 +104,7 @@ runtime:
   permission_mode: default
 ```
 
-完整配置项说明见 [configuration.md](configuration.md)。
+完整配置项说明见 [configuration.md](configuration.md)。用 `/settings` 增加供应商及模型，用 `/model` 在当前对话中切换。旧单 `provider` 配置无需手动迁移，首次保存会备份后升级。
 
 > 仓库根目录的 `lancher.yaml` 是本地运行配置（已被 `.gitignore` 忽略），里面可能包含真实 API Key，**不要**把它当作示例或提交到版本库。
 

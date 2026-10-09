@@ -13,8 +13,9 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static
 
-from lancher_code.models import PermissionRule, ProviderConfig, ThinkingConfig
+from lancher_code.models import AppConfig, PermissionRule
 from lancher_code.settings_service import SettingsError, SettingsService, SettingsSnapshot
+from lancher_code.tui_views.model_settings import ModelSettingsEditor
 
 
 TAB_IDS = ("model", "mcp", "project-permissions", "global-permissions")
@@ -24,6 +25,7 @@ TAB_IDS = ("model", "mcp", "project-permissions", "global-permissions")
 class SettingsResult:
     saved: bool
     restart_required: bool = False
+    config: AppConfig | None = None
 
 
 class DiscardChangesScreen(ModalScreen[bool]):
@@ -75,7 +77,8 @@ class SettingsScreen(Screen[SettingsResult]):
         content-align: center middle;
     }
     .settings-tab:hover, .settings-tab:focus { background: transparent; color: #f2f2f2; text-style: bold; }
-    .settings-tab.-active { color: #73b6ff; background: transparent; border-bottom: solid #73b6ff; text-style: bold; }
+    .settings-tab.-selected { color: #73b6ff; background: transparent; text-style: bold underline; }
+    .settings-tab.-active { border: none; tint: transparent; }
     #settings-error { height: auto; min-height: 1; color: #ff7b72; }
     #settings-pages { height: 1fr; }
     .settings-page { width: 100%; height: 100%; padding: 1 0 0 0; display: none; }
@@ -124,10 +127,17 @@ class SettingsScreen(Screen[SettingsResult]):
     .table-region { width: 1fr; }
     #mcp-layer-note, .scope-note { color: #7f9ab8; height: auto; margin: 1 0; }
     #restart-note { color: #7f9ab8; height: auto; }
-    #settings-root.-narrow { padding: 1; }
+    #settings-root.-narrow { padding: 0 1; }
+    #settings-root.-narrow #settings-title { height: 1; }
+    #settings-root.-narrow #settings-tabs { height: 1; border: none; }
+    #settings-root.-narrow .settings-tab { min-width: 0; padding: 0; }
+    #settings-root.-narrow #settings-actions { height: 3; border: none; }
+    #settings-root.-narrow #restart-note { display: none; }
     #settings-root.-narrow .split { layout: vertical; overflow-y: auto; }
     #settings-root.-narrow .table-region, #settings-root.-narrow .editor { width: 100%; min-width: 0; height: auto; padding-left: 0; }
     #settings-root.-narrow DataTable { height: 10; }
+    #settings-root.-narrow ModelSettingsEditor .catalog DataTable { height: 5; min-height: 3; }
+    #settings-root.-narrow ModelSettingsEditor > .field { margin-bottom: 0; }
     """
 
     class TabChosen(Message):
@@ -157,20 +167,13 @@ class SettingsScreen(Screen[SettingsResult]):
                 yield from self._compose_mcp()
                 yield from self._compose_permissions("project", "project-permissions")
                 yield from self._compose_permissions("user", "global-permissions")
-            yield Static("模型与 MCP 的修改将在重启 LanCher Code 后生效。", id="restart-note")
+            yield Static("模型修改从下一次请求生效；默认模型用于新会话。MCP 修改需要重启。", id="restart-note")
             with Horizontal(id="settings-actions"):
                 yield Button("取消", id="settings-cancel")
                 yield Button("保存", variant="primary", id="settings-save")
 
     def _compose_model(self) -> ComposeResult:
-        with VerticalScroll(id="page-model", classes="settings-page"):
-            yield from self._field("提供商协议", Select((("OpenAI", "openai"), ("Claude", "claude")), allow_blank=False, id="model-protocol"))
-            yield from self._field("模型名称", Input(id="model-name"))
-            yield from self._field("Base URL", Input(id="model-base-url"))
-            yield from self._field("API Key（留空不会清除原值）", Input(password=True, id="model-api-key"))
-            yield from self._field("请求超时（秒）", Input(id="model-timeout", type="number"))
-            yield Checkbox("启用 Claude thinking", id="model-thinking")
-            yield from self._field("Thinking budget tokens（可选）", Input(id="model-thinking-budget", type="integer"))
+        yield ModelSettingsEditor(self._show_error)
 
     def _compose_mcp(self) -> ComposeResult:
         with Vertical(id="page-mcp", classes="settings-page"):
@@ -237,17 +240,11 @@ class SettingsScreen(Screen[SettingsResult]):
 
     def _refresh_responsive_layout(self) -> None:
         self.query_one("#settings-root").set_class(self.size.width < 75, "-narrow")
+        self.query_one(ModelSettingsEditor).set_class(self.size.width < 75, "-narrow")
 
     def _load_widgets(self) -> None:
         assert self.snapshot is not None
-        provider = self.snapshot.config.provider
-        self.query_one("#model-protocol", Select).value = provider.protocol
-        self.query_one("#model-name", Input).value = provider.model
-        self.query_one("#model-base-url", Input).value = provider.base_url
-        self.query_one("#model-api-key", Input).value = ""
-        self.query_one("#model-timeout", Input).value = str(provider.timeout_seconds)
-        self.query_one("#model-thinking", Checkbox).value = bool(provider.thinking and provider.thinking.enabled)
-        self.query_one("#model-thinking-budget", Input).value = str(provider.thinking.budget_tokens or "") if provider.thinking else ""
+        self.query_one(ModelSettingsEditor).load_config(self.snapshot.config)
         self._refresh_mcp_table()
         self._refresh_rules_table("project")
         self._refresh_rules_table("user")
@@ -260,7 +257,7 @@ class SettingsScreen(Screen[SettingsResult]):
         self._active_tab = tab_id
         for candidate in TAB_IDS:
             self.query_one(f"#page-{candidate}").set_class(candidate == tab_id, "-active")
-            self.query_one(f"#tab-{candidate}").set_class(candidate == tab_id, "-active")
+            self.query_one(f"#tab-{candidate}").set_class(candidate == tab_id, "-selected")
 
     def action_previous_tab(self) -> None:
         index = TAB_IDS.index(self._active_tab)
@@ -433,26 +430,14 @@ class SettingsScreen(Screen[SettingsResult]):
                 except Exception:
                     pass
             return
-        self.dismiss(SettingsResult(saved=True, restart_required=True))
+        mcp_changed = self._original is not None and (
+            self.snapshot.global_mcp != self._original.global_mcp
+            or self.snapshot.project_mcp != self._original.project_mcp
+        )
+        self.dismiss(SettingsResult(saved=True, restart_required=mcp_changed, config=self.snapshot.config))
 
     def _collect_model(self) -> None:
-        assert self.snapshot is not None
-        old = self.snapshot.config.provider
-        protocol = self.query_one("#model-protocol", Select).value
-        api_key = self.query_one("#model-api-key", Input).value.strip() or old.api_key
-        timeout = float(self.query_one("#model-timeout", Input).value)
-        enabled = self.query_one("#model-thinking", Checkbox).value
-        budget_text = self.query_one("#model-thinking-budget", Input).value.strip()
-        thinking = ThinkingConfig(enabled=enabled, budget_tokens=int(budget_text) if budget_text else None) if protocol == "claude" else None
-        self.snapshot.config.provider = ProviderConfig(
-            protocol=protocol,  # type: ignore[arg-type]
-            model=self.query_one("#model-name", Input).value.strip(),
-            base_url=self.query_one("#model-base-url", Input).value.strip(),
-            api_key=api_key,
-            timeout_seconds=timeout,
-            thinking=thinking,
-            context_window=self.snapshot.config.provider.context_window,
-        )
+        self.query_one(ModelSettingsEditor).collect()
 
     @on(Button.Pressed, "#settings-cancel")
     def cancel_pressed(self) -> None:

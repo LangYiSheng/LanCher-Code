@@ -116,7 +116,7 @@ class OpenAIProvider(BaseChatProvider):
         payload: dict[str, object] = {
             "model": request.model,
             "messages": [self._serialize_system_message(text) for text in request.system]
-            + [self._serialize_message(message) for message in request.messages],
+            + [item for message in request.messages for item in self._serialize_messages(message)],
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -163,6 +163,16 @@ class OpenAIProvider(BaseChatProvider):
             "role": message.role,
             "content": self._serialize_text_content(message.blocks),
         }
+
+    def _serialize_messages(self, message) -> list[dict[str, object]]:
+        if message.role == "tool":
+            # 统一历史会把并行结果放在同一条消息，OpenAI 要求逐条回复每个调用。
+            return [
+                {"role": "tool", "tool_call_id": block.call_id, "content": block.text}
+                for block in message.blocks
+                if block.kind == "tool_result"
+            ]
+        return [self._serialize_message(message)]
 
     @staticmethod
     def _serialize_text_content(blocks) -> str | list[dict[str, str]]:

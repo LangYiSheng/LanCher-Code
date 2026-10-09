@@ -73,8 +73,10 @@ class SessionController:
         plan_file_path: Path | None = None,
         initial_runtime_mode: RuntimeMode = "default",
         permission_storage: PermissionStorage | None = None,
+        selected_model_ref: str | None = None,
     ) -> None:
         self._provider_config = provider_config
+        self._selected_model_ref = selected_model_ref
         self._state = state or SessionState()
         self._cwd = (cwd or Path.cwd()).resolve()
         self._current_date = current_date or datetime.now().astimezone().date()
@@ -122,6 +124,42 @@ class SessionController:
     @property
     def context_window(self) -> int:
         return self._provider_config.context_window
+
+    @property
+    def provider_config(self) -> ProviderConfig:
+        return self._provider_config
+
+    @property
+    def selected_model_ref(self) -> str | None:
+        return self._selected_model_ref
+
+    def set_model(self, config: ProviderConfig, model_ref: str, *, initial: bool = False) -> None:
+        """保留会话内容，原子更新模型与依赖模型的上下文校准。"""
+        previous_config = self._provider_config
+        previous_ref = self._selected_model_ref
+        previous_context = copy.deepcopy(self.context_state)
+        previous_dirty = self._dirty
+        self._provider_config = config
+        self._selected_model_ref = model_ref
+        self._reset_model_context(self.context_state)
+        if initial:
+            return
+        self._mark_dirty()
+        if self._active_session_name is not None:
+            try:
+                self._write_active_session()
+            except Exception:
+                self._provider_config = previous_config
+                self._selected_model_ref = previous_ref
+                self._state.context_management = previous_context
+                self._dirty = previous_dirty
+                raise
+
+    @staticmethod
+    def _reset_model_context(context: ContextManagementState) -> None:
+        context.usage_anchor = None
+        context.automatic_failure_count = 0
+        context.automatic_compaction_disabled = False
 
     def set_runtime_mode(self, mode: RuntimeMode) -> RuntimeMode:
         previous_mode = self._state.runtime_mode
@@ -475,14 +513,43 @@ class SessionController:
             self._active_session_name = new_normalized
             self._write_active_session()
 
-    def resume_session(self, name: str, *, force: bool = False) -> int:
+    def read_session_model_ref(self, name: str, *, force: bool = False) -> str | None:
+        """恢复前只读校验会话，以便先准备模型而不破坏当前会话。"""
         normalized = self._session_store.validate_name(name)
+        self._check_resume_allowed(force)
+        records = self._session_store.load(normalized)
+        self._decode_records(records, normalized)
+        return self._decode_model_ref(records[0])
+
+    def _check_resume_allowed(self, force: bool) -> None:
         if self._dirty and not force:
             raise SessionStoreError(
                 "当前对话存在未保存改动；请先保存，或使用 /session resume <名称> --force。"
             )
+
+    @staticmethod
+    def _decode_model_ref(metadata: dict[str, object]) -> str | None:
+        model_ref = metadata.get("model_ref")
+        if model_ref is not None and (not isinstance(model_ref, str) or not model_ref.strip()):
+            raise SessionStoreError("会话的 model_ref 必须是非空字符串。")
+        return model_ref
+
+    def resume_session(
+        self,
+        name: str,
+        *,
+        force: bool = False,
+        resolved_model: tuple[ProviderConfig, str] | None = None,
+    ) -> int:
+        normalized = self._session_store.validate_name(name)
+        self._check_resume_allowed(force)
         records = self._session_store.load(normalized)
         state, transcript, created_at, permission_rules = self._decode_records(records, normalized)
+        model_ref = self._decode_model_ref(records[0])
+        if resolved_model is not None:
+            self._reset_model_context(state.context_management)
+        elif model_ref != self._selected_model_ref:
+            self._reset_model_context(state.context_management)
         for replacement in state.context_management.replacements.values():
             path = (self._cwd / replacement.relative_path).resolve()
             if self._cwd not in path.parents or not path.is_file():
@@ -497,6 +564,9 @@ class SessionController:
         self._transcript = transcript
         self._active_session_name = normalized
         self._session_created_at = created_at
+        self._selected_model_ref = model_ref
+        if resolved_model is not None:
+            self._provider_config, self._selected_model_ref = resolved_model
         self._dirty = False
         return len(permission_rules)
 
@@ -538,6 +608,8 @@ class SessionController:
                 },
             },
         ]
+        if self._selected_model_ref is not None:
+            records[0]["model_ref"] = self._selected_model_ref
         for message in self._state.messages:
             data = asdict(message)
             data["timestamp"] = message.timestamp.isoformat()

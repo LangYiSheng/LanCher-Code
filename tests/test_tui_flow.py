@@ -364,6 +364,7 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
             "session",
             "compact",
             "settings",
+            "model",
             "exit",
         ]
 

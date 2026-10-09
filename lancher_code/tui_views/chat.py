@@ -8,6 +8,8 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static, TextArea
 
+from lancher_code.errors import LanCherError
+from lancher_code.model_catalog import iter_model_refs, model_display_name
 from lancher_code.models import (
     MessageUsage,
     PermissionRequest,
@@ -44,6 +46,7 @@ from lancher_code.tui_views.composer import (
 from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.tui_views.settings import SettingsResult, SettingsScreen
+from lancher_code.tui_views.model_picker import ModelPickerScreen
 from lancher_code.turn_runner import TurnRunner
 from lancher_code.tools.core.registry import ToolRegistry
 
@@ -418,7 +421,7 @@ class LanCherTextualApp(App[int]):
                     )
                 yield CommandHintBar()
             with Horizontal(id="status-bar"):
-                yield Static(id="status-left")
+                yield Static(id="status-left", markup=False)
                 yield Static(id="status-center")
                 yield Static(id="status-right")
 
@@ -615,6 +618,9 @@ class LanCherTextualApp(App[int]):
     def _status_left_text(self) -> str:
         mode = self._session_controller.runtime_mode
         if mode == "default":
+            config = getattr(self._turn_runner, "model_config", None)
+            if config is not None and self._turn_runner.model_ref:
+                return model_display_name(config, self._turn_runner.model_ref)
             api_type = "OpenAI" if self._provider_config.protocol == "openai" else "Claude"
             return f"{self._provider_config.model} ({api_type})"
         return MODE_STATUS_LABELS[mode]
@@ -729,6 +735,8 @@ class LanCherTextualApp(App[int]):
                     mode=self._session_controller.runtime_mode,
                     session_names=tuple(item.name for item in sessions),
                     active_session_name=self._session_controller.active_session_name,
+                    model_choices=self._model_completion_choices(),
+                    active_model_ref=getattr(self._turn_runner, "model_ref", None),
                 )
             )
             if cursor_at_end and not composer.should_suppress_slash_menu()
@@ -849,6 +857,21 @@ class LanCherTextualApp(App[int]):
             self._refresh_context_usage()
             return None
 
+        if command_name == "model":
+            if self._is_streaming or self._turn_runner.has_active_turn:
+                self.notify("请等待当前轮次结束后再切换模型。", title="模型", severity="warning")
+                return None
+            config = getattr(self._turn_runner, "model_config", None)
+            if config is None:
+                self.notify("模型目录尚未加载。", title="模型", severity="warning")
+                return None
+            ref = arguments_text.strip()
+            if ref:
+                self._handle_model_selected(ref)
+            else:
+                self.push_screen(ModelPickerScreen(config, self._turn_runner.model_ref), self._handle_model_selected)
+            return None
+
         if command_name == "settings":
             if self._settings_service is None:
                 self._status_hint = "Settings unavailable"
@@ -938,16 +961,20 @@ class LanCherTextualApp(App[int]):
                 force = len(arguments) == 3 and arguments[2] == "--force"
                 if len(arguments) == 3 and not force:
                     raise SessionStoreError("resume 的第三个参数只能是 --force。")
-                permission_count = self._session_controller.resume_session(arguments[1], force=force)
+                if getattr(self._turn_runner, "model_config", None) is not None:
+                    permission_count = self._turn_runner.resume_session(arguments[1], force=force)
+                else:
+                    permission_count = self._session_controller.resume_session(arguments[1], force=force)
                 await self._restore_session_view()
+                notice = getattr(self._turn_runner, "model_notice", "")
                 self.notify(
-                    f"已恢复会话：{arguments[1]}（恢复 {permission_count} 条会话权限）",
+                    f"已恢复会话：{arguments[1]}（恢复 {permission_count} 条会话权限）" + (f"\n{notice}" if notice else ""),
                     title="Session",
                 )
                 return
 
             raise SessionStoreError("参数不正确，请查看 /session 的命令提示。")
-        except SessionStoreError as exc:
+        except (SessionStoreError, LanCherError, ValueError, RuntimeError) as exc:
             self.notify(str(exc), title="Session", severity="error", timeout=10)
 
     async def _restore_session_view(self) -> None:
@@ -969,11 +996,44 @@ class LanCherTextualApp(App[int]):
 
     def _handle_settings_result(self, result: SettingsResult | None) -> None:
         if result is not None and result.saved:
-            self._status_hint = "Settings saved · restart for model/MCP"
+            try:
+                if result.config is not None:
+                    fallback = self._turn_runner.reload_models(result.config)
+                    if fallback:
+                        self.notify(self._turn_runner.model_notice, title="模型")
+            except (LanCherError, ValueError, RuntimeError, OSError) as exc:
+                self.notify(f"设置已保存，当前模型更新失败：{exc}", title="模型", severity="error", timeout=10)
+                self._status_hint = "模型更新失败"
+            else:
+                self._status_hint = "设置已保存 · MCP 重启后生效" if result.restart_required else "设置已保存"
         else:
             self._status_hint = "Ready"
         self._refresh_status_bar()
+        self._refresh_context_usage()
+        self.call_later(self._refresh_command_ui)
         self.query_one("#composer-input", ComposerTextArea).focus()
+
+    def _model_completion_choices(self) -> tuple[tuple[str, str], ...]:
+        config = getattr(self._turn_runner, "model_config", None)
+        if config is None:
+            return ()
+        return tuple((ref, model_display_name(config, ref)) for ref in iter_model_refs(config))
+
+    def _handle_model_selected(self, model_ref: str | None) -> None:
+        if model_ref is not None:
+            try:
+                self._turn_runner.switch_model(model_ref)
+            except (LanCherError, ValueError, RuntimeError, OSError) as exc:
+                self.notify(str(exc), title="切换模型失败", severity="error", timeout=10)
+            else:
+                config = self._turn_runner.model_config
+                label = model_display_name(config, model_ref)
+                self._status_hint = "Ready"
+                self.notify(f"已切换为 {label}", title="模型")
+                self._refresh_status_bar()
+                self._refresh_context_usage()
+        self.query_one("#composer-input", ComposerTextArea).focus()
+        self.call_later(self._refresh_command_ui)
 
     def _update_composer_height(self) -> None:
         composer_input = self.query_one("#composer-input", ComposerTextArea)
