@@ -99,7 +99,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 
 | 现象 | 原因与处理 |
 |---|---|
-| `/session save` 报"会话名称已存在" | 换名称，或先 `remove` |
+| `/session save` 报"会话名称已存在" | 换名称，或加 `--force` 并确认覆盖目标 |
 | `/session resume` 报"存在未保存改动" | 当前对话未保存；先 `save` 或加 `--force` |
 | 恢复会话报"该会话不属于当前项目" | 会话文件是项目绑定的，在保存它的那个目录下恢复 |
 | 会话文件损坏（`会话文件结构无效` 等） | JSONL 被手工改动；可删除该文件（`/session remove` 或直接删 `./.lancher/session/*.jsonl`） |

@@ -40,7 +40,6 @@ TurnEventKind = Literal[
     "tool_result_received",
     "usage_updated",
     "progress_updated",
-    "mode_changed",
     "permission_request_created",
     "permission_request_resolved",
     "turn_cancelled",

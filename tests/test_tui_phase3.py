@@ -10,7 +10,7 @@ from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolDefi
 from lancher_code.session import SessionController
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
-from lancher_code.tui import CommandHintBar, ComposerTextArea, LanCherTextualApp, SlashCommandMenuItem
+from lancher_code.tui import CommandHintBar, ComposerTextArea, LanCherTextualApp, SlashCompletionMenuItem
 from lancher_code.turn_runner import TurnRunner
 
 DelayedEvent = tuple[StreamEvent, float]
@@ -88,7 +88,7 @@ async def test_plan_command_switches_mode_and_updates_placeholder(
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_slash_menu_only_shows_do_and_exit(
+async def test_plan_phase_can_select_execute_command(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
@@ -105,12 +105,12 @@ async def test_plan_mode_slash_menu_only_shows_do_and_exit(
         composer.focus()
         await pilot.pause(0.05)
 
-        visible = [item.candidate.value for item in app.query(SlashCommandMenuItem) if item.display]
+        visible = [item.candidate.value for item in app.query(SlashCompletionMenuItem) if item.display]
         assert session.runtime_mode == "plan"
         assert visible == ["do"]
 
         hint_bar = app.query_one(CommandHintBar)
-        assert "切换到执行" in str(hint_bar.render())
+        assert "保留当前审批策略" in str(hint_bar.render())
 
 
 @pytest.mark.asyncio
@@ -219,7 +219,7 @@ async def test_do_command_can_be_submitted_after_slash_menu_accepts_it(
         await pilot.press("enter")
         await pilot.pause(0.05)
 
-        assert composer.text == "/do"
+        assert composer.text == "/do "
         assert not composer.slash_menu_active
 
         await pilot.press("enter")

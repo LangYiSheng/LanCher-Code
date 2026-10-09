@@ -173,7 +173,7 @@ mcp_servers:
 
 保存逻辑（`SettingsService.save()`）：先校验整个目录与其余配置，备份旧格式，再以临时文件和逐文件原子替换方式写盘，最后更新权限规则。模型目录保存后立即可用；修改默认值不覆盖当前会话已选模型。当前模型仍存在时继续使用它，并更新其连接配置；已删除时回退新默认模型并提示。MCP 的修改仍需重启生效。
 
-聊天中使用 `/model` 打开选择器，或 `/model 供应商ID/模型ID` 直接切换。仅切换当前会话，保留历史和权限，不修改全局默认模型；已保存会话会记住所选引用。详见 [cli-and-interaction.md](cli-and-interaction.md)。
+聊天中使用 `/model` 展开模型候选项，Tab 或 Enter 填入后再次 Enter 切换，也可输入 `/model 供应商ID/模型ID`。仅切换当前会话，保留历史和权限，不修改新对话默认模型；已保存会话会记住所选引用。`/settings default-model 供应商ID/模型ID` 单独修改默认值。详见 [cli-and-interaction.md](cli-and-interaction.md)。
 
 ## 日志
 

@@ -107,7 +107,7 @@ runtime:
   permission_policy: default
 ```
 
-完整配置项说明见 [configuration.md](configuration.md)。用 `/settings` 增加供应商及模型，用 `/model` 在当前对话中切换。旧单 `provider` 配置无需手动迁移，首次保存会备份后升级。
+完整配置项说明见 [configuration.md](configuration.md)。用 `/settings open` 增加供应商及模型，用 `/model` 在命令菜单中切换本次模型；`/settings` 可直接修改界面偏好及新对话默认模型。旧单 `provider` 配置无需手动迁移，首次保存会备份后升级。
 
 > 仓库根目录的 `lancher.yaml` 是本地运行配置（已被 `.gitignore` 忽略），里面可能包含真实 API Key，**不要**把它当作示例或提交到版本库。
 

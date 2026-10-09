@@ -32,15 +32,14 @@ from lancher_code.slash_commands import (
     SlashCompletionContext,
     SlashCommandRegistry,
     create_default_slash_command_registry,
-    extract_exact_command_name,
 )
 from lancher_code.tui_views.composer import (
     CommandHintBar,
     ComposerSubmitted,
     ComposerTextArea,
-    PermissionModeCycleRequested,
-    SlashCommandChosen,
-    SlashCommandMenu,
+    WorkPhaseCycleRequested,
+    SlashCompletionChosen,
+    SlashCompletionMenu,
     SlashMenuAcceptRequested,
     SlashMenuDismissRequested,
     SlashMenuNavigateRequested,
@@ -49,6 +48,7 @@ from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.tui_views.settings import SettingsResult, SettingsScreen
 from lancher_code.tui_views.model_picker import ModelPickerScreen
+from lancher_code.tui_views.command_actions import CommandConfirmationScreen, save_command_setting
 from lancher_code.tui_views.theme import apply_theme, theme_palette
 from lancher_code.tui_views.chat_controls import (
     ChatAction, StageBar, PendingQueue, PendingInputEditor, PlanPanel,
@@ -62,7 +62,6 @@ logger = get_logger("tui.chat")
 MIN_COMPOSER_LINES = 1
 MAX_COMPOSER_LINES = 6
 COMPOSER_FRAME_HEIGHT = 1
-DEFAULT_COMMAND_HINT = ""
 DEFAULT_PLACEHOLDER = "发送一条消息"
 PLAN_PLACEHOLDER = "补充或修改计划，确认后再开始执行"
 MCP_PLACEHOLDER = "正在初始化 MCP，请稍候…"
@@ -234,7 +233,7 @@ class LanCherTextualApp(App[int]):
                 yield PlanPanel()
                 yield PendingQueue()
                 yield Vertical(id="approval-region")
-                yield SlashCommandMenu()
+                yield SlashCompletionMenu()
                 with Horizontal(id="composer"):
                     yield Static(MODE_GLYPHS["default"], id="prompt-glyph")
                     yield ComposerTextArea(
@@ -339,12 +338,12 @@ class LanCherTextualApp(App[int]):
     async def handle_slash_menu_dismiss(self) -> None:
         await self._dismiss_slash_menu()
 
-    @on(SlashCommandChosen)
-    async def handle_slash_command_chosen(self, event: SlashCommandChosen) -> None:
+    @on(SlashCompletionChosen)
+    async def handle_slash_command_chosen(self, event: SlashCompletionChosen) -> None:
         await self._accept_completion(event.candidate_key)
 
-    @on(PermissionModeCycleRequested)
-    async def handle_permission_mode_cycle_requested(self) -> None:
+    @on(WorkPhaseCycleRequested)
+    async def handle_work_phase_cycle_requested(self) -> None:
         if self._is_streaming:
             return
         phases = ("discuss", "plan", "execute")
@@ -378,22 +377,25 @@ class LanCherTextualApp(App[int]):
                 self.notify(str(exc), severity="warning")
                 return
             event.composer.clear()
+            self._close_hud_details()
             await self._refresh_command_ui()
             await self._refresh_pending_queue()
             return
 
-        slash_match = self._slash_command_registry.parse_submission(
-            text,
-            self._session_controller.runtime_mode,
-        )
+        slash_match = self._slash_command_registry.parse_submission(text)
         if slash_match is not None:
             payload = await self._execute_slash_command(slash_match.definition.name, slash_match.arguments_text)
+            if self._command_preserve_input:
+                return
             event.composer.clear()
             await self._refresh_command_ui()
             if payload is None:
                 return
             text = payload
         else:
+            if text.startswith("/"):
+                self.notify("未知命令；输入 / 查看命令列表。", severity="warning")
+                return
             event.composer.clear()
             await self._refresh_command_ui()
 
@@ -494,6 +496,10 @@ class LanCherTextualApp(App[int]):
         estimate = banner._context_usage_status.replace("上下文 ", "预计 ")
         action = getattr(self._ui_config, "busy_enter_action", "follow_up")
         enter_action = {"follow_up": "排队", "steer": "补充", "draft": "草稿"}[action] if self._is_streaming else "发送"
+        composer = self.query_one(ComposerTextArea)
+        is_command = composer.text.lstrip().startswith("/")
+        if is_command:
+            enter_action = "等待" if self._is_streaming else "填入" if composer.slash_menu_active and composer.slash_enter_accepts else "执行"
         compact_state = center_text.split(" · ", 1)[0]
         if self._pending_permissions:
             compact_state = "等待确认"
@@ -554,6 +560,7 @@ class LanCherTextualApp(App[int]):
         self.query_one("#composer-actions").set_class(self._is_streaming, "-working")
         busy_help = {"follow_up": "Enter 排下一轮", "steer": "Enter 补充当前任务", "draft": "Enter 保留草稿"}[action]
         self.query_one("#composer-help", Static).update(
+            ("本轮结束后执行 · 草稿已保留" if self._is_streaming else f"Enter {enter_action} · Tab 补全 · Esc 关闭") if is_command else
             busy_help + " · Ctrl+Enter 补充 · Ctrl+C 停止" if self._is_streaming else "Enter 发送 · Shift+Enter 换行"
         )
 
@@ -617,6 +624,8 @@ class LanCherTextualApp(App[int]):
         await widget.update_from_message(self._session_controller.get_message(message_id))
 
     async def _consume_turn_event(self, event: TurnEvent) -> None:
+        if event.kind == "user_message_created":
+            self._close_hud_details()
         chat_view = self.query_one("#chat-view", VerticalScroll)
         follow_bottom = chat_view.is_vertical_scroll_end
         self._apply_turn_event(event)
@@ -677,7 +686,7 @@ class LanCherTextualApp(App[int]):
             self.query_one(ComposerTextArea).focus()
 
     def _apply_turn_event(self, event: TurnEvent) -> None:
-        if event.kind in {"mode_changed", "phase_changed", "policy_changed"}:
+        if event.kind in {"phase_changed", "policy_changed"}:
             self._status_hint = event.progress_message or "阶段已更新"
             self._refresh_mode_chrome()
             self._refresh_composer_placeholder()
@@ -733,6 +742,10 @@ class LanCherTextualApp(App[int]):
             return
         self._details_open = not self._details_open
         self.query_one("#status-details", Static).display = self._details_open
+
+    def _close_hud_details(self) -> None:
+        self._details_open = False
+        self.query_one("#status-details", Static).display = False
 
     async def _refresh_pending_queue(self) -> None:
         await self.query_one(PendingQueue).update_items(
@@ -808,7 +821,9 @@ class LanCherTextualApp(App[int]):
         event.stop()
         button_id = event.button.id
         if button_id == "chat-model":
-            await self._execute_slash_command("model", "")
+            config = getattr(self._turn_runner, "model_config", None)
+            if config is not None and not self._is_streaming:
+                self.push_screen(ModelPickerScreen(config, self._turn_runner.model_ref), self._handle_model_selected)
         elif button_id == "chat-policy":
             self.push_screen(PermissionPolicyScreen(), self._handle_policy_selected)
         elif button_id == "chat-details":
@@ -905,7 +920,7 @@ class LanCherTextualApp(App[int]):
 
     async def _refresh_command_ui(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
-        menu = self.query_one(SlashCommandMenu)
+        menu = self.query_one(SlashCompletionMenu)
         hint_bar = self.query_one(CommandHintBar)
         composer.clear_accepted_slash_command_if_needed()
         if self._is_streaming:
@@ -913,20 +928,22 @@ class LanCherTextualApp(App[int]):
             self._slash_menu_index = 0
             composer.slash_menu_active = False
             await menu.set_candidates([], None)
-            hint_bar.set_hint("")
+            hint_bar.set_hint("本轮结束后可执行命令 · 草稿已保留" if composer.text.lstrip().startswith("/") else "")
+            self._refresh_status_bar()
             return
 
         cursor_at_end = composer.cursor_location == composer.document.end
-        sessions = self._session_controller.list_saved_sessions() if cursor_at_end else []
+        sessions = self._session_controller.list_saved_sessions() if cursor_at_end and composer.text.lstrip().startswith("/session") else []
         matches = (
             self._slash_command_registry.complete(
                 SlashCompletionContext(
                     text=composer.text,
-                    mode=self._session_controller.runtime_mode,
                     session_names=tuple(item.name for item in sessions),
                     active_session_name=self._session_controller.active_session_name,
                     model_choices=self._model_completion_choices(),
                     active_model_ref=getattr(self._turn_runner, "model_ref", None),
+                    default_model_ref=getattr(getattr(self._turn_runner, "model_config", None), "default_model", None),
+                    permission_policy=self._session_controller.permission_policy,
                 )
             )
             if cursor_at_end and not composer.should_suppress_slash_menu()
@@ -941,38 +958,53 @@ class LanCherTextualApp(App[int]):
         self._slash_menu_matches = matches
         active_key = self._current_active_completion_key()
         await menu.set_candidates(matches, active_key)
+        menu.styles.max_height = 4 if self.size.height < 24 else 7
         composer.slash_menu_active = bool(matches)
+        composer.slash_enter_accepts = not matches or not all(item.optional for item in matches)
         if matches and active_key is not None:
             active = matches[self._slash_menu_index]
-            hint_bar.set_hint(active.description)
+            hint_bar.set_hint(self._completion_hint(active))
+            self._refresh_status_bar()
             return
 
         self._slash_menu_matches = []
         self._slash_menu_index = 0
         composer.slash_menu_active = False
 
-        command_name = extract_exact_command_name(composer.text)
-        if command_name is not None:
-            command = self._slash_command_registry.get(command_name)
-            if command is not None:
-                hint_bar.set_hint(command.hint_text)
-                return
+        hint_bar.set_hint(self._slash_command_registry.hint(composer.text))
+        self._refresh_status_bar()
 
-        hint_bar.set_hint(DEFAULT_COMMAND_HINT)
+    def _completion_hint(self, candidate: SlashCompletionCandidate) -> str:
+        keys = "Enter 执行 · Tab 填入可选参数" if candidate.optional else "↑↓ 选择 · Tab/Enter 填入 · Esc 关闭"
+        detail = candidate.detail or candidate.description
+        if self.size.height < 24 and candidate.optional:
+            return candidate.description
+        if self.size.width < 64:
+            detail = candidate.display + " · " + candidate.description
+        return detail + " · " + keys
 
     async def _move_slash_menu(self, direction: int) -> None:
         if not self._slash_menu_matches:
             return
         self._slash_menu_index = (self._slash_menu_index + direction) % len(self._slash_menu_matches)
-        menu = self.query_one(SlashCommandMenu)
+        menu = self.query_one(SlashCompletionMenu)
         await menu.set_candidates(
             self._slash_menu_matches,
             self._current_active_completion_key(),
         )
+        self.query_one(CommandHintBar).set_hint(self._completion_hint(self._slash_menu_matches[self._slash_menu_index]))
 
     async def _accept_slash_menu_selection(self) -> None:
         candidate_key = self._current_active_completion_key()
         if candidate_key is None:
+            composer = self.query_one(ComposerTextArea)
+            if self._is_streaming or composer.cursor_location != composer.document.end:
+                return
+            advanced = self._slash_command_registry.advance_text(composer.text)
+            if advanced is not None:
+                composer.text = advanced
+                composer.cursor_location = composer.document.end
+                await self._refresh_command_ui()
             return
         await self._accept_completion(candidate_key)
 
@@ -999,15 +1031,10 @@ class LanCherTextualApp(App[int]):
         self._slash_menu_index = 0
         composer = self.query_one("#composer-input", ComposerTextArea)
         composer.slash_menu_active = False
-        await self.query_one(SlashCommandMenu).set_candidates([], None)
-
-        command_name = extract_exact_command_name(composer.text)
-        if command_name is not None:
-            command = self._slash_command_registry.get(command_name)
-            if command is not None:
-                self.query_one(CommandHintBar).set_hint(command.hint_text)
-                return
-        self.query_one(CommandHintBar).set_hint(DEFAULT_COMMAND_HINT)
+        composer.remember_accepted_slash_command(composer.text)
+        await self.query_one(SlashCompletionMenu).set_candidates([], None)
+        self.query_one(CommandHintBar).set_hint("菜单已关闭 · 草稿已保留")
+        self._refresh_status_bar()
 
     def _current_active_completion_key(self) -> str | None:
         if not self._slash_menu_matches:
@@ -1017,6 +1044,27 @@ class LanCherTextualApp(App[int]):
         return self._slash_menu_matches[self._slash_menu_index].key
 
     async def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
+        self._command_preserve_input = False
+        try:
+            if self._is_streaming or self._turn_runner.has_active_turn:
+                raise ValueError("当前任务结束后可执行命令；草稿已保留。")
+            self._slash_command_registry.validate(command_name, arguments_text)
+            if command_name in {"session", "model", "permissions", "settings"} and not arguments_text.strip():
+                composer = self.query_one(ComposerTextArea)
+                composer.text = f"/{command_name} "
+                composer.cursor_location = composer.document.end
+                composer.remember_accepted_slash_command("")
+                self._command_preserve_input = True
+                await self._refresh_command_ui()
+                composer.focus()
+                return None
+            return await self._dispatch_slash_command(command_name, arguments_text)
+        except (LanCherError, ValueError, RuntimeError, OSError) as exc:
+            self._command_preserve_input = True
+            self.notify(str(exc), title="命令未执行", severity="warning", timeout=10)
+            return None
+
+    async def _dispatch_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         if command_name == "exit":
             self.exit(0)
             return None
@@ -1043,39 +1091,28 @@ class LanCherTextualApp(App[int]):
             return None
 
         if command_name == "permissions":
-            self.push_screen(PermissionPolicyScreen(), self._handle_policy_selected)
-            return None
-
-        if command_name == "mode":
-            requested_mode = arguments_text.strip()
-            if requested_mode not in set(MODE_SEQUENCE):
-                self._status_hint = "未知模式"
-                self._refresh_status_bar()
-                return None
-            self._apply_turn_event(self._turn_runner.set_mode(requested_mode))  # type: ignore[arg-type]
+            self._apply_turn_event(self._turn_runner.set_permission_policy(arguments_text.strip()))
             self._refresh_status_bar()
-            self._refresh_context_usage()
+            self.notify("本次审批策略已更新；工作阶段保持不变。", title="审批策略")
             return None
 
         if command_name == "model":
-            if self._is_streaming or self._turn_runner.has_active_turn:
-                self.notify("请等待当前轮次结束后再切换模型。", title="模型", severity="warning")
-                return None
             config = getattr(self._turn_runner, "model_config", None)
             if config is None:
-                self.notify("模型目录尚未加载。", title="模型", severity="warning")
-                return None
+                raise ValueError("模型目录尚未加载。")
             ref = arguments_text.strip()
-            if ref:
-                self._handle_model_selected(ref)
-            else:
-                self.push_screen(ModelPickerScreen(config, self._turn_runner.model_ref), self._handle_model_selected)
+            self._turn_runner.switch_model(ref)
+            self._refresh_status_bar()
+            self._refresh_context_usage()
+            self.notify(f"已切换为 {model_display_name(config, ref)}", title="本次模型")
             return None
 
         if command_name == "settings":
             if self._settings_service is None:
-                self._status_hint = "设置暂不可用"
-                self._refresh_status_bar()
+                raise ValueError("设置服务尚未加载。")
+            args = arguments_text.split()
+            if args[0] != "open":
+                save_command_setting(self, args[0], args[1])
                 return None
             self.push_screen(SettingsScreen(
                 self._settings_service,
@@ -1099,6 +1136,7 @@ class LanCherTextualApp(App[int]):
             try:
                 result = await self._turn_runner.compact_context()
             except Exception as exc:
+                self._command_preserve_input = True
                 self.notify(str(exc), title="上下文压缩失败", severity="error", timeout=10)
             else:
                 self.notify(
@@ -1121,67 +1159,90 @@ class LanCherTextualApp(App[int]):
 
         return None
 
-    async def _execute_session_command(self, arguments_text: str) -> None:
+    async def _execute_session_command(self, arguments_text: str, *, confirmed: bool = False) -> None:
         arguments = arguments_text.split()
-        if not arguments:
+        action = arguments[0]
+        if not confirmed and (action == "remove" or "--force" in arguments):
+            description = (
+                f"删除项目会话：{arguments[1]}" if action == "remove" else
+                f"覆盖同名项目会话：{arguments[1]}" if action == "save" else
+                f"放弃当前未保存内容并切换到：{arguments[1]}"
+            )
+            session_id = self._session_controller.session_id
+            composer = self.query_one(ComposerTextArea)
+            original_text = composer.text
+            consumed = False
+
+            async def resolve(accepted: bool) -> None:
+                nonlocal consumed
+                if consumed:
+                    return
+                consumed = True
+                if not accepted:
+                    composer.focus()
+                    return
+                try:
+                    if self._is_streaming or self._turn_runner.has_active_turn or session_id != self._session_controller.session_id:
+                        raise ValueError("当前会话状态已改变，请重新提交命令。")
+                    await self._execute_session_command(arguments_text, confirmed=True)
+                except (LanCherError, ValueError, RuntimeError, OSError) as exc:
+                    self.notify(str(exc), title="命令未执行", severity="warning")
+                else:
+                    if composer.text == original_text:
+                        composer.clear()
+                await self._refresh_command_ui()
+                composer.focus()
+
+            self._command_preserve_input = True
+            self.push_screen(CommandConfirmationScreen(description, "/session " + arguments_text), resolve)
+            return
+        if action == "list" and len(arguments) == 1:
+            sessions = self._session_controller.list_saved_sessions()
+            if not sessions:
+                message = "当前项目还没有已保存的会话。"
+            else:
+                active = self._session_controller.active_session_name
+                message = "\n".join(
+                    f"{'* ' if item.name == active else '  '}{item.name} · "
+                    f"{item.updated_at.astimezone().strftime('%Y-%m-%d %H:%M')} · "
+                    f"{item.message_count} 条消息 · {item.permission_rule_count} 条会话权限"
+                    for item in sessions
+                )
+            self.push_screen(ReadOnlyDetailsScreen("项目会话\n" + message))
+            return
+
+        if action == "save" and len(arguments) in {2, 3}:
+            self._session_controller.save_session(arguments[1], force="--force" in arguments)
+            self.notify(f"已保存并绑定会话：{arguments[1]}", title="Session")
+            return
+
+        if action == "remove" and len(arguments) == 2:
+            self._session_controller.remove_session(arguments[1])
+            self.notify(f"已删除会话：{arguments[1]}", title="Session")
+            return
+
+        if action == "rename" and len(arguments) == 3:
+            self._session_controller.rename_session(arguments[1], arguments[2])
+            self.notify(f"已将 {arguments[1]} 重命名为 {arguments[2]}", title="Session")
+            return
+
+        if action == "resume" and len(arguments) in {2, 3}:
+            force = len(arguments) == 3 and arguments[2] == "--force"
+            if len(arguments) == 3 and not force:
+                raise SessionStoreError("resume 的第三个参数只能是 --force。")
+            if getattr(self._turn_runner, "model_config", None) is not None:
+                permission_count = self._turn_runner.resume_session(arguments[1], force=force)
+            else:
+                permission_count = self._session_controller.resume_session(arguments[1], force=force)
+            await self._restore_session_view()
+            notice = getattr(self._turn_runner, "model_notice", "")
             self.notify(
-                "用法：/session <list|save|remove|rename|resume> [名称]",
+                f"已恢复会话：{arguments[1]}（恢复 {permission_count} 条会话权限）" + (f"\n{notice}" if notice else ""),
                 title="Session",
-                severity="warning",
             )
             return
 
-        action = arguments[0]
-        try:
-            if action == "list" and len(arguments) == 1:
-                sessions = self._session_controller.list_saved_sessions()
-                if not sessions:
-                    message = "当前项目还没有已保存的会话。"
-                else:
-                    active = self._session_controller.active_session_name
-                    message = "\n".join(
-                        f"{'* ' if item.name == active else '  '}{item.name} · "
-                        f"{item.updated_at.astimezone().strftime('%Y-%m-%d %H:%M')} · "
-                        f"{item.message_count} 条消息 · {item.permission_rule_count} 条会话权限"
-                        for item in sessions
-                    )
-                self.notify(message, title="项目会话", timeout=10)
-                return
-
-            if action == "save" and len(arguments) == 2:
-                self._session_controller.save_session(arguments[1])
-                self.notify(f"已保存并绑定会话：{arguments[1]}", title="Session")
-                return
-
-            if action == "remove" and len(arguments) == 2:
-                self._session_controller.remove_session(arguments[1])
-                self.notify(f"已删除会话：{arguments[1]}", title="Session")
-                return
-
-            if action == "rename" and len(arguments) == 3:
-                self._session_controller.rename_session(arguments[1], arguments[2])
-                self.notify(f"已将 {arguments[1]} 重命名为 {arguments[2]}", title="Session")
-                return
-
-            if action == "resume" and len(arguments) in {2, 3}:
-                force = len(arguments) == 3 and arguments[2] == "--force"
-                if len(arguments) == 3 and not force:
-                    raise SessionStoreError("resume 的第三个参数只能是 --force。")
-                if getattr(self._turn_runner, "model_config", None) is not None:
-                    permission_count = self._turn_runner.resume_session(arguments[1], force=force)
-                else:
-                    permission_count = self._session_controller.resume_session(arguments[1], force=force)
-                await self._restore_session_view()
-                notice = getattr(self._turn_runner, "model_notice", "")
-                self.notify(
-                    f"已恢复会话：{arguments[1]}（恢复 {permission_count} 条会话权限）" + (f"\n{notice}" if notice else ""),
-                    title="Session",
-                )
-                return
-
-            raise SessionStoreError("参数不正确，请查看 /session 的命令提示。")
-        except (SessionStoreError, LanCherError, ValueError, RuntimeError) as exc:
-            self.notify(str(exc), title="Session", severity="error", timeout=10)
+        raise SessionStoreError("参数不正确，请查看 /session 的命令提示。")
 
     async def _restore_session_view(self) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)

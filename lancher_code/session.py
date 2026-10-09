@@ -598,14 +598,19 @@ class SessionController:
     def list_saved_sessions(self) -> list[StoredSessionInfo]:
         return self._session_store.list_sessions()
 
-    def save_session(self, name: str) -> None:
+    def save_session(self, name: str, *, force: bool = False) -> None:
         normalized = self._session_store.validate_name(name)
-        if self._active_session_name != normalized and self._session_store.exists(normalized):
+        if not force and self._active_session_name != normalized and self._session_store.exists(normalized):
             raise SessionStoreError(f"会话名称已存在：{normalized}")
+        previous_name, previous_created = self._active_session_name, self._session_created_at
         if self._active_session_name is None:
             self._session_created_at = utc_now()
         self._active_session_name = normalized
-        self._write_active_session()
+        try:
+            self._write_active_session()
+        except Exception:
+            self._active_session_name, self._session_created_at = previous_name, previous_created
+            raise
 
     def auto_save(self) -> str | None:
         if self._active_session_name is None or not self._dirty:

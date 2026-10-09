@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rich.console import RenderableType
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -41,7 +42,7 @@ class SlashCompletionChosen(Message):
         self.candidate_key = candidate_key
 
 
-class PermissionModeCycleRequested(Message):
+class WorkPhaseCycleRequested(Message):
     pass
 
 
@@ -49,7 +50,7 @@ class ComposerTextArea(TextArea):
     BINDINGS = [
         Binding("enter", "submit_message", "发送", show=False, priority=True),
         Binding("tab", "accept_slash_menu_selection", "补全命令", show=False, priority=True),
-        Binding("shift+tab", "cycle_permission_mode", "切换模式", show=False, priority=True),
+        Binding("shift+tab", "cycle_work_phase", "切换阶段", show=False, priority=True),
         Binding("shift+enter", "insert_newline", "换行", show=False, priority=True),
         Binding("ctrl+enter", "submit_steering", "补充当前任务", show=False, priority=True),
     ] + TextArea.BINDINGS
@@ -57,6 +58,7 @@ class ComposerTextArea(TextArea):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.slash_menu_active = False
+        self.slash_enter_accepts = True
         self._accepted_slash_command_text: str | None = None
 
     async def _on_key(self, event: events.Key) -> None:
@@ -80,17 +82,16 @@ class ComposerTextArea(TextArea):
         await super()._on_key(event)
 
     def action_submit_message(self) -> None:
-        if self.slash_menu_active:
+        if self.slash_menu_active and self.slash_enter_accepts:
             self.post_message(SlashMenuAcceptRequested())
             return
         self.post_message(ComposerSubmitted(self, self.text))
 
     def action_accept_slash_menu_selection(self) -> None:
-        if self.slash_menu_active:
-            self.post_message(SlashMenuAcceptRequested())
+        self.post_message(SlashMenuAcceptRequested())
 
-    def action_cycle_permission_mode(self) -> None:
-        self.post_message(PermissionModeCycleRequested())
+    def action_cycle_work_phase(self) -> None:
+        self.post_message(WorkPhaseCycleRequested())
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
@@ -110,9 +111,10 @@ class ComposerTextArea(TextArea):
 
 
 class SlashCompletionMenuItem(Static):
-    def __init__(self, candidate: SlashCompletionCandidate) -> None:
+    def __init__(self, candidate: SlashCompletionCandidate, *, column_width: int = 11) -> None:
         super().__init__(classes="slash-command-item")
         self.candidate = candidate
+        self.column_width = column_width
         self._active = False
 
     def set_active(self, active: bool) -> None:
@@ -123,11 +125,17 @@ class SlashCompletionMenuItem(Static):
     def render(self) -> RenderableType:
         colors = theme_palette(self.app.theme)
         foreground = colors["background"] if self._active else colors["text"]
-        text = Text()
+        text = Text(no_wrap=True, overflow="ellipsis")
         text.append("› " if self._active else "  ", style=foreground)
-        text.append(self.candidate.description, style="bold " + foreground if self._active else foreground)
+        column = min(self.column_width, max(8, (self.size.width - 4) // 2), 24)
+        token = Text(self.candidate.display, style="bold " + foreground)
+        token.truncate(column, overflow="ellipsis", pad=True)
+        text.append_text(token)
         text.append("  ")
-        text.append(self.candidate.display, style=foreground if self._active else colors["muted"])
+        title, _, detail = self.candidate.description.partition(" · ")
+        text.append(title, style=foreground)
+        if detail and self.size.width >= 56:
+            text.append(" · " + detail, style=foreground if self._active else colors["muted"])
         return text
 
     def on_click(self, event: Click) -> None:
@@ -144,22 +152,26 @@ class SlashCompletionMenu(VerticalScroll):
         candidates: list[SlashCompletionCandidate],
         active_key: str | None,
     ) -> None:
-        await self.remove_children()
         self.display = bool(candidates)
+        items = list(self.query(SlashCompletionMenuItem))
+        if [item.candidate for item in items] != candidates:
+            await self.remove_children()
+            column_width = max(8, max((cell_len(candidate.display) for candidate in candidates), default=8))
+            items = [SlashCompletionMenuItem(candidate, column_width=column_width) for candidate in candidates]
+            if items:
+                await self.mount(*items)
         if not candidates:
             return
-        items = [SlashCompletionMenuItem(candidate) for candidate in candidates]
-        await self.mount(*items)
         for item in items:
             item.set_active(item.candidate.key == active_key)
-            if item.candidate.key == active_key:
-                item.scroll_visible(animate=False)
+        # 提示文字会改变可用高度，布局完成后再确保选中行可见。
+        self.call_after_refresh(self.reveal_active)
 
-
-# 保留旧导出名，避免外部调用方因菜单泛化而立即失效。
-SlashCommandChosen = SlashCompletionChosen
-SlashCommandMenuItem = SlashCompletionMenuItem
-SlashCommandMenu = SlashCompletionMenu
+    def reveal_active(self) -> None:
+        for item in self.query(SlashCompletionMenuItem):
+            if item._active:
+                self.scroll_to_widget(item, animate=False, immediate=True)
+                break
 
 
 class CommandHintBar(Static):
@@ -168,5 +180,5 @@ class CommandHintBar(Static):
         self.display = False
 
     def set_hint(self, hint: str) -> None:
-        self.update(hint)
+        self.update(Text(hint))
         self.display = bool(hint)

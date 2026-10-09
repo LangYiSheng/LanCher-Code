@@ -57,7 +57,7 @@ def build_model_app(tmp_path):
 async def test_model_picker_keyboard_search_and_cancel(tmp_path, size):
     app, runner, session, config, constructed = build_model_app(tmp_path)
     async with app.run_test(size=size) as pilot:
-        await app._execute_slash_command("model", "")
+        app.push_screen(ModelPickerScreen(runner.model_config, runner.model_ref), app._handle_model_selected)
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, ModelPickerScreen)
@@ -77,7 +77,7 @@ async def test_model_picker_keyboard_search_and_cancel(tmp_path, size):
         assert len(constructed) == 1
         assert constructed[0].model == "chat-api"
 
-        await app._execute_slash_command("model", "")
+        app.push_screen(ModelPickerScreen(runner.model_config, runner.model_ref), app._handle_model_selected)
         await pilot.pause()
         await pilot.press("up", "escape")
         await pilot.pause()
@@ -89,7 +89,7 @@ async def test_model_picker_keyboard_search_and_cancel(tmp_path, size):
 async def test_model_picker_empty_search_then_direct_selection(tmp_path):
     app, runner, session, _, constructed = build_model_app(tmp_path)
     async with app.run_test() as pilot:
-        await app._execute_slash_command("model", "")
+        app.push_screen(ModelPickerScreen(runner.model_config, runner.model_ref), app._handle_model_selected)
         await pilot.pause()
         app.screen.query_one("#model-search", Input).value = "not-a-model"
         await pilot.pause()
@@ -110,14 +110,14 @@ async def test_model_picker_empty_search_then_direct_selection(tmp_path):
 def test_model_completion_preserves_stable_reference_and_description():
     registry = create_default_slash_command_registry()
     candidates = registry.complete(SlashCompletionContext(
-        text="/model deep", mode="plan",
+        text="/model deep",
         model_choices=(("deepseek/chat", "日常编程"), ("other/chat", "日常编程")),
         active_model_ref="deepseek/chat",
     ))
     assert len(candidates) == 1
     assert candidates[0].apply("/model deep") == "/model deepseek/chat"
     assert "日常编程" in candidates[0].description
-    assert "当前" in candidates[0].description
+    assert "本次" in candidates[0].description
 
 
 @pytest.mark.asyncio
@@ -156,12 +156,17 @@ async def test_chat_resume_restores_saved_model_then_missing_model_falls_back(tm
         runner.switch_model("deepseek/chat")
         await app._execute_slash_command("session", "resume second --force")
         await pilot.pause()
+        await pilot.click("#command-confirm")
+        await pilot.pause()
         assert runner.model_ref == "other/chat"
         session.save_session("working-again")
         changed = deepcopy(config)
         del changed.providers["other"]
         runner.reload_models(changed)
         await app._execute_slash_command("session", "resume second --force")
+        await pilot.pause()
+        await pilot.click("#command-confirm")
+        await pilot.pause()
         assert runner.model_ref == "deepseek/chat"
         assert "不存在" in runner.model_notice
 

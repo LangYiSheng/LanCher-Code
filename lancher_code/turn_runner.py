@@ -29,7 +29,6 @@ from lancher_code.models import (
     PermissionRequest,
     PermissionResolution,
     ProviderConfig,
-    RuntimeMode,
     ToolCall,
     ToolExecutionResult,
     TurnEvent,
@@ -193,12 +192,6 @@ class TurnRunner:
             self._model_notice = ""
         return permission_count
 
-    def set_mode(self, mode: RuntimeMode) -> TurnEvent:
-        """旧命令入口：阶段和权限不再相互覆盖。"""
-        if mode == "plan":
-            return self.set_phase("plan")
-        return self.set_permission_policy(mode)
-
     def set_phase(self, phase: WorkPhase) -> TurnEvent:
         self._ensure_model_idle()
         self._session.set_work_phase(phase)
@@ -209,9 +202,6 @@ class TurnRunner:
         self._ensure_model_idle()
         self._session.set_permission_policy(policy)
         return TurnEvent(kind="policy_changed", permission_policy=policy, progress_message="权限策略已更新，工作阶段不变")
-
-    def restore_mode_after_plan(self) -> TurnEvent:
-        return self.set_phase("execute")
 
     @property
     def pending_inputs(self) -> list[PendingInput]:
@@ -977,13 +967,3 @@ class TurnRunner:
     def _raise_if_cancelled(cancellation_token: CancellationToken) -> None:
         if cancellation_token.is_cancelled:
             raise asyncio.CancelledError
-
-
-def _mode_status_label(mode: RuntimeMode) -> str:
-    labels = {
-        "default": "已切换到 Default 模式",
-        "plan": "已切换到 Plan 模式",
-        "acceptEdits": "已切换到 AcceptEdits 模式",
-        "bypass": "已切换到 Bypass 模式",
-    }
-    return labels[mode]

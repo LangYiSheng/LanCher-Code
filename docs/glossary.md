@@ -86,4 +86,4 @@
 | `app.py run_app()` | 应用装配入口 |
 | `ConfigBootstrapTUI` | 连接供应商、添加模型、确认并开始的三步首次配置界面 |
 | `TurnEvent` | TurnRunner → TUI 的事件（`user_message_created`、`tool_result_received` 等） |
-| `SlashCommand` | 斜杠命令（`/discuss`、`/plan`、`/do`、`/mode`、`/model`、`/session`、`/compact`、`/settings`、`/exit`） |
+| `SlashCommand` | 斜杠命令（`/discuss`、`/plan`、`/do`、`/model`、`/session`、`/compact`、`/settings`、`/exit`） |

@@ -32,8 +32,8 @@ from lancher_code.tui import (
     ComposerTextArea,
     LanCherTextualApp,
     MessageWidget,
-    SlashCommandMenu,
-    SlashCommandMenuItem,
+    SlashCompletionMenu,
+    SlashCompletionMenuItem,
     ThinkingTraceWidget,
     _format_trace_entries,
     ComposerSubmitted,
@@ -240,7 +240,7 @@ async def test_shift_tab_cycles_work_phase_without_changing_permission(
 def _visible_slash_commands(app: LanCherTextualApp) -> list[str]:
     return [
         item.candidate.value
-        for item in app.query(SlashCommandMenuItem)
+        for item in app.query(SlashCompletionMenuItem)
         if item.display
     ]
 
@@ -327,11 +327,11 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
         composer.focus()
         await pilot.pause(0.05)
 
-        menu = app.query_one(SlashCommandMenu)
+        menu = app.query_one(SlashCompletionMenu)
         assert menu.display
         assert _visible_slash_commands(app) == [
-            "discuss", "plan", "do", "mode", "session", "compact", "settings",
-            "permissions", "status", "model", "exit",
+            "discuss", "plan", "do", "session", "model", "permissions",
+            "compact", "settings", "status", "exit",
         ]
 
         composer.text = "/p"
@@ -414,7 +414,7 @@ async def test_slash_menu_accepts_selection_without_submitting(
 
         assert composer.text == "/discuss "
         assert len(provider.requests) == 0
-        assert not app.query_one(SlashCommandMenu).display
+        assert not app.query_one(SlashCompletionMenu).display
 
 
 @pytest.mark.asyncio
@@ -437,7 +437,7 @@ async def test_slash_menu_accepts_selection_with_tab_without_submitting(
 
         assert composer.text == "/discuss "
         assert len(provider.requests) == 0
-        assert not app.query_one(SlashCommandMenu).display
+        assert not app.query_one(SlashCompletionMenu).display
 
 
 @pytest.mark.asyncio
@@ -459,7 +459,7 @@ async def test_multilevel_session_completion_advances_until_terminal_value(
         await pilot.press("tab")
         await pilot.pause(0.05)
         assert composer.text == "/session "
-        assert _visible_slash_commands(app) == ["list", "save", "remove", "rename", "resume"]
+        assert _visible_slash_commands(app) == ["list", "save", "resume", "rename", "remove"]
 
         composer.text = "/session res"
         composer.cursor_location = composer.document.end
@@ -472,7 +472,7 @@ async def test_multilevel_session_completion_advances_until_terminal_value(
         await pilot.press("tab")
         await pilot.pause(0.05)
         assert composer.text == "/session resume history"
-        assert not app.query_one(SlashCommandMenu).display
+        assert not app.query_one(SlashCompletionMenu).display
 
         await pilot.press("enter")
         await pilot.pause(0.05)
@@ -480,7 +480,7 @@ async def test_multilevel_session_completion_advances_until_terminal_value(
 
 
 @pytest.mark.asyncio
-async def test_mode_completion_selects_terminal_value_before_submission(
+async def test_permission_completion_selects_terminal_value_before_submission(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
@@ -488,20 +488,21 @@ async def test_mode_completion_selects_terminal_value_before_submission(
     app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
-        composer.text = "/mode p"
+        composer.text = "/permissions b"
         composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
         await pilot.press("tab")
         await pilot.pause(0.05)
 
-        assert composer.text == "/mode plan"
-        assert not app.query_one(SlashCommandMenu).display
+        assert composer.text == "/permissions bypass"
+        assert not app.query_one(SlashCompletionMenu).display
         assert session.runtime_mode == "default"
 
         await pilot.press("enter")
         await pilot.pause(0.05)
-        assert session.runtime_mode == "plan"
+        assert session.permission_policy == "bypass"
+        assert session.work_phase == "execute"
 
 
 @pytest.mark.asyncio
@@ -521,7 +522,7 @@ async def test_escape_closes_slash_menu(
         await pilot.press("escape")
         await pilot.pause(0.05)
 
-        assert not app.query_one(SlashCommandMenu).display
+        assert not app.query_one(SlashCompletionMenu).display
 
 
 @pytest.mark.asyncio

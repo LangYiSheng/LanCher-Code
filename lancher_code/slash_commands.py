@@ -1,26 +1,18 @@
+"""命令定义、逐级补全及参数校验；不依赖终端控件。"""
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-
-from lancher_code.models import RuntimeMode
 
 
 @dataclass(frozen=True, slots=True)
 class SlashCompletionContext:
     text: str
-    mode: RuntimeMode
     session_names: tuple[str, ...] = ()
     active_session_name: str | None = None
     model_choices: tuple[tuple[str, str], ...] = ()
     active_model_ref: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SlashArgumentSuggestion:
-    value: str
-    description: str
-    append_space: bool = False
+    default_model_ref: str | None = None
+    permission_policy: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,53 +24,53 @@ class SlashCompletionCandidate:
     replace_start: int
     replace_end: int
     append_space: bool = False
+    detail: str = ""
+    optional: bool = False
 
     def apply(self, text: str) -> str:
         suffix = " " if self.append_space else ""
         return f"{text[:self.replace_start]}{self.value}{suffix}{text[self.replace_end:]}"
 
 
-SlashArgumentCompleter = Callable[
-    [tuple[str, ...], str, SlashCompletionContext],
-    list[SlashArgumentSuggestion],
-]
-
-
 @dataclass(frozen=True, slots=True)
 class SlashCommandDefinition:
     name: str
     description: str
+    detail: str
     usage: str
-    argument_hint: str = ""
-    visible_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
-    executable_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
-    insert_trailing_space: bool = False
-    argument_completer: SlashArgumentCompleter | None = None
-
-    @property
-    def trigger(self) -> str:
-        return f"/{self.name}"
-
-    @property
-    def insert_text(self) -> str:
-        return self.trigger + (" " if self.insert_trailing_space else "")
-
-    @property
-    def hint_text(self) -> str:
-        if self.argument_hint:
-            return f"{self.description}；参数可选：{self.argument_hint}"
-        return self.description
+    branch: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SlashCommandMatch:
     definition: SlashCommandDefinition
-    command_text: str
-    arguments_text: str = ""
+    arguments_text: str
 
-    @property
-    def has_arguments(self) -> bool:
-        return bool(self.arguments_text.strip())
+
+SESSION_ACTIONS = {
+    "list": "列出此项目下所有的会话",
+    "save": "保存当前对话并命名",
+    "resume": "切换到已保存的会话",
+    "rename": "修改已保存的会话名",
+    "remove": "删除已保存的会话",
+}
+POLICIES = {
+    "default": "标准 · 修改和命令按规则询问",
+    "acceptEdits": "自动编辑 · 文件编辑自动允许",
+    "bypass": "跳过询问 · 仍遵守阶段与访问限制",
+}
+SETTINGS = {
+    "theme": ("切换深浅主题", {"dark": "深色", "light": "浅色"}),
+    "thinking": ("显示或隐藏思考记录", {"on": "显示", "off": "隐藏 · 不影响工具记录"}),
+    "busy-enter": ("设置忙时 Enter 行为", {"follow_up": "排到下一轮", "steer": "补充当前任务", "draft": "仅保留草稿"}),
+    "default-model": ("选择新对话默认模型", {}),
+    "open": ("打开完整设置 · 连接、模型参数、MCP 与规则", {}),
+}
+
+
+def extract_exact_command_name(text: str) -> str | None:
+    parts = text.lstrip().split(maxsplit=1)
+    return parts[0][1:] if parts and parts[0].startswith("/") else None
 
 
 class SlashCommandRegistry:
@@ -96,285 +88,156 @@ class SlashCommandRegistry:
     def get(self, name: str) -> SlashCommandDefinition | None:
         return self._commands.get(name)
 
-    def visible_commands(self, mode: RuntimeMode) -> list[SlashCommandDefinition]:
-        return [command for command in self._commands.values() if mode in command.visible_modes]
+    def suggest(self, prefix: str) -> list[SlashCommandDefinition]:
+        query = prefix.casefold()
+        return [item for item in self.list_all() if item.name.casefold().startswith(query) or query in item.description]
 
-    def suggest(self, prefix: str, mode: RuntimeMode) -> list[SlashCommandDefinition]:
-        normalized = prefix.casefold()
-        return [
-            command
-            for command in self.visible_commands(mode)
-            if command.name.casefold().startswith(normalized) or normalized in command.description.casefold()
-        ]
+    def parse_submission(self, text: str) -> SlashCommandMatch | None:
+        name = extract_exact_command_name(text)
+        command = self.get(name or "")
+        if command is None:
+            return None
+        return SlashCommandMatch(command, text.lstrip()[len(name) + 1:].strip())
 
     def complete(self, context: SlashCompletionContext) -> list[SlashCompletionCandidate]:
         text = context.text
-        if not text or "\n" in text or "\r" in text:
+        if not text.lstrip().startswith("/") or "\n" in text or "\r" in text:
             return []
-        stripped = text.lstrip()
-        leading = len(text) - len(stripped)
-        if not stripped.startswith("/"):
+        parts = text.split()
+        name = parts[0][1:]
+        command = self.get(name)
+        trailing = text[-1].isspace()
+        if len(parts) == 1 and not trailing and not (command and command.branch):
+            start = len(text) - len(name)
+            return [SlashCompletionCandidate(
+                f"command:{c.name}", c.name, c.name, c.description, start, len(text),
+                append_space=c.branch or c.name in {"discuss", "plan", "do"}, detail=c.detail,
+            ) for c in self.suggest(name)]
+        if command is None:
             return []
+        args = parts[1:]
+        # 精确输入父命令即可查看下一级；补全时补上必要的空格。
+        exact_parent = len(parts) == 1 and not trailing
+        completed = args if trailing or exact_parent else args[:-1]
+        prefix = "" if trailing or exact_parent else args[-1]
+        start = len(text) - len(prefix)
+        options: list[tuple[str, str, bool, str, bool]] = []
 
-        if not any(character.isspace() for character in stripped):
-            prefix = stripped[1:]
-            start = leading + 1
-            return [
-                SlashCompletionCandidate(
-                    key=f"command:{command.name}",
-                    value=command.name,
-                    display=command.usage,
-                    description=command.description,
-                    replace_start=start,
-                    replace_end=len(text),
-                    append_space=command.insert_trailing_space,
-                )
-                for command in self.suggest(prefix, context.mode)
-            ]
+        def add(value: str, label: str, space: bool = False, detail: str = "", optional: bool = False) -> None:
+            options.append((value, label, space, detail, optional))
 
-        tokens = stripped.split()
-        if not tokens:
-            return []
-        command = self.get(tokens[0][1:])
-        if (
-            command is None
-            or context.mode not in command.visible_modes
-            or command.argument_completer is None
-        ):
-            return []
+        if name == "session":
+            if not completed:
+                for value, label in SESSION_ACTIONS.items():
+                    add(value, label, value != "list", "作用范围：当前项目")
+            elif len(completed) == 1 and completed[0] in {"resume", "remove", "rename"}:
+                for value in context.session_names:
+                    if completed[0] != "remove" or value != context.active_session_name:
+                        add(value, "已保存的项目会话" + (" · 当前" if value == context.active_session_name else ""), completed[0] == "rename", "作用范围：当前项目")
+            elif len(completed) == 2 and completed[0] in {"save", "resume"}:
+                description = "覆盖同名会话" if completed[0] == "save" else "放弃当前未保存内容并切换"
+                add("--force", "可选 · " + description, detail="Enter 跳过此参数；Tab 填入后仍需确认。", optional=True)
+        elif name == "permissions" and not completed:
+            for value, label in POLICIES.items():
+                add(value, label + (" · 当前" if value == context.permission_policy else ""), detail="作用范围：本次对话；不改变工作阶段。")
+        elif name == "model" and not completed:
+            for value, label in context.model_choices:
+                add(value, label + (" · 本次" if value == context.active_model_ref else "") + (" · 默认" if value == context.default_model_ref else ""), detail="只更改本次模型；新对话默认保持不变。")
+        elif name == "settings":
+            if not completed:
+                for value, (label, _) in SETTINGS.items():
+                    add(value, label, value != "open", "保存后立即生效；MCP 连接调整需重启。")
+            elif len(completed) == 1 and completed[0] in SETTINGS:
+                if completed[0] == "default-model":
+                    for value, label in context.model_choices:
+                        add(value, label + (" · 默认" if value == context.default_model_ref else ""), detail="只修改新对话默认模型；本次选择保持不变。")
+                else:
+                    for value, label in SETTINGS[completed[0]][1].items():
+                        add(value, label, detail="保存界面偏好，不修改模型、权限或 MCP 文件。")
+        return [SlashCompletionCandidate(
+            f"argument:{name}:{start}:{value}", (" " if exact_parent else "") + value,
+            value, label, start, len(text), space, detail, optional and (not prefix or prefix == value),
+        ) for value, label, space, detail, optional in options
+            if value.casefold().startswith(prefix.casefold()) or (prefix and prefix.casefold() in label.casefold())]
 
-        trailing_space = bool(text and text[-1].isspace())
-        arguments = tokens[1:]
-        if trailing_space:
-            completed = tuple(arguments)
-            prefix = ""
-            replace_start = len(text)
-        else:
-            completed = tuple(arguments[:-1])
-            prefix = arguments[-1] if arguments else ""
-            replace_start = len(text) - len(prefix)
+    def hint(self, text: str) -> str:
+        match = self.parse_submission(text)
+        if match is None:
+            return "未知命令 · 输入 / 查看命令列表" if text.strip().startswith("/") and text.strip() != "/" else ""
+        name, args = match.definition.name, match.arguments_text.split()
+        if name in {"discuss", "plan", "do"}:
+            return match.definition.description + " · Enter 切换；参数可选：任务描述"
+        if name == "session":
+            if not args:
+                return "选择一个操作 · 作用范围：当前项目"
+            if args[0] in {"save", "resume", "remove", "rename"} and len(args) == 1:
+                return "输入一个会话名 · 必填 · 中文、字母、数字、下划线或短横线"
+            if args[0] == "rename" and len(args) == 2:
+                return "输入一个新的会话名 · 必填 · Tab 进入下一参数"
+            if args[0] in {"save", "resume"} and len(args) == 2:
+                return "Enter 执行 · Tab 查看可选参数 --force"
+        if name == "model" and not args:
+            return "选择本次模型 · 可输入名称或供应商 ID 检索"
+        if name == "permissions" and not args:
+            return "选择本次审批策略 · 不改变工作阶段"
+        if name == "settings" and len(args) < 2 and args != ["open"]:
+            return "选择设置项" if not args else "选择一个值 · 保存后生效"
+        return match.definition.detail + " · Enter 执行"
 
-        suggestions = command.argument_completer(completed, prefix, context)
-        normalized_prefix = prefix.casefold()
-        return [
-            SlashCompletionCandidate(
-                key=f"argument:{command.name}:{replace_start}:{suggestion.value}",
-                value=suggestion.value,
-                display=suggestion.value,
-                description=suggestion.description,
-                replace_start=replace_start,
-                replace_end=len(text),
-                append_space=suggestion.append_space,
-            )
-            for suggestion in suggestions
-            if suggestion.value.casefold().startswith(normalized_prefix)
-        ]
-
-    def parse_submission(self, text: str, mode: RuntimeMode) -> SlashCommandMatch | None:
-        token = _extract_leading_token(text)
-        if token is None or not token.startswith("/"):
-            return None
-
-        definition = self.get(token[1:])
-        if definition is None or mode not in definition.executable_modes:
-            return None
-
-        remainder = text.lstrip()[len(token) :].strip()
-        return SlashCommandMatch(
-            definition=definition,
-            command_text=token,
-            arguments_text=remainder,
-        )
-
-
-def extract_slash_menu_query(text: str) -> str | None:
-    stripped = text.lstrip()
-    if not stripped.startswith("/"):
+    def advance_text(self, text: str) -> str | None:
+        """自由输入参数没有候选项时，Tab 只推进参数位置。"""
+        match = self.parse_submission(text)
+        if match and match.definition.name == "session":
+            args = match.arguments_text.split()
+            if len(args) == 2 and args[0] in {"save", "resume", "rename"} and not text[-1].isspace():
+                return text + " "
         return None
 
-    token = _extract_leading_token(stripped)
-    if token is None:
-        return None
-
-    if stripped != token:
-        return None
-
-    return token[1:]
-
-
-def extract_exact_command_name(text: str) -> str | None:
-    token = _extract_leading_token(text)
-    if token is None or not token.startswith("/"):
-        return None
-    return token[1:]
+    def validate(self, name: str, arguments: str) -> None:
+        command = self.get(name)
+        if command is None:
+            raise ValueError("未知命令；输入 / 查看命令列表。")
+        args = arguments.split()
+        if name in {"discuss", "plan", "do"}:
+            return
+        if name in {"compact", "status", "exit"} and args:
+            raise ValueError(f"用法：{command.usage}")
+        if name == "permissions" and (len(args) > 1 or (args and args[0] not in POLICIES)):
+            raise ValueError("请选择 default、acceptEdits 或 bypass。")
+        if name == "model" and len(args) > 1:
+            raise ValueError("请选择一个供应商 ID/模型 ID。")
+        if name == "settings" and args:
+            if args[0] not in SETTINGS:
+                raise ValueError("未知设置项；输入 /settings 查看可用设置。")
+            if args[0] == "open":
+                if len(args) != 1:
+                    raise ValueError("用法：/settings open")
+            elif len(args) != 2:
+                raise ValueError("请选择一个设置值。")
+            elif args[0] != "default-model" and args[1] not in SETTINGS[args[0]][1]:
+                raise ValueError("设置值无效；请从候选项中选择。")
+        if name == "session" and args:
+            action = args[0]
+            counts = {"list": {1}, "save": {2, 3}, "resume": {2, 3}, "rename": {3}, "remove": {2}}
+            if action not in counts or len(args) not in counts[action]:
+                raise ValueError("参数不完整或多余；" + self.hint("/session " + arguments))
+            if action in {"save", "resume"} and len(args) == 3 and args[2] != "--force":
+                raise ValueError("可选参数只能是 --force。")
 
 
 def create_default_slash_command_registry() -> SlashCommandRegistry:
     registry = SlashCommandRegistry()
-    registry.register(SlashCommandDefinition(
-        name="discuss", description="讨论想法 · 只读调查代码", usage="/discuss [问题]",
-        insert_trailing_space=True,
-    ))
-    registry.register(
-        SlashCommandDefinition(
-            name="plan",
-            description="制定计划 · 确认后执行",
-            usage="/plan [任务]",
-            argument_hint="任务描述",
-            visible_modes=("default", "acceptEdits", "bypass"),
-            executable_modes=("default", "plan", "acceptEdits", "bypass"),
-            insert_trailing_space=True,
-        )
-    )
-    registry.register(
-        SlashCommandDefinition(
-            name="do",
-            description="切换到执行 · 保留当前审批策略",
-            usage="/do [任务]",
-            visible_modes=("default", "plan", "acceptEdits", "bypass"),
-            executable_modes=("default", "plan", "acceptEdits", "bypass"),
-        )
-    )
-    registry.register(
-        SlashCommandDefinition(
-            name="mode",
-            description="兼容命令 · 切换旧运行模式",
-            usage="/mode <default|plan|acceptEdits|bypass>",
-            argument_hint="default | plan | acceptEdits | bypass",
-            visible_modes=("default", "plan", "acceptEdits", "bypass"),
-            executable_modes=("default", "plan", "acceptEdits", "bypass"),
-            insert_trailing_space=True,
-            argument_completer=_complete_mode_arguments,
-        )
-    )
-    registry.register(
-        SlashCommandDefinition(
-            name="session",
-            description="管理项目会话",
-            usage="/session <list|save|remove|rename|resume> [名称]",
-            argument_hint="list | save 名称 | remove 名称 | rename 旧名称 新名称 | resume 名称 [--force]",
-            visible_modes=("default", "plan", "acceptEdits", "bypass"),
-            executable_modes=("default", "plan", "acceptEdits", "bypass"),
-            insert_trailing_space=True,
-            argument_completer=_complete_session_arguments,
-        )
-    )
-    registry.register(
-        SlashCommandDefinition(
-            name="compact",
-            description="压缩当前会话上下文",
-            usage="/compact",
-            visible_modes=("default", "plan", "acceptEdits", "bypass"),
-            executable_modes=("default", "plan", "acceptEdits", "bypass"),
-        )
-    )
-    registry.register(
-        SlashCommandDefinition(
-            name="settings",
-            description="打开设置面板",
-            usage="/settings",
-            visible_modes=("default", "plan", "acceptEdits", "bypass"),
-            executable_modes=("default", "plan", "acceptEdits", "bypass"),
-        )
-    )
-    registry.register(
-        SlashCommandDefinition(name="permissions", description="更改本次对话审批策略", usage="/permissions")
-    )
-    registry.register(
-        SlashCommandDefinition(name="status", description="查看模型、用量和连接详情", usage="/status")
-    )
-    registry.register(
-        SlashCommandDefinition(
-            name="model",
-            description="切换本次对话模型 · 不更改新对话默认",
-            usage="/model [供应商ID/模型ID]",
-            argument_hint="不带参数打开搜索面板，或输入模型标识直接切换",
-            insert_trailing_space=True,
-            argument_completer=_complete_model_arguments,
-        )
-    )
-    registry.register(
-        SlashCommandDefinition(
-            name="exit",
-            description="退出当前会话",
-            usage="/exit",
-            visible_modes=("default", "plan", "acceptEdits", "bypass"),
-            executable_modes=("default", "plan", "acceptEdits", "bypass"),
-        )
-    )
+    for name, label, detail, usage, branch in (
+        ("discuss", "讨论想法 · 切换到讨论模式", "只读调查；不改变审批策略", "/discuss [问题]", False),
+        ("plan", "制定计划 · 切换到计划模式", "调查并保存计划，确认后执行", "/plan [任务]", False),
+        ("do", "开始执行 · 切换到执行模式", "保留当前审批策略", "/do [任务]", False),
+        ("session", "切换对话 · 保存或切换对话", "作用范围：当前项目", "/session <操作> [名称]", True),
+        ("model", "选择模型 · 更改本次对话模型", "本次选择与新对话默认相互独立", "/model <供应商ID/模型ID>", True),
+        ("permissions", "调整权限 · 更改本次审批策略", "只修改权限，不改变工作阶段", "/permissions <default|acceptEdits|bypass>", True),
+        ("compact", "压缩上下文 · 整理当前对话记录", "作用范围：当前对话上下文", "/compact", False),
+        ("settings", "修改设置 · 界面偏好与默认模型", "保存至配置；本次模型保持不变", "/settings <设置项> <值>", True),
+        ("status", "查看状态 · 模型、用量与连接", "展开或收起 HUD 状态详情", "/status", False),
+        ("exit", "退出程序 · 结束本次运行", "退出当前程序", "/exit", False),
+    ):
+        registry.register(SlashCommandDefinition(name, label, detail, usage, branch))
     return registry
-
-
-def _extract_leading_token(text: str) -> str | None:
-    stripped = text.lstrip()
-    if not stripped:
-        return None
-
-    token_chars: list[str] = []
-    for character in stripped:
-        if character.isspace():
-            break
-        token_chars.append(character)
-
-    if not token_chars:
-        return None
-    return "".join(token_chars)
-
-
-def _complete_mode_arguments(
-    completed: tuple[str, ...],
-    _prefix: str,
-    _context: SlashCompletionContext,
-) -> list[SlashArgumentSuggestion]:
-    if completed:
-        return []
-    return [
-        SlashArgumentSuggestion(value=mode, description=description)
-        for mode, description in (("default", "执行 · 逐次确认"), ("plan", "制定计划"), ("acceptEdits", "执行 · 自动编辑"), ("bypass", "执行 · 跳过询问"))
-    ]
-
-
-def _complete_model_arguments(
-    completed: tuple[str, ...],
-    _prefix: str,
-    context: SlashCompletionContext,
-) -> list[SlashArgumentSuggestion]:
-    if completed:
-        return []
-    return [
-        SlashArgumentSuggestion(ref, label + (" · 当前" if ref == context.active_model_ref else ""))
-        for ref, label in context.model_choices
-    ]
-
-
-def _complete_session_arguments(
-    completed: tuple[str, ...],
-    _prefix: str,
-    context: SlashCompletionContext,
-) -> list[SlashArgumentSuggestion]:
-    if not completed:
-        return [
-            SlashArgumentSuggestion("list", "列出项目会话"),
-            SlashArgumentSuggestion("save", "保存当前会话", append_space=True),
-            SlashArgumentSuggestion("remove", "删除会话", append_space=True),
-            SlashArgumentSuggestion("rename", "重命名会话", append_space=True),
-            SlashArgumentSuggestion("resume", "恢复会话", append_space=True),
-        ]
-
-    action = completed[0]
-    if len(completed) == 1 and action in {"resume", "remove", "rename"}:
-        names = context.session_names
-        if action == "remove":
-            names = tuple(name for name in names if name != context.active_session_name)
-        return [
-            SlashArgumentSuggestion(
-                name,
-                "已保存的项目会话",
-                append_space=action == "rename",
-            )
-            for name in names
-        ]
-
-    if len(completed) == 2 and action == "resume" and completed[1] in context.session_names:
-        return [SlashArgumentSuggestion("--force", "丢弃当前未保存改动并恢复")]
-    return []
