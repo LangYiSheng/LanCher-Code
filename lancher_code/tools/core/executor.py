@@ -42,6 +42,7 @@ class ToolExecutor:
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
         self._file_state_cache = FileStateCache()
+        self._session_id: str | None = None
         self._permission_engine = permission_engine or PermissionEngine()
 
     async def execute_calls(
@@ -52,6 +53,9 @@ class ToolExecutor:
         work_phase: WorkPhase | None = None,
         permission_policy: PermissionPolicy | None = None,
         plan_file_path: Path | None = None,
+        session_id: str | None = None,
+        session_workspace: Path | None = None,
+        session_root: Path | None = None,
         cancellation_token: CancellationToken | None = None,
         permission_resolver: PermissionResolver | None = None,
         available_tool_names: set[str] | None = None,
@@ -59,6 +63,9 @@ class ToolExecutor:
         on_call_started: ToolStartedCallback | None = None,
         on_result: ToolResultCallback | None = None,
     ) -> list[ToolExecutionResult]:
+        if session_id != self._session_id:
+            self._file_state_cache = FileStateCache()
+            self._session_id = session_id
         context = ToolContext(
             cwd=self._cwd,
             timeout_seconds=self._timeout_seconds,
@@ -67,6 +74,9 @@ class ToolExecutor:
             permission_policy=permission_policy,
             project_root=self._cwd,
             plan_file_path=plan_file_path,
+            session_id=session_id,
+            session_workspace=session_workspace,
+            session_root=session_root,
             cancellation_token=cancellation_token,
             file_state_cache=self._file_state_cache,
         )

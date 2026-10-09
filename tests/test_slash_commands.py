@@ -18,18 +18,19 @@ def test_root_only_has_commands_and_supports_chinese_intent():
 @pytest.mark.parametrize("text", ["/session", "/session "])
 def test_exact_parent_shows_next_level(text):
     rows = complete(text)
-    assert [r.display for r in rows] == ["list", "save", "resume", "rename", "remove"]
-    assert rows[1].apply(text) == "/session save "
+    assert [r.display for r in rows] == ["new", "list", "resume", "rename", "archive", "remove"]
+    assert rows[0].apply(text) == "/session new"
 
 
-def test_dynamic_names_model_labels_and_optional_force():
-    names = ("当前", "旧对话")
-    assert [r.display for r in complete("/session remove ", session_names=names, active_session_name="当前")] == ["旧对话"]
-    assert complete("/session rename 旧", session_names=names)[0].apply("/session rename 旧") == "/session rename 旧对话 "
-    for action in ("save", "resume"):
-        rows = complete(f"/session {action} 旧对话 ", session_names=names)
-        assert rows[0].display == "--force" and rows[0].optional
-        assert not complete(f"/session {action} 旧对话 --f")[0].optional
+def test_dynamic_full_ids_model_labels_and_no_force():
+    current = "11111111111141118111111111111111"
+    other = "22222222222242228222222222222222"
+    session_ids = (current, other)
+    for action in ("archive", "remove"):
+        assert [r.display for r in complete(f"/session {action} ", session_ids=session_ids, active_session_id=current)] == [other]
+    assert complete("/session rename 222", session_ids=session_ids)[0].apply("/session rename 222") == f"/session rename {other} "
+    assert complete(f"/session resume {other} ", session_ids=session_ids) == []
+    assert complete(f"/session resume {other} --f", session_ids=session_ids) == []
     row = complete("/model 日常", model_choices=(("provider/code", "日常编程"),), active_model_ref="provider/code", default_model_ref="provider/code")[0]
     assert row.apply("/model 日常") == "/model provider/code"
     assert "本次" in row.description and "默认" in row.description
@@ -37,10 +38,10 @@ def test_dynamic_names_model_labels_and_optional_force():
 
 def test_free_argument_hints_and_tab_advance():
     registry = create_default_slash_command_registry()
-    assert "输入一个会话名" in registry.hint("/session save ")
-    assert "新的会话名" in registry.hint("/session rename old ")
-    assert registry.advance_text("/session save 名称") == "/session save 名称 "
-    assert registry.advance_text("/session save ") is None
+    assert "完整会话 UUID" in registry.hint("/session resume ")
+    assert "会话标题" in registry.hint("/session rename uuid ")
+    assert registry.advance_text("/session rename uuid") == "/session rename uuid "
+    assert registry.advance_text("/session resume uuid") is None
     assert complete("/session\nresume") == []
     assert complete("普通消息") == []
 
@@ -55,6 +56,8 @@ def test_settings_and_policy_values_are_discoverable():
 @pytest.mark.parametrize("name,args", [
     ("permissions", "plan"), ("permissions", "default extra"), ("session", "save"),
     ("session", "save name force"), ("session", "rename old"), ("session", "list extra"),
+    ("session", "resume uuid --force"), ("session", "new extra"), ("session", "archive"),
+    ("session", "remove uuid extra"),
     ("settings", "theme blue"), ("settings", "theme"), ("settings", "open extra"),
     ("model", "one two"), ("status", "extra"), ("mode", "plan"),
 ])
@@ -66,3 +69,10 @@ def test_invalid_commands_are_rejected(name, args):
 def test_phase_payload_is_not_tokenized_or_rewritten():
     match = create_default_slash_command_registry().parse_submission('/plan 调查 "多个 空格"\n下一段')
     assert match.arguments_text == '调查 "多个 空格"\n下一段'
+
+
+def test_session_title_preserves_spaces():
+    registry = create_default_slash_command_registry()
+    match = registry.parse_submission('/session rename uuid 新标题  保留空格')
+    assert match.arguments_text.split(maxsplit=2)[2] == "新标题  保留空格"
+    registry.validate("session", match.arguments_text)

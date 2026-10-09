@@ -18,7 +18,7 @@ from lancher_code.models import (
 )
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.session import SessionController
-from lancher_code.session_store import SessionStoreError
+from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.builtin.bash import BashTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
@@ -76,7 +76,7 @@ def test_discuss_and_plan_share_tools_except_plan_writer(openai_provider_config,
     request = session.build_request(registry.list_definitions(), allow_tool_calls=True)
     assert request.work_phase == "discuss"
     assert request.permission_policy == "bypass"
-    assert {tool.name for tool in request.tools} == {"read_file", "glob", "grep", "tool_search"}
+    assert {tool.name for tool in request.tools} == {"read_file", "write_file", "edit_file", "glob", "grep", "tool_search"}
     session.set_work_phase("plan")
     plan_tools = registry.list_definitions(work_phase=session.work_phase)
     assert {tool.name for tool in plan_tools} == {tool.name for tool in request.tools} | {"write_plan_file"}
@@ -114,18 +114,20 @@ def test_exact_file_grant_does_not_treat_brackets_as_glob(tmp_path):
     assert engine.evaluate(call=_call("write_file", {"path": "x.txt"}), tool=definition, context=context).decision == "ask"
 
 
-def test_v4_restores_stable_identity_plan_and_only_paused_pending_inputs(openai_provider_config, tmp_path):
+def test_session_restores_stable_identity_plan_and_only_paused_pending_inputs(openai_provider_config, tmp_path):
     session = SessionController(openai_provider_config, cwd=tmp_path)
     session.set_work_phase("plan")
     session.set_permission_policy("acceptEdits")
+    session.create_user_message("制定计划")
     plan = session.set_plan_snapshot("# 本会话计划", source_message_id="assistant-plan", ready=True)
     session.update_pending_inputs([
         PendingInput("one", "随后检查", "follow_up", "task-one"),
         PendingInput("two", "立即调整", "steer", "task-one"),
     ])
-    session.save_session("alpha")
+    saved_id = session.session_id
+    session.close()
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("alpha")
+    restored.resume_session(saved_id)
     assert restored.session_id == session.session_id
     assert restored.plan_snapshot == plan
     assert restored.work_phase == "plan" and restored.permission_policy == "acceptEdits"
@@ -134,53 +136,8 @@ def test_v4_restores_stable_identity_plan_and_only_paused_pending_inputs(openai_
     assert restored.plan_snapshot is not None and not restored.plan_snapshot.ready
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
-@pytest.mark.parametrize("old_mode,restore,phase,policy", [
-    ("default", "default", "execute", "default"),
-    ("acceptEdits", "default", "execute", "acceptEdits"),
-    ("bypass", "default", "execute", "bypass"),
-    ("plan", "acceptEdits", "plan", "acceptEdits"),
-    ("plan", "invalid", "plan", "default"),
-])
-def test_legacy_sessions_migrate_axes_without_trusting_shared_plan(openai_provider_config, tmp_path, version, old_mode, restore, phase, policy):
-    session = SessionController(openai_provider_config, cwd=tmp_path)
-    session.save_session("legacy")
-    path = tmp_path / ".lancher/session/legacy.jsonl"
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    records[0]["version"] = version
-    records[0].pop("session_id")
-    if version == 1:
-        records[0].pop("permission_rule_count")
-        records = [record for record in records if record["type"] != "permissions"]
-    state = next(record for record in records if record["type"] == "state")
-    state["data"] = {"runtime_mode": old_mode, "plan_restore_mode": restore}
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
-    (tmp_path / ".lancher/plan.md").write_text("不属于本会话的旧计划", encoding="utf-8")
-    session.resume_session("legacy")
-    identity = session.session_id
-    assert (session.work_phase, session.permission_policy) == (phase, policy)
-    assert session.plan_snapshot is None
-    session.resume_session("legacy")
-    assert session.session_id == identity
-    session.save_session("legacy")
-    assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["version"] == 4
 
 
-def test_corrupt_plan_snapshot_rejected_before_replacing_session(openai_provider_config, tmp_path):
-    session = SessionController(openai_provider_config, cwd=tmp_path)
-    snapshot = PlanSnapshot.create("原计划", "source")
-    with pytest.raises(ValueError, match="摘要"):
-        session.set_plan_snapshot(replace(snapshot, content="已篡改"))
-    assert session.plan_snapshot is None
-    session.set_plan_snapshot(snapshot)
-    session.save_session("alpha")
-    path = tmp_path / ".lancher/session/alpha.jsonl"
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    next(record for record in records if record["type"] == "state")["data"]["plan_snapshot"]["digest"] = "wrong"
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
-    with pytest.raises(SessionStoreError, match="摘要"):
-        session.resume_session("alpha")
-    assert session.plan_snapshot == snapshot
 
 
 def test_ui_config_and_legacy_plan_config_roundtrip(openai_provider_config):

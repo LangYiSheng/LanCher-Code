@@ -37,7 +37,7 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 | 组件 | 类 / 入口 | 职责边界 |
 |---|---|---|
 | 应用装配 | `app.run_app()` | 只做组装，不做业务逻辑 |
-| 会话控制器 | `SessionController`（`session.py`） | 会话状态、transcript、阶段、权限、计划快照、待处理输入与 v4 持久化 |
+| 会话控制器 | `SessionController`（`session.py`）与 `sessions/` | 会话状态、transcript、阶段、权限、计划与队列；独立 UUID 和事件日志持久化 |
 | 工具循环 | `TurnRunner`（`turn_runner.py`） | 回合调度、忙时输入投递、取消、压缩与计划确认 |
 | 上下文治理 | `context_management.py` | Token 估算、结果卸载、摘要压缩（纯函数 + 少量 IO） |
 | 权限引擎 | `PermissionEngine` / `PermissionStorage`（`permission_engine.py`） | 权限判定与规则存储，不执行工具 |
@@ -82,7 +82,7 @@ graph TD
     CLA --> BASE
     SVC --> PR[prompting]
     SVC --> CM
-    SVC --> ST[session_store]
+    SVC --> ST[sessions.service / repository / codec]
     TUI --> TR
     TUI --> SVC
     TUI --> PE
@@ -122,17 +122,17 @@ graph TD
 
 ## 阶段边界与权限系统
 
-`tool_available_in_phase()` 先限定阶段工具范围：讨论只读；计划允许只读与专用计划写入；执行允许常规工具。讨论/计划阶段不开放 Bash；MCP 仅在服务端明确标记只读时进入只读范围。随后 `PermissionEngine.evaluate()` 处理以下检查：
+`tool_available_in_phase()` 先限定阶段工具范围：讨论与计划的源码只读，但当前 Session workspace 允许内置文件读写；计划另可保存计划正文；执行允许常规工具。讨论/计划阶段不开放 Bash；MCP 仅在服务端明确标记只读时进入只读范围。随后 `PermissionEngine.evaluate()` 处理以下检查：
 
 ```text
-① 路径沙箱 —— 文件类工具路径必须落在项目根目录内（解析符号链接后判断）
+① 文件路径边界 —— 项目根、当前 Session workspace 和内部控制文件边界
 ② 危险命令黑名单（bash 工具）—— 命中即 deny，不可绕过
 ③ 规则引擎 —— session > project > user 三层规则，格式 ToolLabel(value)
 ④ 权限策略 —— default / acceptEdits / bypass
 ⑤ 人在回路 —— 仍未放行时生成 PermissionRequest，TUI 弹窗由用户决定
 ```
 
-阶段边界、路径沙箱与黑名单均不可被允许规则或 `bypass` 覆盖。范围内按 **规则 > 权限策略 > 用户确认** 判定；同层规则最后匹配者生效。新权限授权使用 `exact` 精确匹配，设置中可显式维护 `glob` 通配或保留 `legacy` 旧规则。详见 [modules/permission-engine.md](modules/permission-engine.md)。
+阶段边界、文件路径边界与黑名单均不可被允许规则或 `bypass` 覆盖。当前 Session workspace 的文件工具写入已批准，但显式拒绝仍生效；普通路径按 **规则 > 权限策略 > 用户确认** 判定，同层规则最后匹配者生效。新权限授权使用 `exact` 精确匹配，设置中可显式维护 `glob` 通配或保留 `legacy` 旧规则。文件工具边界不构成操作系统沙箱。详见 [modules/permission-engine.md](modules/permission-engine.md)。
 
 ## 关键对象生命周期
 
@@ -140,10 +140,12 @@ graph TD
 
 ```text
 app.run_app() 创建
-→ 绑定 provider_config / cwd / plan 文件路径 / 初始阶段与权限
+→ 绑定 provider_config / cwd / 初始阶段与权限，尚无 Session ID
 → 每轮对话：create_user_message → create_assistant_message → 流式追加 → complete_message
-→ 会话命名后（/session save）：每次状态变更 auto_save 写 JSONL
-→ 进程退出：内存状态自然销毁（未保存的会话可通过 /session save 留存）
+→ 首条用户消息：先创建 UUID Session 和 workspace，再调用模型
+→ 状态变更：增量追加事件，流式短间隔刷新、关键边界同步刷新
+→ /session new 或 resume：刷新旧会话并切换写入者
+→ 进程退出：close 刷新、写快照、释放文件锁
 ```
 
 ### `TurnRunner`（`turn_runner.py`）

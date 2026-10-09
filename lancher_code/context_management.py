@@ -27,6 +27,7 @@ from lancher_code.models import (
     ToolResultReplacement,
 )
 from lancher_code.providers.base import ChatProvider
+from lancher_code.sessions.paths import validate_control_path
 
 
 logger = get_logger("context_management")
@@ -126,6 +127,8 @@ async def offload_tool_results(
     transcript: list[ConversationMessage],
     state: ContextManagementState,
     project_root: Path,
+    *,
+    result_directory: Path,
 ) -> ToolOffloadResult:
     candidate = copy.deepcopy(transcript)
     result_blocks: dict[str, ContentBlock] = {}
@@ -176,7 +179,7 @@ async def offload_tool_results(
             state.seen_call_ids.add(call_id)
             continue
         try:
-            replacement = await _write_tool_result(project_root, state.context_id, call_id, block.text)
+            replacement = await _write_tool_result(project_root, result_directory, call_id, block.text)
         except OSError as exc:
             logger.warning(
                 "event=tool_result_offload_failed context_id=%s call_id=%s error=%s",
@@ -383,26 +386,33 @@ def _drop_oldest_groups(
 
 async def _write_tool_result(
     project_root: Path,
-    context_id: str,
+    result_directory: Path,
     call_id: str,
     text: str,
 ) -> ToolResultReplacement:
     safe_call_id = hashlib.sha256(call_id.encode("utf-8")).hexdigest() + ".txt"
     root = project_root.resolve()
-    directory = (root / ".lancher" / "context" / context_id / "tool-results").resolve()
+    directory = result_directory.absolute()
+    validate_control_path(root, directory)
     if root not in directory.parents:
         raise OSError("工具结果目录越过项目边界。")
     path = directory / safe_call_id
+    validate_control_path(root, path)
     relative_path = path.relative_to(root).as_posix()
     preview = _build_tool_preview(text, relative_path)
 
     def write() -> None:
+        validate_control_path(root, directory)
+        validate_control_path(root, path)
         directory.mkdir(parents=True, exist_ok=True)
+        validate_control_path(root, directory)
         if path.exists():
             return
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        validate_control_path(root, temporary)
         try:
             temporary.write_text(text, encoding="utf-8", newline="\n")
+            validate_control_path(root, path)
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)

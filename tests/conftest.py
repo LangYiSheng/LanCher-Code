@@ -46,3 +46,9 @@ def console_and_buffer() -> tuple[Console, io.StringIO]:
 
 def mock_client_factory(handler: httpx.MockTransport) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=handler, timeout=30.0)
+
+
+@pytest.fixture(autouse=True)
+def isolated_project_directory(tmp_path, monkeypatch):
+    """每个测试使用自己的项目，防止自动会话落盘污染真实工作目录。"""
+    monkeypatch.chdir(tmp_path)

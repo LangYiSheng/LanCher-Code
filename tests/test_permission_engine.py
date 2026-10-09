@@ -134,7 +134,6 @@ def test_default_mode_asks_for_file_write(tmp_path: Path) -> None:
     [
         ("bash", "execute", "acceptEdits", {"command": "git status"}, "command"),
         ("write_file", "execute", "default", {"path": "demo.txt", "content": "hello"}, "file_edit"),
-        ("write_plan_file", "plan", "default", {"content": "1. 调查问题"}, "file_edit"),
         ("mcp__github__create_issue", "execute", "acceptEdits", {"title": "问题"}, "external_tool"),
     ],
 )

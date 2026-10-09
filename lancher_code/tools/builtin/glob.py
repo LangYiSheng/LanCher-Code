@@ -85,7 +85,8 @@ class GlobTool:
             matches = [
                 path.resolve()
                 for path in search_root.glob(pattern)
-                if path.is_file() and not is_skipped_path(path, context.project_root or context.cwd)
+                if path.is_file() and path.resolve().is_relative_to(search_root.resolve())
+                and not is_skipped_path(path, search_root)
             ]
         except Exception as exc:
             return build_tool_error(

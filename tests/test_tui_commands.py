@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 from textual.widgets import Static
 
-from lancher_code.models import UIConfig
+from lancher_code.models import StreamEvent, UIConfig
 from lancher_code.session import SessionController
-from lancher_code.session_store import SessionStoreError
+from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.tui_views.command_actions import CommandConfirmationScreen
 from lancher_code.tui_views.composer import CommandHintBar, ComposerSubmitted, ComposerTextArea, SlashCompletionMenu, SlashCompletionMenuItem
 from lancher_code.tui_views.theme import apply_theme
@@ -25,66 +25,142 @@ async def type_command(app, pilot, text):
 
 
 @pytest.mark.asyncio
-async def test_save_free_name_tab_optional_enter_skips_force(openai_provider_config, tmp_path):
-    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+async def test_first_message_rename_new_and_resume_are_isolated(openai_provider_config, tmp_path):
+    response = [StreamEvent(kind="text_delta", text="收到"), StreamEvent(kind="message_end")]
+    app, session = _build_app(FakeProvider([response, response]), openai_provider_config, UIConfig(), tmp_path)
     async with app.run_test() as pilot:
-        composer = await type_command(app, pilot, "/session save ")
-        assert "输入一个会话名" in str(app.query_one(CommandHintBar).render())
+        assert session.session_id is None
+        composer = await type_command(app, pilot, "第一条消息")
         await pilot.press("enter")
-        assert composer.text == "/session save "
-        assert session.active_session_name is None
-        await type_command(app, pilot, "/session save 命令改版")
-        await pilot.press("tab")
-        assert composer.text == "/session save 命令改版 "
-        assert app.query_one(SlashCompletionMenu).display
-        assert not composer.slash_enter_accepts
-        assert "Enter 执行" in str(app.query_one("#composer-help", Static).render())
+        await pilot.pause()
+        original_id = session.session_id
+        original_workspace = session.paths.workspace
+        assert original_id and session.paths.events.is_file()
+        await type_command(app, pilot, f"/session rename {original_id} 命令改版  新标题")
         await pilot.press("enter")
-        assert session.active_session_name == "命令改版"
+        assert session.session_title == "命令改版  新标题"
+        assert session.session_id == original_id
+        await type_command(app, pilot, "/session new")
+        await pilot.press("tab", "enter")
+        assert session.session_id is None and session.paths is None
+        assert not session.state.messages and not app._chat_started
+        await type_command(app, pilot, "另一个任务")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert session.session_id != original_id and session.paths.workspace != original_workspace
+        await type_command(app, pilot, f"/session resume {original_id}")
+        await pilot.press("tab", "enter")
+        await pilot.pause()
+        assert session.session_id == original_id
+        assert session.session_title == "命令改版  新标题"
+        assert session.state.messages[0].content == "第一条消息"
         assert composer.text == ""
         assert len(app.screen_stack) == 1
 
 
 @pytest.mark.asyncio
-async def test_force_cancel_then_confirm_once_and_preserve_new_draft(openai_provider_config, tmp_path):
+@pytest.mark.parametrize("action", ["archive", "remove"])
+async def test_destructive_action_cancel_then_confirm_preserves_new_draft(openai_provider_config, tmp_path, action):
     saved = SessionController(openai_provider_config, cwd=tmp_path)
     saved.create_user_message("旧内容")
-    saved.save_session("saved")
-    original = (tmp_path / '.lancher/session/saved.jsonl').read_bytes()
+    saved_id = saved.session_id
+    events_path = saved.paths.events
+    original = events_path.read_bytes()
+    saved.close()
     app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
-    session.create_user_message("新内容")
     async with app.run_test() as pilot:
-        composer = await type_command(app, pilot, "/session save saved --force")
-        await pilot.press("enter")
+        composer = await type_command(app, pilot, f"/session {action} {saved_id}")
+        await pilot.press("tab", "enter")
         assert isinstance(app.screen, CommandConfirmationScreen)
         await pilot.press("escape")
-        assert composer.text == "/session save saved --force"
-        assert (tmp_path / '.lancher/session/saved.jsonl').read_bytes() == original
+        assert composer.text == f"/session {action} {saved_id}"
+        assert events_path.read_bytes() == original
         await pilot.press("enter")
         await pilot.pause()
         composer.text = "新草稿"
         await pilot.click("#command-confirm")
         await pilot.pause()
         assert composer.text == "新草稿"
-        assert session.active_session_name == "saved"
-        restored = SessionController(openai_provider_config, cwd=tmp_path)
-        restored.resume_session("saved")
-        assert restored.state.messages[0].content == "新内容"
+        if action == "remove":
+            assert not events_path.parent.exists()
+        else:
+            assert events_path.is_file()
+            assert next(item for item in session.list_sessions() if item.session_id == saved_id).archived
+        assert session.session_id is None
 
 
 @pytest.mark.asyncio
 async def test_stale_confirmation_cannot_change_new_session(openai_provider_config, tmp_path):
     app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
     other = SessionController(openai_provider_config, cwd=tmp_path)
-    other.save_session("other")
+    other.create_user_message("保留此会话")
+    other_id = other.session_id
+    other.close()
+    session.create_user_message("当前会话")
     async with app.run_test() as pilot:
-        await type_command(app, pilot, "/session save overwritten --force")
-        await pilot.press("enter")
-        session.resume_session("other", force=True)
+        await type_command(app, pilot, f"/session remove {other_id}")
+        await pilot.press("tab", "enter")
+        app._turn_runner.new_session()
         await pilot.click("#command-confirm")
         await pilot.pause()
-        assert not (tmp_path / '.lancher/session/overwritten.jsonl').exists()
-        assert session.active_session_name == "other"
+        assert other_id in [item.session_id for item in session.list_sessions()]
+        assert session.session_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_draft", ["", "后来编辑的新草稿"])
+async def test_failed_session_creation_keeps_draft_for_retry(openai_provider_config, tmp_path, monkeypatch, replacement_draft):
+    provider = FakeProvider([[StreamEvent(kind="text_delta", text="已收到"), StreamEvent(kind="message_end")]])
+    app, session = _build_app(provider, openai_provider_config, UIConfig(), tmp_path)
+    create = session._sessions.repository.create
+
+    def fail(*_args):
+        if replacement_draft:
+            app.query_one(ComposerTextArea).text = replacement_draft
+        raise SessionRepositoryError("磁盘不可写")
+
+    monkeypatch.setattr(session._sessions.repository, "create", fail)
+    async with app.run_test() as pilot:
+        composer = await type_command(app, pilot, "需要保留的第一条消息")
+        await pilot.press("enter")
+        for _ in range(60):
+            if not app._is_streaming:
+                break
+            await pilot.pause(0.05)
+        assert not app._is_streaming and not provider.requests
+        assert session.session_id is None and not app._chat_started
+        expected_draft = replacement_draft or "需要保留的第一条消息"
+        assert composer.text == expected_draft
+        monkeypatch.setattr(session._sessions.repository, "create", create)
+        await pilot.press("enter")
+        for _ in range(60):
+            if not app._is_streaming:
+                break
+            await pilot.pause(0.05)
+        assert session.session_id and len(provider.requests) == 1
+        assert session.state.messages[0].content == expected_draft
+        assert composer.text == ""
+
+
+@pytest.mark.asyncio
+async def test_corrupt_session_query_stays_usable_and_remove_confirms_uuid(openai_provider_config, tmp_path):
+    saved = SessionController(openai_provider_config, cwd=tmp_path)
+    saved.create_user_message("损坏记录")
+    saved_id = saved.session_id
+    events_path = saved.paths.events
+    saved.close()
+    events_path.write_text("损坏的完整记录\n", encoding="utf-8")
+    app, _ = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    async with app.run_test() as pilot:
+        await type_command(app, pilot, "/session ")
+        assert "会话列表不可用" in str(app.query_one(CommandHintBar).render())
+        await type_command(app, pilot, f"/session remove {saved_id}")
+        await pilot.press("enter")
+        assert isinstance(app.screen, CommandConfirmationScreen)
+        assert saved_id in app.screen.description
+        await pilot.click("#command-confirm")
+        await pilot.pause()
+        assert not events_path.parent.exists()
 
 
 @pytest.mark.asyncio
@@ -184,15 +260,19 @@ async def test_menu_keyboard_and_layout_across_sizes(tmp_path, theme, size):
         assert not menu.display and composer.text == "/"
 
 
-def test_save_failure_restores_binding_and_force_requires_explicit_opt_in(openai_provider_config, tmp_path, monkeypatch):
-    session = SessionController(openai_provider_config, cwd=tmp_path)
-    session.save_session("first")
-    session.save_session("second")
-    with pytest.raises(SessionStoreError):
-        session.save_session("first")
-    def fail(*_args):
-        raise SessionStoreError("磁盘不可写")
-    monkeypatch.setattr(session._session_store, "save", fail)
-    with pytest.raises(SessionStoreError):
-        session.save_session("first", force=True)
-    assert session.active_session_name == "second"
+@pytest.mark.asyncio
+async def test_list_and_new_do_not_create_session_and_active_destructive_commands_are_refused(openai_provider_config, tmp_path):
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    async with app.run_test() as pilot:
+        composer = await type_command(app, pilot, "/session list")
+        await pilot.press("tab", "enter")
+        assert session.session_id is None and not session.list_sessions()
+        await pilot.press("escape")
+        await type_command(app, pilot, "/session new")
+        await pilot.press("tab", "enter")
+        assert session.session_id is None and not session.list_sessions()
+        session.create_user_message("当前任务")
+        for action in ("archive", "remove"):
+            with pytest.raises(SessionRepositoryError, match="先运行 /session new"):
+                await app._execute_session_command(f"{action} {session.session_id}")
+        assert len(app.screen_stack) == 1

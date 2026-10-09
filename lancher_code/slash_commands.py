@@ -7,8 +7,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class SlashCompletionContext:
     text: str
-    session_names: tuple[str, ...] = ()
-    active_session_name: str | None = None
+    session_ids: tuple[str, ...] = ()
+    active_session_id: str | None = None
     model_choices: tuple[tuple[str, str], ...] = ()
     active_model_ref: str | None = None
     default_model_ref: str | None = None
@@ -48,11 +48,12 @@ class SlashCommandMatch:
 
 
 SESSION_ACTIONS = {
+    "new": "开始新的对话，首条消息自动创建会话",
     "list": "列出此项目下所有的会话",
-    "save": "保存当前对话并命名",
-    "resume": "切换到已保存的会话",
-    "rename": "修改已保存的会话名",
-    "remove": "删除已保存的会话",
+    "resume": "按 UUID 恢复已有会话",
+    "rename": "修改会话标题，UUID 保持不变",
+    "archive": "归档已有会话",
+    "remove": "删除会话及其工作文件",
 }
 POLICIES = {
     "default": "标准 · 修改和命令按规则询问",
@@ -129,14 +130,11 @@ class SlashCommandRegistry:
         if name == "session":
             if not completed:
                 for value, label in SESSION_ACTIONS.items():
-                    add(value, label, value != "list", "作用范围：当前项目")
-            elif len(completed) == 1 and completed[0] in {"resume", "remove", "rename"}:
-                for value in context.session_names:
-                    if completed[0] != "remove" or value != context.active_session_name:
-                        add(value, "已保存的项目会话" + (" · 当前" if value == context.active_session_name else ""), completed[0] == "rename", "作用范围：当前项目")
-            elif len(completed) == 2 and completed[0] in {"save", "resume"}:
-                description = "覆盖同名会话" if completed[0] == "save" else "放弃当前未保存内容并切换"
-                add("--force", "可选 · " + description, detail="Enter 跳过此参数；Tab 填入后仍需确认。", optional=True)
+                    add(value, label, value not in {"new", "list"}, "作用范围：当前项目")
+            elif len(completed) == 1 and completed[0] in {"resume", "archive", "remove", "rename"}:
+                for value in context.session_ids:
+                    if completed[0] not in {"archive", "remove"} or value != context.active_session_id:
+                        add(value, "项目会话" + (" · 当前" if value == context.active_session_id else ""), completed[0] == "rename", "使用完整 UUID；标题可重复。")
         elif name == "permissions" and not completed:
             for value, label in POLICIES.items():
                 add(value, label + (" · 当前" if value == context.permission_policy else ""), detail="作用范围：本次对话；不改变工作阶段。")
@@ -170,12 +168,12 @@ class SlashCommandRegistry:
         if name == "session":
             if not args:
                 return "选择一个操作 · 作用范围：当前项目"
-            if args[0] in {"save", "resume", "remove", "rename"} and len(args) == 1:
-                return "输入一个会话名 · 必填 · 中文、字母、数字、下划线或短横线"
+            if args[0] in {"resume", "archive", "remove", "rename"} and len(args) == 1:
+                return "输入完整会话 UUID · 必填 · Tab 从项目会话中选择"
             if args[0] == "rename" and len(args) == 2:
-                return "输入一个新的会话名 · 必填 · Tab 进入下一参数"
-            if args[0] in {"save", "resume"} and len(args) == 2:
-                return "Enter 执行 · Tab 查看可选参数 --force"
+                return "输入新的会话标题 · 必填 · 标题可以包含空格"
+            if args[0] in {"archive", "remove"} and len(args) == 2:
+                return "Enter 查看目标并确认 · 当前会话请先 /session new"
         if name == "model" and not args:
             return "选择本次模型 · 可输入名称或供应商 ID 检索"
         if name == "permissions" and not args:
@@ -189,7 +187,7 @@ class SlashCommandRegistry:
         match = self.parse_submission(text)
         if match and match.definition.name == "session":
             args = match.arguments_text.split()
-            if len(args) == 2 and args[0] in {"save", "resume", "rename"} and not text[-1].isspace():
+            if len(args) == 2 and args[0] == "rename" and not text[-1].isspace():
                 return text + " "
         return None
 
@@ -218,11 +216,10 @@ class SlashCommandRegistry:
                 raise ValueError("设置值无效；请从候选项中选择。")
         if name == "session" and args:
             action = args[0]
-            counts = {"list": {1}, "save": {2, 3}, "resume": {2, 3}, "rename": {3}, "remove": {2}}
-            if action not in counts or len(args) not in counts[action]:
+            counts = {"new": {1}, "list": {1}, "resume": {2}, "archive": {2}, "remove": {2}}
+            valid = len(args) >= 3 if action == "rename" else action in counts and len(args) in counts[action]
+            if not valid:
                 raise ValueError("参数不完整或多余；" + self.hint("/session " + arguments))
-            if action in {"save", "resume"} and len(args) == 3 and args[2] != "--force":
-                raise ValueError("可选参数只能是 --force。")
 
 
 def create_default_slash_command_registry() -> SlashCommandRegistry:
@@ -231,7 +228,7 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
         ("discuss", "讨论想法 · 切换到讨论模式", "只读调查；不改变审批策略", "/discuss [问题]", False),
         ("plan", "制定计划 · 切换到计划模式", "调查并保存计划，确认后执行", "/plan [任务]", False),
         ("do", "开始执行 · 切换到执行模式", "保留当前审批策略", "/do [任务]", False),
-        ("session", "切换对话 · 保存或切换对话", "作用范围：当前项目", "/session <操作> [名称]", True),
+        ("session", "切换对话 · 新建、恢复和管理会话", "首条消息自动保存；作用范围：当前项目", "/session <new|list|resume|rename|archive|remove> [UUID] [标题]", True),
         ("model", "选择模型 · 更改本次对话模型", "本次选择与新对话默认相互独立", "/model <供应商ID/模型ID>", True),
         ("permissions", "调整权限 · 更改本次审批策略", "只修改权限，不改变工作阶段", "/permissions <default|acceptEdits|bypass>", True),
         ("compact", "压缩上下文 · 整理当前对话记录", "作用范围：当前对话上下文", "/compact", False),

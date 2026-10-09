@@ -55,7 +55,6 @@ async def run_app() -> int:
     session_controller = SessionController(
         active_config,
         cwd=cwd,
-        plan_file_path=Path(config.runtime.plan_file_path),
         initial_work_phase=config.runtime.work_phase,
         initial_permission_policy=config.runtime.permission_policy,
         permission_storage=permission_storage,
@@ -107,4 +106,7 @@ async def run_app() -> int:
     try:
         return await tui.run()
     finally:
-        await mcp_manager.close()
+        try:
+            session_controller.close()
+        finally:
+            await mcp_manager.close()

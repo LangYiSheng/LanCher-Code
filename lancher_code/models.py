@@ -109,16 +109,14 @@ class UIConfig:
 class RuntimeConfig:
     tool_loop_limit: int = 50
     unknown_tool_streak_limit: int = 3
-    plan_file_path: str = "./.lancher/plan.md"
     work_phase: WorkPhase = "execute"
     permission_policy: PermissionPolicy = "default"
 
     def __init__(self, tool_loop_limit: int = 50, unknown_tool_streak_limit: int = 3,
-                 plan_file_path: str = "./.lancher/plan.md", permission_mode: RuntimeMode | None = None,
+                 permission_mode: RuntimeMode | None = None,
                  *, work_phase: WorkPhase | None = None, permission_policy: PermissionPolicy | None = None) -> None:
         self.tool_loop_limit = tool_loop_limit
         self.unknown_tool_streak_limit = unknown_tool_streak_limit
-        self.plan_file_path = plan_file_path
         self.work_phase, self.permission_policy = resolve_runtime_axes(permission_mode, work_phase, permission_policy)
 
     @property
@@ -286,9 +284,11 @@ class ToolDefinition:
 
 
 def tool_available_in_phase(tool: ToolDefinition, work_phase: WorkPhase) -> bool:
-    """工具发现和实际执行共享同一个不可被权限覆盖的阶段边界。"""
+    """工具发现按能力筛选；本地写工具再由权限引擎检查实际资源。"""
     if tool.name == "write_plan_file":
         return work_phase == "plan"
+    if tool.name in {"write_file", "edit_file"} and tool.permission is None:
+        return True
     if work_phase == "execute":
         return any(mode in tool.allowed_modes for mode in ("default", "acceptEdits", "bypass"))
     if tool.name == "bash":
@@ -319,6 +319,9 @@ class ToolContext:
     mode: RuntimeMode = "default"
     project_root: Path | None = None
     plan_file_path: Path | None = None
+    session_id: str | None = None
+    session_workspace: Path | None = None
+    session_root: Path | None = None
     cancellation_token: CancellationToken | None = None
     file_state_cache: "FileStateCache | None" = None
     work_phase: WorkPhase | None = None
@@ -540,7 +543,7 @@ class SessionState:
     messages: list[SessionMessage] = field(default_factory=list)
     work_phase: WorkPhase = "execute"
     permission_policy: PermissionPolicy = "default"
-    session_id: str = field(default_factory=lambda: uuid4().hex)
+    session_id: str | None = None
     plan_snapshot: PlanSnapshot | None = None
     pending_inputs: list[PendingInput] = field(default_factory=list)
     previous_runtime_mode: RuntimeMode | None = None
@@ -566,7 +569,7 @@ class PromptContext:
     cwd: Path
     current_date: date
     runtime_mode: RuntimeMode
-    plan_file_path: Path
+    plan_file_path: Path | None
     os_label: str
     previous_runtime_mode: RuntimeMode | None = None
     plan_mode_turn_count: int = 0
@@ -576,6 +579,8 @@ class PromptContext:
     work_phase: WorkPhase = "execute"
     permission_policy: PermissionPolicy = "default"
     plan_snapshot: PlanSnapshot | None = None
+    session_id: str | None = None
+    session_workspace: Path | None = None
 
 
 @dataclass(slots=True)

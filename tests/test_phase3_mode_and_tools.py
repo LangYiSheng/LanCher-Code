@@ -15,7 +15,6 @@ def test_session_controller_filters_tools_for_plan_mode(openai_provider_config, 
     controller = SessionController(
         openai_provider_config,
         cwd=tmp_path,
-        plan_file_path=Path("./.lancher/plan.md"),
     )
     controller.set_runtime_mode("plan")
     registry = create_default_tool_registry()
@@ -26,9 +25,7 @@ def test_session_controller_filters_tools_for_plan_mode(openai_provider_config, 
     )
 
     tool_names = [tool.name for tool in request.tools]
-    assert tool_names == ["read_file", "glob", "grep", "write_plan_file", "tool_search"]
-    assert "write_file" not in tool_names
-    assert "edit_file" not in tool_names
+    assert tool_names == ["read_file", "write_file", "edit_file", "glob", "grep", "write_plan_file", "tool_search"]
 
 
 def test_bash_tool_rejects_even_readonly_command_in_plan_mode(tmp_path: Path) -> None:
@@ -63,7 +60,10 @@ def test_bash_tool_rejects_side_effect_command_in_plan_mode(tmp_path: Path) -> N
 
 def test_write_plan_file_tool_only_writes_configured_path(tmp_path: Path) -> None:
     tool = WritePlanFileTool()
-    plan_path = tmp_path / ".lancher" / "plan.md"
+    session_id = "a" * 32
+    session_root = tmp_path / ".lancher" / "sessions" / session_id
+    workspace = session_root / "workspace"
+    plan_path = workspace / "plan.md"
 
     result = __import__("asyncio").run(
         tool.execute(
@@ -73,6 +73,9 @@ def test_write_plan_file_tool_only_writes_configured_path(tmp_path: Path) -> Non
                 timeout_seconds=1,
                 mode="plan",
                 plan_file_path=plan_path,
+                session_id=session_id,
+                session_root=session_root,
+                session_workspace=workspace,
             ),
         )
     )

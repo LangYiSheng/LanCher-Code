@@ -25,7 +25,7 @@ lancher-code/
 │   ├── logging_system.py          # 日志系统：ERROR 级滚动文件日志 + 敏感信息脱敏
 │   ├── models.py                  # 全项目数据模型（dataclass + Literal 类型）
 │   ├── session.py                 # SessionController：会话状态与 transcript 管理
-│   ├── session_store.py           # ProjectSessionStore：JSONL 会话持久化
+│   ├── sessions/                  # 路径、事件仓库、状态编解码与服务
 │   ├── turn_runner.py             # TurnRunner：ReAct 工具循环与事件流
 │   ├── context_management.py      # 上下文治理：Token 估算、结果卸载、摘要压缩
 │   ├── prompting.py               # 提示词构建（system prompt / Plan Mode / 动态提醒）
@@ -84,7 +84,8 @@ lancher-code/
 │   ├── test_permission_engine.py  # 权限引擎
 │   ├── test_prompting.py          # 提示词构建
 │   ├── test_session.py            # 会话层
-│   ├── test_session_store.py      # 会话存储
+│   ├── test_session_repository.py # Session事件仓库、锁与路径校验
+│   ├── test_session_lifecycle.py  # 首条消息、恢复与会话隔离
 │   ├── test_settings.py           # 设置服务/界面
 │   ├── test_slash_commands.py     # 斜杠命令
 │   ├── test_tool_call_parser.py   # 工具调用解析
@@ -100,9 +101,10 @@ lancher-code/
 └── .lancher/                      # 项目级运行时数据（gitignore）
     ├── permissions.yaml           # 项目级权限规则
     ├── mcp.yaml                   # 项目级 MCP Server 配置
-    ├── plan.md                    # 计划文件（Plan Mode 写入）
-    ├── session/                   # 已保存会话（JSONL，按需创建）
-    └── context/                   # 上下文治理产生的卸载文件（按需创建，当前仓库中尚不存在）
+    └── sessions/                  # 首条消息自动创建 UUID Session
+        └── <uuid>/                # events.jsonl、meta.json、checkpoint.json
+            ├── blobs/             # 会话内部工具结果等内容
+            └── workspace/         # plan.md、tmp/、artifacts/，所有阶段可写
 ```
 
 ## 分层说明
@@ -146,7 +148,7 @@ lancher-code/
 
 - **负责**：会话状态、协议无关 transcript、模式切换、会话保存/恢复
 - **被谁调用**：`app.py`、`turn_runner.py`、`tui_views/chat.py`
-- **会调用谁**：`prompting`（组装请求）、`context_management`（估算/压缩）、`session_store`（持久化）
+- **会调用谁**：`prompting`（组装请求）、`context_management`（估算/压缩）、`sessions`（事件持久化）
 
 ### `lancher_code/permission_engine.py`
 

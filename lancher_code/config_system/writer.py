@@ -53,7 +53,6 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
         "runtime": {
             "tool_loop_limit": config.runtime.tool_loop_limit,
             "unknown_tool_streak_limit": config.runtime.unknown_tool_streak_limit,
-            "plan_file_path": config.runtime.plan_file_path,
             "work_phase": config.runtime.work_phase,
             "permission_policy": config.runtime.permission_policy,
         },

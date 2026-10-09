@@ -150,22 +150,20 @@ async def test_chat_applies_settings_without_changing_active_model_for_new_defau
 async def test_chat_resume_restores_saved_model_then_missing_model_falls_back(tmp_path):
     app, runner, session, config, _ = build_model_app(tmp_path)
     runner.switch_model("other/chat")
-    session.save_session("second")
-    session.save_session("working")
+    session.create_user_message("备用模型任务")
+    saved_id = session.session_id
+    runner.new_session()
+    session.create_user_message("当前默认模型任务")
     async with app.run_test() as pilot:
-        runner.switch_model("deepseek/chat")
-        await app._execute_slash_command("session", "resume second --force")
-        await pilot.pause()
-        await pilot.click("#command-confirm")
+        await app._execute_slash_command("session", f"resume {saved_id}")
         await pilot.pause()
         assert runner.model_ref == "other/chat"
-        session.save_session("working-again")
+        runner.new_session()
+        session.create_user_message("另一个任务")
         changed = deepcopy(config)
         del changed.providers["other"]
         runner.reload_models(changed)
-        await app._execute_slash_command("session", "resume second --force")
-        await pilot.pause()
-        await pilot.click("#command-confirm")
+        await app._execute_slash_command("session", f"resume {saved_id}")
         await pilot.pause()
         assert runner.model_ref == "deepseek/chat"
         assert "不存在" in runner.model_notice

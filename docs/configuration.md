@@ -11,7 +11,7 @@ LanCher Code 的配置来源有：**YAML 配置文件**、**环境变量**（通
 | `~/.lancher/mcp.yaml` | 全局 MCP Server 配置 | 引导界面保存时自动生成模板（`mcp/template.py`） |
 | `./.lancher/permissions.yaml` | 项目级权限规则（`./` 为当前工作目录） | 首次产生项目级规则时自动写入 |
 | `./.lancher/mcp.yaml` | 项目级 MCP Server 配置 | 手动创建 |
-| `./.lancher/plan.md` | Plan Mode 计划文件（默认路径，可配置） | `write_plan_file` 工具写入 |
+| `./.lancher/sessions/<UUID>/workspace/plan.md` | 当前 Session 计划文件 | 首条消息建立工作目录，计划工具写入 |
 
 路径常量定义在 `lancher_code/config_system/paths.py`。
 
@@ -89,7 +89,6 @@ default_model: deepseek/chat
 |---|---|---|---|---|
 | `runtime.tool_loop_limit` | int | `50` | 否 | 单轮对话最大工具循环次数 |
 | `runtime.unknown_tool_streak_limit` | int | `3` | 否 | 连续请求未知工具达到该次数即停止本轮 |
-| `runtime.plan_file_path` | str | `./.lancher/plan.md` | 否 | Plan Mode 计划文件路径（相对路径基于启动时 cwd 解析） |
 | `runtime.work_phase` | str | `execute` | 否 | 初始工作阶段：`discuss` / `plan` / `execute` |
 | `runtime.permission_policy` | str | `default` | 否 | 权限策略：`default` / `acceptEdits` / `bypass`，不改变阶段 |
 
@@ -113,9 +112,9 @@ rules:
     result: deny
 ```
 
-三层规则优先级：**session > project > user**（session 层仅内存，不落盘；project / user 层落盘）。
+三层规则优先级：**session > project > user**（session 规则随当前 UUID Session 自动持久化，project / user 规则写入 YAML）。
 
-会话规则会随命名会话保存。阶段硬限制先于三层规则；讨论和计划阶段不开放通用 Shell，且 MCP 必须明确声明只读。
+阶段硬限制先于三层规则；讨论和计划阶段不开放通用 Shell 和源码修改，MCP 必须明确声明只读。当前 Session 的 `workspace/` 在所有阶段支持已批准的内置文件工具读写，计划路径由 Session 管理，不再使用 `runtime.plan_file_path`。此路径批准不构成操作系统沙箱。
 
 ### 匹配格式
 
@@ -173,7 +172,7 @@ mcp_servers:
 
 保存逻辑（`SettingsService.save()`）：先校验整个目录与其余配置，备份旧格式，再以临时文件和逐文件原子替换方式写盘，最后更新权限规则。模型目录保存后立即可用；修改默认值不覆盖当前会话已选模型。当前模型仍存在时继续使用它，并更新其连接配置；已删除时回退新默认模型并提示。MCP 的修改仍需重启生效。
 
-聊天中使用 `/model` 展开模型候选项，Tab 或 Enter 填入后再次 Enter 切换，也可输入 `/model 供应商ID/模型ID`。仅切换当前会话，保留历史和权限，不修改新对话默认模型；已保存会话会记住所选引用。`/settings default-model 供应商ID/模型ID` 单独修改默认值。详见 [cli-and-interaction.md](cli-and-interaction.md)。
+聊天中使用 `/model` 展开模型候选项，Tab 或 Enter 填入后再次 Enter 切换，也可输入 `/model 供应商ID/模型ID`。仅切换当前会话，保留历史和权限，不修改新对话默认模型；首条消息之后的模型选择随 Session 自动持久化。`/settings default-model 供应商ID/模型ID` 单独修改默认值。详见 [cli-and-interaction.md](cli-and-interaction.md)。
 
 ## 日志
 

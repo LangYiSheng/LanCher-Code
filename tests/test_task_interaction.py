@@ -247,10 +247,12 @@ async def test_plan_execution_uses_bound_content_and_rejects_duplicate(openai_pr
 async def test_queue_persistence_restores_paused_without_sending(openai_provider_config, tmp_path):
     provider = Provider([])
     runner, session = make_runner(provider, openai_provider_config, tmp_path)
+    session.create_user_message("已有任务")
     runner.enqueue_input("恢复后由我决定")
-    session.save_session("待办")
+    saved_id = session.session_id
+    session.close()
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("待办")
+    restored.resume_session(saved_id)
     assert restored.session_id == session.session_id
     assert restored.pending_inputs[0].text == "恢复后由我决定"
     assert restored.pending_inputs[0].state == "paused"

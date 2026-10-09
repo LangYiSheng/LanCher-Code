@@ -100,14 +100,19 @@ async def test_queued_turn_honors_queue_pause_when_later_item_is_paused(openai_p
 async def test_restore_queue_saved_during_approval_closes_interrupted_tool_pair(openai_provider_config, tmp_path):
     provider = Provider([calls(("write_file", {"path": "new.txt", "content": "未批准"}))])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
-    session.save_session("审批中恢复")
     restored = SessionController(openai_provider_config, cwd=tmp_path)
 
     def handle(event):
         if event.kind == "permission_request_created":
             # 排队立即自动保存，此刻磁盘中只有 tool_use，还没有工具结果。
             runner.enqueue_input("下次继续检查")
-            restored.resume_session("审批中恢复")
+            # 正在运行的会话不能被另一写入者打开，先只读捕获磁盘记录。
+            from lancher_code.sessions.codec import SessionCodec
+            snapshot = SessionCodec.project(session._sessions.repository.read(session.session_id))
+            restored._state, restored._transcript, _, _ = SessionCodec.decode(snapshot, session.session_id)
+            restored._transcript = restored._recover_interrupted_history(restored.state, restored.transcript)
+            for item in restored.state.pending_inputs:
+                item.state = 'paused'
             runner.cancel_active_turn()
 
     await asyncio.wait_for(collect(runner, "修改文件", handle), 3)
@@ -137,11 +142,12 @@ def test_interrupted_restore_pairs_reused_call_ids_within_each_batch(openai_prov
     session.create_user_message("再次读取")
     session.create_assistant_message()
     session.append_assistant_tool_calls([call])
-    session.save_session("重复调用标识")
     session.update_pending_inputs([PendingInput("queued-id", "稍后继续")])
 
+    saved_id = session.session_id
+    session.close()
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("重复调用标识")
+    restored.resume_session(saved_id)
 
     outputs = [block for message in restored.transcript for block in message.blocks if block.kind == "tool_result"]
     assert len(outputs) == 2

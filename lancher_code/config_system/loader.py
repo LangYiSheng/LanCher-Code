@@ -188,7 +188,6 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         raw_value.get("unknown_tool_streak_limit", 3),
         "runtime.unknown_tool_streak_limit",
     )
-    plan_file_path = raw_value.get("plan_file_path", "./.lancher/plan.md")
     for key, choices in (("work_phase", {"discuss", "plan", "execute"}), ("permission_policy", {"default", "acceptEdits", "bypass"})):
         if key in raw_value and (not isinstance(raw_value[key], str) or raw_value[key] not in choices):
             raise ConfigError(f"runtime.{key} 配置无效。")
@@ -202,12 +201,9 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         )
     except (ValueError, TypeError) as exc:
         raise ConfigError(f"runtime 阶段或权限配置无效：{exc}") from exc
-    if not isinstance(plan_file_path, str) or not plan_file_path.strip():
-        raise ConfigError("runtime.plan_file_path 必须是非空字符串。")
     return RuntimeConfig(
         tool_loop_limit=tool_loop_limit,
         unknown_tool_streak_limit=unknown_tool_streak_limit,
-        plan_file_path=plan_file_path.strip(),
         work_phase=work_phase,
         permission_policy=permission_policy,
     )

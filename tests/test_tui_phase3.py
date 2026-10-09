@@ -46,7 +46,7 @@ class FakeProvider:
 
 
 def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Path) -> tuple[LanCherTextualApp, SessionController]:
-    session = SessionController(provider_config, cwd=tmp_path, plan_file_path=Path("./.lancher/plan.md"))
+    session = SessionController(provider_config, cwd=tmp_path)
     registry = ToolRegistry()
     registry.register(EchoTool())
     executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)

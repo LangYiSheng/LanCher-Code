@@ -80,7 +80,7 @@ run_user_turn(text)
        · CancelledError → cancel_message → turn_cancelled
        · LanCherError → fail_message → turn_failed
        · 其他异常 → 记日志 → fail_message → turn_failed
-    5. finally：清空权限挂起、auto_save、发送 _QUEUE_END
+    5. finally：清空权限挂起、flush 会话事件、发送 _QUEUE_END
 ```
 
 ## 事件流（TurnEvent）

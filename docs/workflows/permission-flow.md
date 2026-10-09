@@ -6,7 +6,7 @@
 
 | 工作阶段 `work_phase` | 可用能力 |
 |---|---|
-| `discuss`（讨论） | 原生只读调查工具，以及已配置且明确声明 `readOnlyHint=true` 的 MCP 工具 |
+| `discuss`（讨论） | 原生只读调查工具、当前 Session workspace 文件读写，以及明确声明 `readOnlyHint=true` 的 MCP 工具 |
 | `plan`（计划） | 讨论阶段的能力，加 `write_plan_file` 写入专用计划文件 |
 | `execute`（执行） | 已注册且在执行阶段可用的工具；实际调用仍受权限判定约束 |
 
@@ -18,7 +18,7 @@
 | `acceptEdits` | allow | allow | ask |
 | `bypass` | allow | allow | allow |
 
-此表只作用于已经通过阶段、路径、危险命令黑名单和规则判定的调用。`write_plan_file` 也遵循写工具策略，因此 `default` 下需要确认。显式规则按 session → project → user 的作用域优先级匹配，同一作用域取最后一条命中规则。
+此表只作用于已经通过阶段、路径、危险命令黑名单和规则判定的调用。当前 Session 的 `workspace/` 已批准内置文件工具读写，讨论和计划阶段也可写入此目录；普通源码和 Shell 仍按阶段与策略判断。显式规则按 session → project → user 的作用域优先级匹配，同一作用域取最后一条命中规则。
 
 ## 判定链
 
@@ -33,7 +33,9 @@ flowchart TD
     F -->|否| H{匹配权限规则}
     H -->|allow| K[允许]
     H -->|deny| I[拒绝 permission_rule_deny]
-    H -->|未命中| J{权限策略}
+    H -->|未命中| W{当前 Session workspace 文件写入?}
+    W -->|是| K
+    W -->|否| J{权限策略}
     J -->|allow| K
     J -->|ask| L[生成 PermissionRequest]
     L --> M[聊天内联权限面板]
@@ -74,7 +76,7 @@ ToolExecutor → PermissionEngine.evaluate → ask
 | 决议 | 本次调用 | 后续影响 |
 |---|---|---|
 | `allow_once` | 放行 | 不保存规则 |
-| `allow_session` | 放行 | 保存会话精确规则，随命名会话持久化 |
+| `allow_session` | 放行 | 保存会话精确规则，随 UUID Session 自动持久化 |
 | `allow_project` | 放行 | 精确规则写入 `./.lancher/permissions.yaml` |
 | `deny` | 拒绝 | 返回 `permission_user_denied`，模型可调整策略 |
 | `superseded`（内部状态） | 跳过 | 不保存规则，返回 `steering_superseded` |
@@ -87,5 +89,5 @@ ToolExecutor → PermissionEngine.evaluate → ask
 
 - 取消任务会取消挂起的审批并暂停待处理队列；没有权限处理器时返回 `permission_confirmation_unavailable`。
 - 工具调用中断后，历史记录补齐未知结果，并说明操作可能已经部分执行，不能直接重试。
-- v4 会话恢复时所有待处理输入均为 `paused`。自动保存时尚在生成的消息收拢为已取消；缺少结果的工具调用按批次补齐未知错误结果，不自动重放工具。
+- 新 Session 事件格式 v1 恢复时，所有待处理输入均为 `paused`。尚在生成的消息收拢为已取消；缺少结果的工具调用按批次补齐未知错误结果，不自动重放工具。
 - 恢复会话不会读取项目旧 `plan.md` 并把它当成已确认计划。执行计划使用当前会话的快照正文与摘要，阶段切换不附带权限升级。

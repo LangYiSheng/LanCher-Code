@@ -17,9 +17,10 @@
 - 支持 ReAct 式多轮工具循环、工具轨迹展示、Token 用量展示。
 - 讨论、计划、执行三个工作阶段与审批策略独立；计划支持确认正文后开始执行。
 - 工作时可继续输入，将消息排到下一轮或补充当前任务；停止后保留草稿并暂停队列。
+- 首条消息自动建立 UUID Session，增量保存 JSONL；每段对话有独立计划、临时文件和产物目录。
 - 内置五层权限系统：
   - 危险命令黑名单
-  - 项目路径沙箱
+  - 内置文件工具的项目路径边界
   - 用户级 / 项目级 / 会话级规则
   - 三种权限策略，以及优先于规则的工作阶段限制
   - 非阻塞的内联审批面板
@@ -66,7 +67,7 @@ lancher.example.yaml
 
 ### 运行时配置
 
-`runtime.work_phase` 支持 `discuss`、`plan`、`execute`，默认执行。讨论与计划只允许内置读取、查找、搜索和明确声明只读的 MCP 工具；计划另可写入指定计划文件。两个阶段都禁止通用 Shell 与普通文件修改，跳过询问也不能突破这些限制。MCP 的只读信息来自服务器声明，并非系统隔离保证。
+`runtime.work_phase` 支持 `discuss`、`plan`、`execute`，默认执行。讨论与计划允许内置读取、查找、搜索和明确声明只读的 MCP 工具；当前 Session 的 `workspace/` 在所有阶段允许文件写入，计划工具写入该会话的 `workspace/plan.md`。普通源码修改与通用 Shell 仍遵守阶段限制，跳过询问不能突破这些限制。路径批准属于内置工具权限判定，不是操作系统沙箱；MCP 只读信息来自服务器声明。
 
 `runtime.permission_policy` 独立控制审批，支持三种策略：
 
@@ -83,7 +84,7 @@ lancher.example.yaml
 
 LanCher Code 现在区分三层权限规则：
 
-- 会话级：仅内存生效，不落盘
+- 会话级：随当前 Session 自动持久化和恢复
 - 项目级：`./.lancher/permissions.yaml`
 - 用户级：`~/.lancher/permissions.yaml`
 
@@ -118,14 +119,12 @@ rules:
   分别切到讨论、计划、执行；有参数则切换后提交，无参数只切阶段。`Shift+Tab` 循环阶段。
 - `/permissions [default|acceptEdits|bypass]`
   打开或切换本次审批策略，不改变阶段。
-- `/mode <default|plan|acceptEdits|bypass>`
-  旧命令兼容入口：`plan` 只切计划阶段，其他参数只切审批策略。
 - `/model [供应商ID/模型ID]`
   打开模型选择器，或直接切换当前会话的主模型；保留对话历史，不修改全局默认值。
 - `/settings`
   管理供应商、模型、MCP、权限、外观与输入。逐条保存；本次模型与新对话默认独立。MCP 修改持续标记待重启。
-- `/session <list|save|remove|rename|resume> [名称]`
-  管理项目会话；保存所选模型、阶段、策略、计划快照及未消费消息。恢复后待发送消息全部暂停。
+- `/session <new|list|resume|rename|archive|remove> [UUID] [标题]`
+  管理项目对话；首条消息自动保存，标题可包含空格并允许重复。新建、恢复按独立 UUID 切换；归档和删除需要确认，当前会话请先 `new`。恢复后待发送消息全部暂停。
 - `/exit`
   退出当前会话。
 
@@ -142,14 +141,17 @@ rules:
 - `~/.lancher`
   存放全局配置、用户级权限规则，以及后续全局能力。
 - `./.lancher`
-  存放当前项目私有内容，例如 `plan.md`、项目级权限规则等。
+  存放当前项目权限规则和按 UUID 分离的 Session 记录及工作文件。
 
 当前默认文件：
 
 - 全局配置：`~/.lancher/lancher.yaml`
 - 用户级权限规则：`~/.lancher/permissions.yaml`
 - 项目级权限规则：`./.lancher/permissions.yaml`
-- Plan 文件：`./.lancher/plan.md`
+- 会话事件：`./.lancher/sessions/<UUID>/events.jsonl`
+- 会话工作目录：`./.lancher/sessions/<UUID>/workspace/`（含 `plan.md`、`tmp/`、`artifacts/`）
+
+Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入完整 ID；命令不解析短 ID。新事件格式版本为 `1`，不兼容旧命名会话 v1–v4；旧 `.lancher/session/` 原样保留，不读取、不迁移。启动和查询列表不会创建会话，模型调用失败的对话也会保留。详见 [Session 生命周期](docs/workflows/session-lifecycle.md)。
 
 ## 当前状态
 

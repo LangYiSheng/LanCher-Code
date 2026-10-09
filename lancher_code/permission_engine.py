@@ -25,7 +25,10 @@ from lancher_code.models import (
     ToolDefinition,
     tool_available_in_phase,
 )
-from lancher_code.tools.core.common import ensure_path_in_root, relative_display_path, resolve_path_in_root
+from lancher_code.tools.core.common import (
+    PathWriteDeniedError, ensure_path_in_root, ensure_writable_path,
+    is_session_workspace_path, relative_display_path, resolve_path_in_root,
+)
 
 PermissionRuleMatcher = Literal["exact", "glob"]
 
@@ -299,6 +302,14 @@ class PermissionEngine:
             )
         try:
             target = self._build_match_target(call, tool, context)
+            write_path = self._write_target(call, tool, context)
+            if write_path is not None:
+                write_path = ensure_writable_path(write_path, context)
+        except PathWriteDeniedError as exc:
+            return PermissionCheck(
+                decision="deny", reason_code=exc.reason_code, reason_message=str(exc),
+                metadata={"work_phase": context.work_phase, "session_id": context.session_id, "tool_name": tool.name},
+            )
         except ValueError as exc:
             return PermissionCheck(
                 decision="deny",
@@ -321,13 +332,22 @@ class PermissionEngine:
                     reason_message=blacklist_message,
                     metadata=metadata,
                 )
-        matched_rule = self._match_rules(target)
+        workspace_grant = write_path is not None and is_session_workspace_path(write_path, context)
+        matched_rule = self._match_denied_rule(target) if workspace_grant else None
+        matched_rule = matched_rule or self._match_rules(target)
         if matched_rule is not None:
             return PermissionCheck(
                 decision=matched_rule.result,
                 reason_code=f"permission_rule_{matched_rule.result}",
                 reason_message=f"命中 {matched_rule.scope} 级权限规则: {matched_rule.match}",
                 metadata={**metadata, "rule_match": matched_rule.match, "rule_scope": matched_rule.scope},
+            )
+
+        if workspace_grant:
+            return PermissionCheck(
+                decision="allow", reason_code="session_workspace_allowed",
+                reason_message="已批准在当前会话工作目录中操作文件。",
+                metadata={**metadata, "session_id": context.session_id},
             )
 
         mode_decision = self._policy_decision(tool, context.permission_policy)
@@ -360,6 +380,27 @@ class PermissionEngine:
                 return matched
         return None
 
+    def _match_denied_rule(self, target: _MatchTarget) -> PermissionRule | None:
+        for scope in ("session", "project", "user"):
+            for rule in reversed(self._storage.rules_for_scope(scope)):
+                if rule.result == "deny" and _rule_matches(rule.match, target, rule.match_kind):
+                    return rule
+        return None
+
+    @staticmethod
+    def _write_target(call: ToolCall, tool: ToolDefinition, context: ToolContext) -> Path | None:
+        if tool.permission is not None and tool.permission.source == "external":
+            return None
+        if tool.name == "write_plan_file":
+            if context.plan_file_path is None or not is_session_workspace_path(context.plan_file_path, context):
+                raise PathWriteDeniedError("missing_plan_file_path", "当前上下文没有有效的会话计划文件路径。")
+            return context.plan_file_path
+        if tool.name in {"write_file", "edit_file"}:
+            raw_path = str(call.arguments.get("path", "")).strip()
+            path = Path(raw_path)
+            return path if path.is_absolute() else context.cwd / path
+        return None
+
     @staticmethod
     def _policy_decision(tool: ToolDefinition, policy: PermissionPolicy) -> PermissionDecision:
         if policy == "bypass":
@@ -386,7 +427,7 @@ class PermissionEngine:
             return _MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=normalized, matcher="glob", exact_value=command)
         if tool.name == "write_plan_file":
             if context.plan_file_path is None:
-                relative_path = ".lancher/plan.md"
+                raise PathWriteDeniedError("missing_plan_file_path", "当前上下文没有会话计划文件路径。")
             else:
                 plan_path = ensure_path_in_root(context.plan_file_path, context.project_root or context.cwd)
                 relative_path = relative_display_path(plan_path, context.project_root or context.cwd)

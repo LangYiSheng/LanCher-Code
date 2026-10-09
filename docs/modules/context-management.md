@@ -37,7 +37,7 @@
 ```text
 遍历 transcript 收集 tool_result 块
 → 找出新结果中超过单条阈值，或让同批合计超过批阈值的调用
-→ 把完整文本写入 .lancher/context/<context_id>/tool-results/<sha256(call_id)>.txt
+→ 把完整文本写入当前 Session 的 blobs/（按工具结果标识定位）
 → 原文替换为预览（大小 / 完整内容路径 / 前 20 行）
 → 已卸载的 call_id 记入 seen_call_ids（同一会话不重复卸载）
 ```

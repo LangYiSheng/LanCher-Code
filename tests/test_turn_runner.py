@@ -165,7 +165,7 @@ async def test_manual_compact_does_not_create_display_message(openai_provider_co
     )
     runner, session = _runner(provider, openai_provider_config, tmp_path)
     session.create_user_message("已有任务")
-    session.save_session("manual")
+    saved_id = session.session_id
     message_count = len(session.state.messages)
 
     result = await runner.compact_context()
@@ -173,8 +173,9 @@ async def test_manual_compact_does_not_create_display_message(openai_provider_co
     assert result.before_tokens > 0
     assert len(session.state.messages) == message_count
     assert provider.requests[0].allow_tool_calls is False
+    session.close()
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("manual")
+    restored.resume_session(saved_id)
     assert restored.transcript[0].blocks[0].text == "以下内容是较早会话的压缩历史。"
 
 

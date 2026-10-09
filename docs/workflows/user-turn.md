@@ -74,7 +74,7 @@ sequenceDiagram
 
 ### 4. 工具执行（`ToolExecutor.execute_calls`）
 
-- 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、阶段不可用（`phase_disallowed`）。讨论／计划禁止普通写入与通用 Shell
+- 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、阶段不可用（`phase_disallowed`）。讨论／计划禁止源码写入与通用 Shell，但当前 Session workspace 的文件读写已批准
 - 并发安全工具批量并行，非安全工具串行
 - 每个调用：`PermissionEngine.evaluate()` → deny 直接返回错误；ask 通过非阻塞内联审批面板等待结果
 - 每项启动、等待批准和完成时立即通知界面；安全工具可以同时显示执行中，先完成的调用立即显示结果，不等待整组最慢的工具

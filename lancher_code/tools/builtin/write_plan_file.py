@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import ensure_path_in_root, relative_display_path
+from lancher_code.tools.core.common import (
+    PathWriteDeniedError, ensure_writable_path, is_session_workspace_path, relative_display_path,
+)
 
 WRITE_PLAN_FILE_DESCRIPTION = (
     "覆盖写入计划文件。"
@@ -35,11 +37,11 @@ class WritePlanFileTool:
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
-        if context.plan_file_path is None:
+        if context.plan_file_path is None or not is_session_workspace_path(context.plan_file_path, context):
             return build_tool_error(
                 summary="写入计划文件失败",
                 error_code="missing_plan_file_path",
-                error_message="当前上下文没有配置计划文件路径。",
+                error_message="当前上下文没有有效的会话计划文件路径。",
                 tool_name=self.definition.name,
             )
 
@@ -53,11 +55,11 @@ class WritePlanFileTool:
             )
 
         try:
-            path = ensure_path_in_root(context.plan_file_path, context.project_root or context.cwd)
+            path = ensure_writable_path(context.plan_file_path, context)
         except ValueError as exc:
             return build_tool_error(
                 summary="写入计划文件失败",
-                error_code="path_outside_project",
+                error_code=exc.reason_code if isinstance(exc, PathWriteDeniedError) else "path_outside_project",
                 error_message=str(exc),
                 tool_name=self.definition.name,
             )

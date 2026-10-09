@@ -37,6 +37,7 @@ from lancher_code.models import (
 from lancher_code.providers.base import ChatProvider
 from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
+from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.tool_call_parser import ToolCallAssembler
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
@@ -174,23 +175,38 @@ class TurnRunner:
         )
         return fallback
 
-    def resume_session(self, name: str, *, force: bool = False) -> int:
+    def resume_session(self, session_id: str) -> int:
         self._ensure_model_idle()
-        saved_ref = self._session.read_session_model_ref(name, force=force)
+        if self._model_config is None:
+            self._model_notice = ''
+            return self._session.resume_session(session_id)
+        saved_ref = self._session.read_session_model_ref(session_id)
         config = self._require_model_config()
         target = saved_ref if saved_ref in iter_model_refs(config) else config.default_model
         resolved, provider = self._prepare_model(config, target)
         permission_count = self._session.resume_session(
-            name, force=force, resolved_model=(resolved, target)
+            session_id, resolved_model=(resolved, target)
         )
         self._provider = provider
         if saved_ref is None:
-            self._model_notice = f"旧会话未记录模型，已使用默认模型：{model_display_name(config, target)}。"
+            self._model_notice = f"会话未选择模型，已使用默认模型：{model_display_name(config, target)}。"
         elif saved_ref != target:
             self._model_notice = f"会话原模型已不存在，已使用默认模型：{model_display_name(config, target)}。"
         else:
             self._model_notice = ""
         return permission_count
+
+    def new_session(self) -> None:
+        self._ensure_model_idle()
+        if self._model_config is not None:
+            target = self._model_config.default_model
+            resolved, provider = self._prepare_model(self._model_config, target)
+            self._session.new_session()
+            self._session.set_model(resolved, target, initial=True)
+            self._provider = provider
+        else:
+            self._session.new_session()
+        self._model_notice = ''
 
     def set_phase(self, phase: WorkPhase) -> TurnEvent:
         self._ensure_model_idle()
@@ -359,7 +375,7 @@ class TurnRunner:
         if self._active_turn is None:
             return False
         self._active_turn.accepting_input = False
-        self.pause_queue()
+        self._pause_queue_best_effort()
         self._active_turn.cancellation_token.cancel()
         if not self._active_turn.task.cancelling():
             self._active_turn.task.cancel()
@@ -432,7 +448,7 @@ class TurnRunner:
                 for future in active_turn.pending_permissions.values():
                     if not future.done():
                         future.cancel()
-                self.pause_queue()
+                self._pause_queue_best_effort()
             try:
                 await asyncio.gather(active_turn.task, return_exceptions=True)
             finally:
@@ -458,6 +474,7 @@ class TurnRunner:
 
         try:
             user_message = self._session.create_user_message(text)
+            self._session.record_event('turn.started', turn_id=self._active_turn.task_id if self._active_turn else None)
             await self._emit(queue, TurnEvent(kind="user_message_created", message=user_message))
 
             assistant_message = self._session.create_assistant_message()
@@ -522,6 +539,8 @@ class TurnRunner:
                             deferred_tool_groups=deferred_tool_groups,
                             cancellation_token=cancellation_token,
                         )
+                    except SessionRepositoryError:
+                        raise
                     except Exception as exc:
                         context_state.automatic_failure_count += 1
                         if context_state.automatic_failure_count >= AUTOMATIC_FAILURE_LIMIT:
@@ -710,6 +729,8 @@ class TurnRunner:
 
                     async def report_started(call: ToolCall) -> None:
                         message = self._session.set_trace_tool_state(assistant_message.id, call.call_id, "running")
+                        self._session.record_event('tool.started', {'call_id': call.call_id, 'tool_name': call.tool_name},
+                                                   turn_id=self._active_turn.task_id if self._active_turn else None)
                         await self._emit(queue, TurnEvent(kind="progress_updated", message=message,
                             tool_call=call, progress_message=f"正在执行 {call.tool_name}"))
 
@@ -721,6 +742,8 @@ class TurnRunner:
                         self._session.append_tool_results([result])
                         pending_tool_calls[:] = [call for call in pending_tool_calls if call.call_id != result.call_id]
                         message = self._session.append_trace_tool_results(assistant_message.id, [result])
+                        self._session.record_event('tool.finished', {'call_id': result.call_id, 'ok': result.ok},
+                                                   turn_id=self._active_turn.task_id if self._active_turn else None)
                         await self._emit(queue, TurnEvent(kind="tool_result_received", message=message,
                             usage=self._current_message_usage(assistant_message.id), tool_result=result))
 
@@ -730,6 +753,9 @@ class TurnRunner:
                         work_phase=phase,
                         permission_policy=policy,
                         plan_file_path=self._session.plan_file_path,
+                        session_id=self._session.session_id,
+                        session_workspace=self._session.paths.workspace if self._session.paths else None,
+                        session_root=self._session.paths.root if self._session.paths else None,
                         cancellation_token=cancellation_token,
                         permission_resolver=self._request_permission,
                         available_tool_names={tool.name for tool in visible_tools},
@@ -795,41 +821,50 @@ class TurnRunner:
                 return
         except asyncio.CancelledError:
             cancellation_token.cancel()
-            if assistant_message is not None:
-                self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮已取消")
-                message = self._session.cancel_message(assistant_message.id)
-                await self._emit(
-                    queue,
-                    TurnEvent(
-                        kind="turn_cancelled",
-                        message=message,
-                        usage=self._current_message_usage(assistant_message.id),
-                        progress_message="本轮已取消",
-                    ),
-                )
-            return
-        except LanCherError as exc:
-            if assistant_message is not None:
-                self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮异常中断")
-                message = self._session.fail_message(assistant_message.id, exc.user_message)
-                await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=exc.user_message))
+            message = self._finish_failed_message(assistant_message, pending_tool_calls, '本轮已取消。', cancelled=True)
+            if message is not None:
+                await self._emit(queue, TurnEvent(kind='turn_cancelled', message=message, progress_message='本轮已取消'))
         except Exception as exc:
-            logger.exception("event=turn_failed_unexpected exception_type=%s", type(exc).__name__)
-            error_text = f"发生未预期异常: {exc}"
-            if assistant_message is not None:
-                self._close_pending_tool_calls(assistant_message.id, pending_tool_calls, "本轮异常中断")
-                message = self._session.fail_message(assistant_message.id, error_text)
-                await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
+            logger.exception('event=turn_failed exception_type=%s', type(exc).__name__)
+            error_text = exc.user_message if isinstance(exc, LanCherError) else f'处理失败：{exc}'
+            message = self._finish_failed_message(assistant_message, pending_tool_calls, error_text)
+            await self._emit(queue, TurnEvent(kind='turn_failed', message=message, error_text=error_text))
         finally:
-            if self._active_turn is not None:
-                self._active_turn.accepting_input = False
-                self._active_turn.pending_permissions.clear()
-            if not completed:
-                self.pause_queue()
-            auto_save_error = self._session.auto_save()
-            if auto_save_error:
-                logger.error("event=session_auto_save_failed error=%s", auto_save_error)
-            await queue.put(_QUEUE_END)
+            try:
+                if self._active_turn is not None:
+                    self._active_turn.accepting_input = False
+                    self._active_turn.pending_permissions.clear()
+                if not completed:
+                    self._pause_queue_best_effort()
+                if self._session.session_id is not None:
+                    kind = 'turn.completed' if completed else 'turn.interrupted' if cancellation_token.is_cancelled else 'turn.failed'
+                    self._session.record_event(kind, turn_id=self._active_turn.task_id if self._active_turn else None)
+                self._session.flush()
+            except Exception as exc:
+                logger.exception('event=session_persistence_failed')
+                await self._emit(queue, TurnEvent(kind='turn_failed', error_text=f'会话保存失败：{exc}'))
+            finally:
+                # 持久化错误也必须结束事件消费者和后台任务。
+                await queue.put(_QUEUE_END)
+
+    def _pause_queue_best_effort(self) -> None:
+        try:
+            self.pause_queue()
+        except Exception:
+            logger.exception('event=pending_queue_persistence_failed')
+
+    def _finish_failed_message(self, assistant, pending, text, *, cancelled=False):
+        if assistant is None:
+            return None
+        try:
+            self._close_pending_tool_calls(assistant.id, pending, text)
+        except Exception:
+            logger.exception('event=interrupted_tools_persistence_failed')
+        try:
+            return self._session.cancel_message(assistant.id, text) if cancelled else self._session.fail_message(assistant.id, text)
+        except Exception:
+            logger.exception('event=terminal_message_persistence_failed')
+            return self._session.get_message(assistant.id)
 
     def _close_pending_tool_calls(self, message_id: str, pending: list[ToolCall], reason: str) -> None:
         if not pending:

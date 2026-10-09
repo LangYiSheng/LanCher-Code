@@ -16,7 +16,7 @@ from lancher_code.models import (
 )
 from lancher_code.permission_engine import PermissionStorage
 from lancher_code.session import SessionController
-from lancher_code.session_store import SessionStoreError
+from lancher_code.sessions.repository import SessionRepositoryError
 
 
 def test_session_controller_creates_messages_with_metadata(openai_provider_config) -> None:
@@ -133,7 +133,7 @@ def test_session_controller_does_not_trust_project_plan_file_as_session_snapshot
     plan_file = tmp_path / ".lancher" / "plan.md"
     plan_file.parent.mkdir(parents=True, exist_ok=True)
     plan_file.write_text("# plan", encoding="utf-8")
-    controller = SessionController(openai_provider_config, cwd=tmp_path, plan_file_path=plan_file)
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
 
     controller.set_runtime_mode("plan")
     controller.create_user_message("继续规划")
@@ -183,6 +183,7 @@ def test_session_controller_appends_trace_tool_calls_and_results(openai_provider
 
 def test_timeline_preserves_interleaved_stream_segments_and_tool_details(openai_provider_config, tmp_path) -> None:
     controller = SessionController(openai_provider_config, cwd=tmp_path)
+    controller.create_user_message("开始调查")
     assistant = controller.create_assistant_message()
     controller.append_trace_thinking(assistant.id, "先调查")
     controller.append_message_content(assistant.id, "说明")
@@ -196,10 +197,11 @@ def test_timeline_preserves_interleaved_stream_segments_and_tool_details(openai_
     controller.clear_message_content(assistant.id)
     controller.append_message_content(assistant.id, "最终回答")
     controller.complete_message(assistant.id)
-    controller.save_session("timeline")
+    saved_id = controller.session_id
+    controller.close()
 
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("timeline")
+    restored.resume_session(saved_id)
     message = restored.state.messages[-1]
     entries = message.trace.entries
     assert message.timeline_version == 1
@@ -230,14 +232,16 @@ def test_timeline_direct_terminal_update_keeps_notice_and_partial_output(openai_
 
 def test_timeline_resume_marks_unfinished_segments_and_tools_cancelled(openai_provider_config, tmp_path) -> None:
     controller = SessionController(openai_provider_config, cwd=tmp_path)
+    controller.create_user_message("开始调查")
     assistant = controller.create_assistant_message()
     call = ToolCall(0, "read-1", "read_file", {}, "{}")
     controller.append_trace_tool_calls(assistant.id, [call])
     controller.append_assistant_tool_calls([call])
     controller.set_trace_tool_state(assistant.id, call.call_id, "running")
-    controller.save_session("interrupted")
+    saved_id = controller.session_id
+    controller.close()
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("interrupted")
+    restored.resume_session(saved_id)
     message = restored.state.messages[-1]
     assert message.status == "cancelled"
     assert message.trace.entries[0].metadata["state"] == "cancelled"
@@ -247,16 +251,6 @@ def test_timeline_resume_marks_unfinished_segments_and_tools_cancelled(openai_pr
     assert len([block for item in restored.transcript for block in item.blocks if block.kind == "tool_result"]) == 1
 
 
-def test_message_without_timeline_version_keeps_legacy_format(openai_provider_config) -> None:
-    from dataclasses import asdict
-
-    controller = SessionController(openai_provider_config)
-    message = controller.create_assistant_message()
-    data = asdict(message)
-    data["timestamp"] = message.timestamp.isoformat()
-    data.pop("timeline_version")
-    restored = controller._decode_message(data)
-    assert restored.timeline_version == 0
 
 
 def test_session_controller_appends_transcript_tool_calls_and_results(openai_provider_config) -> None:
@@ -325,123 +319,31 @@ def test_session_save_and_resume_restores_ui_and_protocol_state(openai_provider_
     controller.append_message_content(assistant.id, "完成")
     controller.complete_message(assistant.id, MessageUsage(input_tokens=3, output_tokens=2))
     controller.set_runtime_mode("acceptEdits")
-    controller.save_session("开发记录")
+    saved_id = controller.session_id
+    controller.close()
 
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("开发记录")
+    restored.resume_session(saved_id)
 
     assert [message.content for message in restored.state.messages] == ["先检查项目", "完成"]
     assert restored.state.messages[1].trace.entries[0].text == "思考"
     assert [message.role for message in restored.transcript] == ["user", "assistant", "tool", "assistant"]
     assert restored.runtime_mode == "acceptEdits"
     assert restored.total_usage().output_tokens == 2
-    assert restored.active_session_name == "开发记录"
-    assert restored.has_unsaved_changes is False
+    assert restored.session_id == saved_id
 
 
-def test_session_resume_requires_force_when_current_conversation_is_dirty(openai_provider_config, tmp_path) -> None:
-    saved = SessionController(openai_provider_config, cwd=tmp_path)
-    saved.save_session("target")
-
-    current = SessionController(openai_provider_config, cwd=tmp_path)
-    current.create_user_message("不要丢失")
-    with pytest.raises(SessionStoreError, match="--force"):
-        current.resume_session("target")
-    assert current.state.messages[0].content == "不要丢失"
-
-    current.resume_session("target", force=True)
-    assert current.state.messages == []
 
 
-def test_bound_session_auto_save_and_conflict_rules(openai_provider_config, tmp_path) -> None:
+
+
+
+
+
+
+def test_session_round_trips_context_management(openai_provider_config, tmp_path: Path) -> None:
     controller = SessionController(openai_provider_config, cwd=tmp_path)
-    controller.save_session("active")
-    controller.create_user_message("自动保存")
-    assert controller.auto_save() is None
-
-    resumed = SessionController(openai_provider_config, cwd=tmp_path)
-    resumed.resume_session("active")
-    assert resumed.state.messages[0].content == "自动保存"
-
-    other = SessionController(openai_provider_config, cwd=tmp_path)
-    with pytest.raises(SessionStoreError, match="已存在"):
-        other.save_session("active")
-    with pytest.raises(SessionStoreError, match="正在使用"):
-        controller.remove_session("active")
-
-
-def test_session_permissions_follow_named_session_and_survive_restart(
-    openai_provider_config, tmp_path
-) -> None:
-    storage = PermissionStorage()
-    controller = SessionController(
-        openai_provider_config,
-        cwd=tmp_path,
-        permission_storage=storage,
-    )
-    storage.add_session_rule("Bash(git *)", "allow")
-    assert controller.has_unsaved_changes is True
-    controller.save_session("alpha")
-
-    storage.replace_session_rules(
-        [PermissionRule(match="WriteFile(src/**)", result="deny", scope="session")]
-    )
-    controller.save_session("beta")
-
-    assert controller.resume_session("alpha", force=True) == 1
-    assert storage.rules_for_scope("session") == [
-        PermissionRule(match="Bash(git *)", result="allow", scope="session")
-    ]
-    assert controller.resume_session("beta") == 1
-    assert storage.rules_for_scope("session") == [
-        PermissionRule(match="WriteFile(src/**)", result="deny", scope="session")
-    ]
-
-    restarted_storage = PermissionStorage()
-    restarted = SessionController(
-        openai_provider_config,
-        cwd=tmp_path,
-        permission_storage=restarted_storage,
-    )
-    assert restarted.resume_session("alpha") == 1
-    assert restarted_storage.rules_for_scope("session")[0].match == "Bash(git *)"
-
-
-def test_v1_session_loads_without_permissions_and_upgrades_on_save(
-    openai_provider_config, tmp_path
-) -> None:
-    storage = PermissionStorage()
-    controller = SessionController(
-        openai_provider_config,
-        cwd=tmp_path,
-        permission_storage=storage,
-    )
-    storage.add_session_rule("Bash(git *)", "allow")
-    controller.save_session("legacy")
-    path = tmp_path / ".lancher" / "session" / "legacy.jsonl"
-    records = [__import__("json").loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    records[0]["version"] = 1
-    records[0].pop("permission_rule_count")
-    records = [record for record in records if record["type"] != "permissions"]
-    path.write_text(
-        "\n".join(__import__("json").dumps(record, ensure_ascii=False) for record in records) + "\n",
-        encoding="utf-8",
-    )
-
-    storage.replace_session_rules(
-        [PermissionRule(match="Bash(other *)", result="deny", scope="session")],
-        notify=False,
-    )
-    assert controller.resume_session("legacy", force=True) == 0
-    assert storage.rules_for_scope("session") == []
-
-    controller.save_session("legacy")
-    metadata = __import__("json").loads(path.read_text(encoding="utf-8").splitlines()[0])
-    assert metadata["version"] == 4
-
-
-def test_v3_session_round_trips_context_management(openai_provider_config, tmp_path: Path) -> None:
-    controller = SessionController(openai_provider_config, cwd=tmp_path)
+    controller.create_user_message("保存上下文")
     context = controller.context_state
     original_context_id = context.context_id
     context.seen_call_ids.add("call-1")
@@ -460,10 +362,11 @@ def test_v3_session_round_trips_context_management(openai_provider_config, tmp_p
         )
     )
     context.automatic_failure_count = 2
-    controller.save_session("context")
+    saved_id = controller.session_id
+    controller.close()
 
     restored = SessionController(openai_provider_config, cwd=tmp_path)
-    restored.resume_session("context")
+    restored.resume_session(saved_id)
 
     restored_context = restored.context_state
     assert restored_context.context_id == original_context_id
@@ -473,39 +376,6 @@ def test_v3_session_round_trips_context_management(openai_provider_config, tmp_p
     assert restored_context.automatic_failure_count == 2
 
 
-def test_invalid_v2_permissions_do_not_change_current_state_or_rules(
-    openai_provider_config, tmp_path
-) -> None:
-    target_storage = PermissionStorage()
-    target = SessionController(
-        openai_provider_config,
-        cwd=tmp_path,
-        permission_storage=target_storage,
-    )
-    target_storage.add_session_rule("Bash(target *)", "allow")
-    target.save_session("target")
-    path = tmp_path / ".lancher" / "session" / "target.jsonl"
-    records = [__import__("json").loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    permissions = next(record for record in records if record["type"] == "permissions")
-    permissions["data"]["rules"][0]["result"] = "maybe"
-    path.write_text(
-        "\n".join(__import__("json").dumps(record, ensure_ascii=False) for record in records) + "\n",
-        encoding="utf-8",
-    )
-
-    current_storage = PermissionStorage()
-    current_storage.add_session_rule("Bash(current *)", "deny")
-    current = SessionController(
-        openai_provider_config,
-        cwd=tmp_path,
-        permission_storage=current_storage,
-    )
-    current.create_user_message("保留当前对话")
-
-    with pytest.raises(SessionStoreError, match="结构无效"):
-        current.resume_session("target", force=True)
-    assert current.state.messages[0].content == "保留当前对话"
-    assert current_storage.rules_for_scope("session")[0].match == "Bash(current *)"
 
 
 def test_session_controller_skips_error_and_streaming_assistant_messages_from_transcript(openai_provider_config) -> None:

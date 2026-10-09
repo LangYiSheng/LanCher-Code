@@ -1,101 +1,64 @@
-# 流程：会话持久化生命周期
+# 流程：Session 生命周期
 
-## 概述
+Session 表示同一项目中的一段独立对话，身份是稳定 UUID，标题只是可修改的显示字段。启动程序和查看列表只产生空白草稿；收到第一条用户消息时，先创建 Session 和持久化记录，再调用模型。模型请求失败或立即取消，Session 仍然保留。
 
-LanCher Code 支持**按项目**保存 / 恢复会话。会话文件存放在启动时工作目录下的：
+## 目录与格式
 
 ```text
-./.lancher/session/<会话名称>.jsonl
+<项目根>/.lancher/sessions/
+├── .locks/<uuid>.lock
+└── <uuid>/
+    ├── events.jsonl
+    ├── meta.json
+    ├── checkpoint.json
+    ├── blobs/
+    └── workspace/
+        ├── plan.md
+        ├── tmp/
+        └── artifacts/
 ```
 
-每个项目（cwd）维护自己的会话列表。实现位置：`lancher_code/session_store.py`（存储）、`lancher_code/session.py`（`SessionController` 的 save / auto_save / resume）。
+UUID 使用 `uuid4().hex` 的 32 位小写形式。文件路径由 UUID 构造，标题不参与路径拼接，也无需唯一。所有会话控制路径均拒绝符号链接和 Windows junction 重定向，现有普通控制文件也拒绝多个硬链接。`plan.md`、`tmp/` 和 `artifacts/` 是工作文件约定，使用时按需生成。
 
-## 会话文件格式（JSONL，版本 4）
+`events.jsonl` 是持久化事实来源，每行一条事件，格式版本为 `1`，包含 `version`、连续递增的 `seq`、带时区的 `timestamp`、`type`、可空的 `turn_id` 与对象 `data`。事件保存创建、消息增量、工具记录、阶段和权限变更、模型选择、上下文压缩、计划、队列、运行结束及归档。`meta.json` 是列表摘要缓存；`checkpoint.json` 保存投影快照；两者不替代事件日志。`blobs/` 放置较大的工具结果等内部内容。
 
-每行一个 JSON 对象，记录类型：
+这是新的事件格式，**不兼容旧 v1–v4 命名会话文件**。旧 `.lancher/session/` 保留原样，不读取、不迁移，也不自动删除；旧共享 `.lancher/plan.md` 不会导入当前会话。
 
-| 类型 | 内容 |
+## 命令与状态切换
+
+| 命令 | 行为 |
 |---|---|
-| `metadata` | 格式版本、会话名、项目根、创建/更新时间、消息数、会话权限规则数、上下文治理状态（v3）、可选 `model_ref` |
-| `state` | 稳定会话 ID、工作阶段、权限策略、计划快照、待处理消息及计划提示状态 |
-| `permissions` | 会话级权限规则列表 |
-| `message` | 界面消息（`SessionMessage`，含 usage 与 trace） |
-| `transcript` | 协议无关消息（`ConversationMessage`） |
+| `/session new` | 刷新并关闭当前写入者，清空界面和状态；下一条消息创建新 UUID |
+| `/session list` | 只读列出当前项目会话，不创建新 Session |
+| `/session resume <UUID>` | 按完整 UUID 恢复记录、阶段、策略、模型引用、计划和权限 |
+| `/session rename <UUID> <标题>` | 修改标题；标题可以包含空格，UUID 和目录保持不变 |
+| `/session archive <UUID>` | 确认具体目标后归档，保留日志和工作文件 |
+| `/session remove <UUID>` | 确认具体目标后删除整个会话及其工作文件 |
 
-版本兼容：当前写版本 `4`（`SESSION_FORMAT_VERSION`），支持读取 `1 / 2 / 3 / 4`；v1 无 permissions 记录，其余版本必须恰好一条 permissions 记录，v3/v4 带 `context_management` 元数据。旧非计划模式映射为执行阶段与同名权限；旧计划模式保留有效的恢复权限，否则使用标准权限。
+列表显示短 UUID，补全填入完整 UUID；短 UUID 不能用于命令。旧 `save` 和 `--force` 已移除。运行、等待审批和压缩期间不允许切换会话，命令保留为草稿。当前会话不能归档或删除，请先 `/session new` 或恢复其他会话。取消确认保留命令；确认期间当前 Session 发生变化时，旧确认失效。归档是一项标签：列表显示“已归档”，仍可显式 `resume` 继续使用，恢复后保留归档标记。
 
-v4 保存当前会话的计划正文、摘要与来源消息；项目旧计划文件不会被自动导入为可批准快照。待处理消息尚未进入正式 transcript，恢复时一律暂停，需用户明确继续；恢复本身不会调用模型。
+恢复时重建消息区，并刷新阶段、权限、上下文、计划和队列。待处理输入恢复为暂停，需要明确继续；未完成的助手消息和缺少结果的工具调用标记为中断，不自动重跑工具。恢复对话不还原源码文件，也不创建独立 Git checkout。
 
-`model_ref` 保存稳定的 `供应商ID/模型ID`，不保存 API Key、Base URL 或解析后的连接快照。恢复时从当前全局目录解析最新连接参数。旧记录没有此字段仍可正常读取，使用默认模型并提示；原引用已删除时也回退默认模型。
+## 持久化与并发
 
-写入方式：临时文件逐行写入 → `flush` + `fsync` → `os.replace` 原子替换。
+消息和状态变化追加事件，流式更新按短间隔刷新；用户消息、模型切换、权限决议和每轮结束会同步刷新。程序退出调用 `close()`，刷新事件、写入快照并释放文件锁。失败会明确报告，不把持久化失败当作保存成功。
 
-## 生命周期
+首次创建尚未提交时清理本次目录；删除受阻则隔离到非会话目录保留失败现场，不混入正常列表，之后可以重试。
 
-```text
-启动（未绑定会话）
-  │
-  │ /session save <名称>  （save_session）
-  ▼
-绑定会话：active_session_name = <名称>
-  │
-  │ 每次状态变更（消息、模式、权限规则变更）→ _mark_dirty → auto_save()
-  │   · 自动保存失败只记日志，不阻断对话
-  │
-  │ /session resume <名称> [--force]（resume_session）
-  ▼
-恢复会话：
-  · 读取 JSONL → 解码 state / messages / transcript / permissions / context_management
-  · 校验：名称一致、项目根一致、消息数与 metadata 一致、权限规则数一致
-  · 当前对话有未保存改动且未加 --force → 抛 SessionStoreError
-  · TurnRunner 先解析保存的模型引用；不存在则准备默认模型并给出提示
-  · 替换会话规则（PermissionStorage.replace_session_rules，notify=False）
-  · 替换 state 与 transcript；TUI 重建消息列表
-  │
-  │ /session rename <旧> <新> / remove <名称>
-  ▼
-重命名：改写 metadata 后另存新文件并删除旧文件
-删除：不能删除当前正在使用的会话；直接 unlink
-```
+同一 Session 只有一个写入者，使用操作系统文件锁约束不同进程；列表与日志查询可并行只读。异常退出留下的末尾未完成 JSONL 字节可在重新打开时恢复处理，完整记录中间损坏或序号断裂会拒绝恢复。
 
-## 关键规则
+## 工作目录权限
 
-| 规则 | 说明 |
-|---|---|
-| 名称限制 | 只能包含中文、字母、数字、`_`、`-`（正则 `^[\w\-\u3400-\u9fff]+$`） |
-| 名称冲突 | 保存到已存在名称时报错（当前绑定会话除外，覆盖自身） |
-| 删除限制 | 不能删除 `active_session_name` 指向的会话 |
-| resume 保护 | 有未保存改动时必须 `--force` |
-| 项目隔离 | 恢复时校验 `metadata.project_root` 与当前 cwd 一致，跨项目会话拒绝加载 |
-| 权限随行 | 会话级规则随会话保存/恢复（`permission_rule_count` 校验） |
-| 模型随行 | `metadata.model_ref` 随会话保存；恢复时使用当前目录，不把连接密钥写入会话 |
-| 上下文状态 | v3 恢复 `context_management`（卸载结果引用）；若卸载文件已丢失，只记 warning，不阻断 |
+当前 Session 的 `workspace/` 是模型可以直接读写的工作目录，讨论、计划、执行阶段都可用来放置计划、临时文件和产物。普通源码修改、通用 Shell 和外部 MCP 继续遵守原阶段限制与审批规则。其他 Session 工作目录没有当前工作目录的自动批准范围，Session 的日志、摘要、快照和内部 blobs 也不属于可写工作区。内置文件写工具拒绝写入现有的多硬链接普通文件，返回 `hardlinked_file_protected`，防止通过工作目录内的文件别名修改其他内容；`bypass` 也不能放行。
 
-## 自动保存时机
+这是内置文件工具的路径与审批边界，**不是操作系统沙箱**；Shell 或外部服务并不因 Session 目录存在而获得系统级隔离。
 
-`SessionController` 通过订阅权限存储的 `session_rules_changed` 回调以及所有状态变更方法（`_mark_dirty`）跟踪脏状态：
+## 模块职责
 
-- 消息创建 / 内容追加 / 状态完成
-- 模式切换（`set_runtime_mode` 内直接调用 `auto_save()`）
-- 会话级权限规则变更
-- 每轮对话结束后（`TurnRunner._run_turn` finally 中 `auto_save()`）
-
-`/model` 切换在已绑定会话中会立即保存引用，写入失败则回滚此次模型切换。切换或恢复模型会清除旧模型的 token 用量锚点和自动压缩失败状态，按当前模型的上下文窗口重新估算；消息历史与文件卸载引用保留。
-
-## 恢复后的界面行为
-
-`tui_views/chat.py` 的 `_restore_session_view()`：
-
-```text
-清空消息区 → 按 state.messages 重建 MessageWidget
-→ 恢复横幅紧凑状态、模式提示符、占位文本
-→ 刷新上下文用量估算与状态栏 → 滚动到底
-```
-
-## 与其他模块的关系
-
-- `session_store.ProjectSessionStore`：文件 IO（save / load / list / remove / rename）
-- `SessionController`：业务编排（校验、状态合并、脏标记）
-- `TurnRunner`：恢复前准备目标模型适配器，并协调会话引用与有效连接配置
-- `PermissionStorage`：会话级规则随会话走
-- `tui_views/chat.py`：`/session` 命令交互与界面重建
+- `sessions.paths`：UUID、目录布局和路径验证。
+- `sessions.repository`：追加日志、独占锁、摘要、快照和磁盘管理。
+- `sessions.codec`：事件投影和运行时状态编解码。
+- `sessions.service`：身份、写入者和增量状态的业务协调。
+- `SessionController`：对话状态与模型上下文。
+- `TurnRunner`：轮次运行、模型切换与 Session 切换。
+- `tui_views/chat.py`：命令补全、确认、列表和界面重建。

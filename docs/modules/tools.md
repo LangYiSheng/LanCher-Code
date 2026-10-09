@@ -37,7 +37,7 @@ class Tool(Protocol):
 ```
 
 - `ToolDefinition`（`models.py`）：名称、描述、参数 JSON Schema、分类（read/write/command）、并发安全、可见模式等
-- `ToolContext`（`models.py`）：cwd、超时、模式、项目根、计划文件路径、取消令牌、文件状态缓存
+- `ToolContext`（`models.py`）：cwd、超时、阶段和审批策略、项目根、当前 Session workspace 和计划路径、取消令牌、文件状态缓存
 - `ToolExecutionResult`：`call_id`、`tool_name`、`content`、`is_error`、`metadata`、`summary`、`error_code`、`error_message`
 
 ### `ToolRegistry`（`core/registry.py`）
@@ -72,12 +72,12 @@ class Tool(Protocol):
 | 工具 | 文件 | 分类 | 并发安全 | 可见阶段 | 说明 |
 |---|---|---|---|---|---|
 | `read_file` | `read_file.py` | read | 是 | 全部 | 按行读取，大文件要求分页（>400 行需 offset/limit），记录文件状态缓存 |
-| `write_file` | `write_file.py` | write | 否 | execute | 全量覆盖写；覆盖已有文件前必须完整读过且文件未变（防盲写） |
-| `edit_file` | `edit_file.py` | write | 否 | execute | 唯一匹配替换；old_text 必须唯一，0 次/多次匹配都报错 |
+| `write_file` | `write_file.py` | write | 否 | 全部，路径受阶段约束 | 当前 workspace 自动批准；源码只在 execute 写入，覆盖已有文件前必须完整读过且文件未变 |
+| `edit_file` | `edit_file.py` | write | 否 | 全部，路径受阶段约束 | 当前 workspace 自动批准；源码只在 execute 修改，old_text 必须唯一匹配 |
 | `bash` | `bash.py` | command | 否 | execute | 执行 Windows PowerShell 命令，输出截断 12000 字符，超时 kill |
 | `glob` | `glob.py` | read | 是 | 全部 | glob 查找文件，跳过 SKIP_DIRS，结果按修改时间倒序 |
 | `grep` | `grep.py` | read | 是 | 全部 | 正则逐行搜索，二进制跳过，单行截断 300 字符 |
-| `write_plan_file` | `write_plan_file.py` | write | 否 | **仅 plan** | 只能写配置的计划文件路径 |
+| `write_plan_file` | `write_plan_file.py` | write | 否 | **仅 plan** | 写当前 Session 的 `workspace/plan.md` |
 | `tool_search` | `tool_search.py` | read | 是 | 全部 | 搜索/加载 MCP 延迟工具，`select:<名称>` 精确加载 |
 
 别名的存在：`RunCommandTool = BashTool`、`ReplaceInFileTool = EditFileTool`、`FindFilesTool = GlobTool`、`SearchCodeTool = GrepTool`（兼容旧名）。
@@ -95,11 +95,13 @@ class Tool(Protocol):
 
 `FileStateCache` 记录每个文件最近一次读取/写入的状态（路径、mtime、内容、是否完整读取）。write_file / edit_file 的"先读后写"守卫依赖它。缓存由 `ToolExecutor` 持有，**单个进程内跨工具、跨轮次共享**。
 
-## 路径沙箱（`core/common.py`）
+## 文件工具路径边界（`core/common.py`）
 
 - `SKIP_DIRS`：`.git`、`.venv`、`node_modules`、`__pycache__` 等目录在 glob/grep 中跳过
 - `resolve_path_in_root()` / `ensure_path_in_root()`：解析符号链接后必须位于项目根内，越界抛 `PathSandboxError`
 - `iter_files()`：递归文件遍历（跳过 SKIP_DIRS）
+- 当前 Session 的 `workspace/` 文件写入在各阶段已批准；源码路径仍遵守阶段和权限规则，其他会话工作区没有自动批准范围，日志与控制文件也不属于工作区。
+- 这是内置文件工具的应用层校验，不是操作系统沙箱；Shell 与外部 MCP 不具有系统隔离保证。
 
 ## 如何新增一个内置工具
 

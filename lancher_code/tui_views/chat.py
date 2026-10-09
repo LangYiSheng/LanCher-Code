@@ -26,7 +26,8 @@ from lancher_code.mcp.manager import MCPClientManager, MCPInitializationProgress
 from lancher_code.settings_service import SettingsService
 from lancher_code.logging_system import get_logger
 from lancher_code.session import SessionController
-from lancher_code.session_store import SessionStoreError
+from lancher_code.sessions.paths import SessionPaths
+from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.slash_commands import (
     SlashCompletionCandidate,
     SlashCompletionContext,
@@ -430,15 +431,23 @@ class LanCherTextualApp(App[int]):
 
     @work(exclusive=False, exit_on_error=False)
     async def process_prompt(self, text: str, *, queued: bool = False) -> None:
+        user_message_accepted = queued
+        submission_failed = False
         try:
             stream = self._turn_runner.run_next_queued_turn() if queued else self._turn_runner.run_user_turn(text)
             # 消费事件期间也可能关闭界面；显式关闭生成器，等待执行器清理。
             async with aclosing(stream):
                 async for event in stream:
+                    if event.kind == "user_message_created":
+                        user_message_accepted = True
+                    elif event.kind == "turn_failed":
+                        submission_failed = True
                     await self._consume_turn_event(event)
         except asyncio.CancelledError:
+            submission_failed = True
             raise
         except Exception as exc:
+            submission_failed = True
             logger.exception(
                 "event=tui_turn_worker_failed exception_type=%s", type(exc).__name__
             )
@@ -448,10 +457,21 @@ class LanCherTextualApp(App[int]):
         finally:
             self._is_streaming = False
             if self.is_running:
+                if submission_failed and not user_message_accepted:
+                    composer = self.query_one(ComposerTextArea)
+                    # 仅恢复尚未进入 Session 的输入；保留用户随后写下的新草稿。
+                    if not composer.text:
+                        composer.text = text
+                        composer.cursor_location = composer.document.end
+                    if not self._session_controller.state.messages:
+                        await self._restore_session_view()
                 await self._finish_turn_view()
             else:
                 self._pending_permissions.clear()
-                self._session_controller.auto_save()
+                try:
+                    self._session_controller.flush()
+                except (LanCherError, ValueError, OSError):
+                    logger.exception("event=session_flush_failed")
 
     async def on_unmount(self) -> None:
         # Textual 取消 worker 后不会等待所有后台执行器；退出前显式完成收尾。
@@ -460,9 +480,10 @@ class LanCherTextualApp(App[int]):
     async def _finish_turn_view(self) -> None:
         for request_id in list(self._pending_permissions):
             await self._close_inline_permission(request_id)
-        auto_save_error = self._session_controller.auto_save()
-        if auto_save_error:
-            self.notify(auto_save_error, title="会话自动保存", severity="error", timeout=10)
+        try:
+            self._session_controller.flush()
+        except (LanCherError, ValueError, OSError) as exc:
+            self.notify(str(exc), title="会话持久化失败", severity="error", timeout=10)
         if self._turn_succeeded:
             self._status_hint = "已完成"
         input_widget = self.query_one("#composer-input", ComposerTextArea)
@@ -547,6 +568,8 @@ class LanCherTextualApp(App[int]):
         details = (
             f"本次模型：{self._status_left_text()}\n"
             f"工作目录：{self._session_controller._cwd}\n"
+            f"会话：{self._session_controller.session_title or '新对话'} · {self._session_controller.session_id or '首条消息后创建'}\n"
+            f"会话工作目录：{self._session_controller.paths.workspace if self._session_controller.paths else '尚未创建'}\n"
             f"模型引用：{ref or self._provider_config.model}\n"
             f"新对话默认：{getattr(config, 'default_model', None) or '当前配置'}\n"
             f"{self._format_usage_text(usage)} · {banner._context_usage_status}\n"
@@ -933,13 +956,19 @@ class LanCherTextualApp(App[int]):
             return
 
         cursor_at_end = composer.cursor_location == composer.document.end
-        sessions = self._session_controller.list_saved_sessions() if cursor_at_end and composer.text.lstrip().startswith("/session") else []
+        sessions = []
+        session_listing_error = None
+        if cursor_at_end and composer.text.lstrip().startswith("/session"):
+            try:
+                sessions = self._session_controller.list_sessions()
+            except (LanCherError, ValueError, OSError) as exc:
+                session_listing_error = str(exc)
         matches = (
             self._slash_command_registry.complete(
                 SlashCompletionContext(
                     text=composer.text,
-                    session_names=tuple(item.name for item in sessions),
-                    active_session_name=self._session_controller.active_session_name,
+                    session_ids=tuple(item.session_id for item in sessions),
+                    active_session_id=self._session_controller.session_id,
                     model_choices=self._model_completion_choices(),
                     active_model_ref=getattr(self._turn_runner, "model_ref", None),
                     default_model_ref=getattr(getattr(self._turn_runner, "model_config", None), "default_model", None),
@@ -963,7 +992,7 @@ class LanCherTextualApp(App[int]):
         composer.slash_enter_accepts = not matches or not all(item.optional for item in matches)
         if matches and active_key is not None:
             active = matches[self._slash_menu_index]
-            hint_bar.set_hint(self._completion_hint(active))
+            hint_bar.set_hint("会话列表不可用：" + session_listing_error if session_listing_error else self._completion_hint(active))
             self._refresh_status_bar()
             return
 
@@ -971,7 +1000,7 @@ class LanCherTextualApp(App[int]):
         self._slash_menu_index = 0
         composer.slash_menu_active = False
 
-        hint_bar.set_hint(self._slash_command_registry.hint(composer.text))
+        hint_bar.set_hint("会话列表不可用：" + session_listing_error if session_listing_error else self._slash_command_registry.hint(composer.text))
         self._refresh_status_bar()
 
     def _completion_hint(self, candidate: SlashCompletionCandidate) -> str:
@@ -1160,15 +1189,30 @@ class LanCherTextualApp(App[int]):
         return None
 
     async def _execute_session_command(self, arguments_text: str, *, confirmed: bool = False) -> None:
-        arguments = arguments_text.split()
+        arguments = arguments_text.split(maxsplit=2)
         action = arguments[0]
-        if not confirmed and (action == "remove" or "--force" in arguments):
+        if self._is_streaming or self._turn_runner.has_active_turn:
+            raise ValueError("本轮结束后才能管理会话，命令草稿已保留。")
+        if action in {"archive", "remove"} and arguments[1] == self._session_controller.session_id:
+            raise SessionRepositoryError("当前会话不能归档或删除，请先运行 /session new。")
+        if not confirmed and action in {"archive", "remove"}:
+            paths = SessionPaths.for_session(self._session_controller._cwd, arguments[1])
+            if not paths.events.is_file():
+                raise SessionRepositoryError("目标会话不存在，请输入完整 UUID。")
+            target_title = "无法读取标题"
+            try:
+                target = next((item for item in self._session_controller.list_sessions() if item.session_id == arguments[1]), None)
+                if target is not None:
+                    target_title = target.title
+            except (LanCherError, ValueError, OSError):
+                if action != "remove":
+                    raise
             description = (
-                f"删除项目会话：{arguments[1]}" if action == "remove" else
-                f"覆盖同名项目会话：{arguments[1]}" if action == "save" else
-                f"放弃当前未保存内容并切换到：{arguments[1]}"
+                f"{'归档' if action == 'archive' else '删除'}项目会话：{target_title}\nUUID：{arguments[1]}"
+                + ("\n删除包含对话记录、计划和会话工作文件，无法撤销。" if action == "remove" else "\n归档后记录和工作文件保留。")
             )
             session_id = self._session_controller.session_id
+            original_state = self._session_controller.state
             composer = self.query_one(ComposerTextArea)
             original_text = composer.text
             consumed = False
@@ -1182,7 +1226,7 @@ class LanCherTextualApp(App[int]):
                     composer.focus()
                     return
                 try:
-                    if self._is_streaming or self._turn_runner.has_active_turn or session_id != self._session_controller.session_id:
+                    if self._is_streaming or self._turn_runner.has_active_turn or session_id != self._session_controller.session_id or original_state is not self._session_controller.state:
                         raise ValueError("当前会话状态已改变，请重新提交命令。")
                     await self._execute_session_command(arguments_text, confirmed=True)
                 except (LanCherError, ValueError, RuntimeError, OSError) as exc:
@@ -1197,13 +1241,14 @@ class LanCherTextualApp(App[int]):
             self.push_screen(CommandConfirmationScreen(description, "/session " + arguments_text), resolve)
             return
         if action == "list" and len(arguments) == 1:
-            sessions = self._session_controller.list_saved_sessions()
+            sessions = self._session_controller.list_sessions()
             if not sessions:
-                message = "当前项目还没有已保存的会话。"
+                message = "当前项目还没有会话；发送首条消息时自动创建。"
             else:
-                active = self._session_controller.active_session_name
+                active = self._session_controller.session_id
                 message = "\n".join(
-                    f"{'* ' if item.name == active else '  '}{item.name} · "
+                    f"{'* ' if item.session_id == active else '  '}{item.title} · {item.session_id[:8]}"
+                    f"{' · 已归档' if item.archived else ''} · "
                     f"{item.updated_at.astimezone().strftime('%Y-%m-%d %H:%M')} · "
                     f"{item.message_count} 条消息 · {item.permission_rule_count} 条会话权限"
                     for item in sessions
@@ -1211,9 +1256,15 @@ class LanCherTextualApp(App[int]):
             self.push_screen(ReadOnlyDetailsScreen("项目会话\n" + message))
             return
 
-        if action == "save" and len(arguments) in {2, 3}:
-            self._session_controller.save_session(arguments[1], force="--force" in arguments)
-            self.notify(f"已保存并绑定会话：{arguments[1]}", title="Session")
+        if action == "new" and len(arguments) == 1:
+            self._turn_runner.new_session()
+            await self._restore_session_view()
+            self.notify("已打开新对话；发送首条消息时创建会话。", title="Session")
+            return
+
+        if action == "archive" and len(arguments) == 2:
+            self._session_controller.archive_session(arguments[1])
+            self.notify(f"已归档会话：{arguments[1]}", title="Session")
             return
 
         if action == "remove" and len(arguments) == 2:
@@ -1223,17 +1274,12 @@ class LanCherTextualApp(App[int]):
 
         if action == "rename" and len(arguments) == 3:
             self._session_controller.rename_session(arguments[1], arguments[2])
-            self.notify(f"已将 {arguments[1]} 重命名为 {arguments[2]}", title="Session")
+            self._refresh_status_bar()
+            self.notify(f"会话标题已改为：{arguments[2]}", title="Session")
             return
 
-        if action == "resume" and len(arguments) in {2, 3}:
-            force = len(arguments) == 3 and arguments[2] == "--force"
-            if len(arguments) == 3 and not force:
-                raise SessionStoreError("resume 的第三个参数只能是 --force。")
-            if getattr(self._turn_runner, "model_config", None) is not None:
-                permission_count = self._turn_runner.resume_session(arguments[1], force=force)
-            else:
-                permission_count = self._session_controller.resume_session(arguments[1], force=force)
+        if action == "resume" and len(arguments) == 2:
+            permission_count = self._turn_runner.resume_session(arguments[1])
             await self._restore_session_view()
             notice = getattr(self._turn_runner, "model_notice", "")
             self.notify(
@@ -1242,7 +1288,7 @@ class LanCherTextualApp(App[int]):
             )
             return
 
-        raise SessionStoreError("参数不正确，请查看 /session 的命令提示。")
+        raise SessionRepositoryError("参数不正确，请查看 /session 的命令提示。")
 
     async def _restore_session_view(self) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)

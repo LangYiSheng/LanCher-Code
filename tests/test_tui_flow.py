@@ -256,14 +256,15 @@ async def test_session_resume_rebuilds_chat_widgets(
     reply = saved.create_assistant_message()
     saved.append_message_content(reply.id, "历史回答")
     saved.complete_message(reply.id)
-    saved.save_session("history")
+    saved_id = saved.session_id
+    saved.close()
 
     app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
     async with app.run_test() as pilot:
-        await app._execute_session_command("resume history")
+        await app._execute_session_command(f"resume {saved_id}")
         await pilot.pause()
 
-        assert session.active_session_name == "history"
+        assert session.session_id == saved_id
         assert [widget.message_id for widget in app.query(MessageWidget)] == [
             message.id for message in session.state.messages
         ]
@@ -447,7 +448,9 @@ async def test_multilevel_session_completion_advances_until_terminal_value(
     tmp_path: Path,
 ) -> None:
     saved = SessionController(openai_provider_config, cwd=tmp_path)
-    saved.save_session("history")
+    saved.create_user_message("历史任务")
+    saved_id = saved.session_id
+    saved.close()
     app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
 
     async with app.run_test() as pilot:
@@ -459,7 +462,7 @@ async def test_multilevel_session_completion_advances_until_terminal_value(
         await pilot.press("tab")
         await pilot.pause(0.05)
         assert composer.text == "/session "
-        assert _visible_slash_commands(app) == ["list", "save", "resume", "rename", "remove"]
+        assert _visible_slash_commands(app) == ["new", "list", "resume", "rename", "archive", "remove"]
 
         composer.text = "/session res"
         composer.cursor_location = composer.document.end
@@ -467,16 +470,16 @@ async def test_multilevel_session_completion_advances_until_terminal_value(
         await pilot.press("tab")
         await pilot.pause(0.05)
         assert composer.text == "/session resume "
-        assert _visible_slash_commands(app) == ["history"]
+        assert _visible_slash_commands(app) == [saved_id]
 
         await pilot.press("tab")
         await pilot.pause(0.05)
-        assert composer.text == "/session resume history"
+        assert composer.text == f"/session resume {saved_id}"
         assert not app.query_one(SlashCompletionMenu).display
 
         await pilot.press("enter")
         await pilot.pause(0.05)
-        assert session.active_session_name == "history"
+        assert session.session_id == saved_id
 
 
 @pytest.mark.asyncio
@@ -753,7 +756,11 @@ async def test_thinking_trace_is_collapsed_by_default_and_can_expand(
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "帮我想想")
-        await pilot.pause(0.25)
+        for _ in range(60):
+            if not app._is_streaming:
+                break
+            await pilot.pause(0.05)
+        assert not app._is_streaming
 
         assistant = session.state.messages[-1]
         assert assistant.content == "这是正式回答"
@@ -873,7 +880,11 @@ async def test_thinking_trace_preserves_user_expansion_until_task_completes(
         trace_widget.toggle_collapsed()
         assert trace_widget.collapsed is False
 
-        await pilot.pause(0.35)
+        for _ in range(60):
+            if not app._is_streaming:
+                break
+            await pilot.pause(0.05)
+        assert not app._is_streaming
 
         trace_widget = list(app.query(ThinkingTraceWidget))[-1]
         assert trace_widget.collapsed is True

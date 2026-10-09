@@ -28,7 +28,7 @@ from lancher_code.providers.claude import ClaudeProvider
 from lancher_code.providers.openai import OpenAIProvider
 from lancher_code.providers.factory import create_provider
 from lancher_code.session import SessionController
-from lancher_code.session_store import SessionStoreError
+from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.turn_runner import TurnRunner
@@ -116,7 +116,6 @@ def test_configure_reuses_initial_provider_without_dirtying_empty_session(tmp_pa
     assert created == []
     assert runner._provider is initial
     assert runner.model_ref == "deepseek/chat"
-    assert not session.has_unsaved_changes
 
 
 @pytest.mark.asyncio
@@ -260,32 +259,29 @@ def test_reload_removed_model_uses_default_and_failed_reload_is_atomic(tmp_path:
 def test_switch_autosaves_reference_without_credentials(tmp_path: Path) -> None:
     runner, session, _, _, _ = _runner(tmp_path)
     session.create_user_message("已保存的历史")
-    session.save_session("saved")
     runner.switch_model("anthropic/sonnet")
-    raw = (tmp_path / ".lancher/session/saved.jsonl").read_text(encoding="utf-8")
-    metadata = json.loads(raw.splitlines()[0])
-    assert metadata["version"] == 4
-    assert metadata["model_ref"] == "anthropic/sonnet"
+    raw = session.paths.events.read_text(encoding="utf-8")
+    assert json.loads(raw.splitlines()[0])["version"] == 1
+    assert session.list_sessions()[0].model_ref == "anthropic/sonnet"
     assert "secret-key" not in raw
     assert "base_url" not in raw
-    assert not session.has_unsaved_changes
 
 
 def test_switch_rolls_back_when_session_autosave_fails(tmp_path: Path, monkeypatch) -> None:
     runner, session, initial, _, _ = _runner(tmp_path)
-    session.save_session("saved")
+    session.create_user_message("持久化会话")
     session.context_state.usage_anchor = ContextUsageAnchor(10, 10, "shape", 0, "messages")
+    session.flush()
 
     def fail_save(*args):
-        raise SessionStoreError("磁盘不可写")
+        raise SessionRepositoryError("磁盘不可写")
 
-    monkeypatch.setattr(session._session_store, "save", fail_save)
-    with pytest.raises(SessionStoreError, match="磁盘不可写"):
+    monkeypatch.setattr(session._sessions.writer, "append", fail_save)
+    with pytest.raises(SessionRepositoryError, match="磁盘不可写"):
         runner.switch_model("anthropic/sonnet")
     assert runner._provider is initial
     assert runner.model_ref == "deepseek/chat"
     assert session.context_state.usage_anchor is not None
-    assert not session.has_unsaved_changes
 
 
 @pytest.mark.parametrize("saved_ref", ["anthropic/sonnet", "removed/model", None])
@@ -294,10 +290,11 @@ def test_resume_resolves_saved_model_or_default_and_discards_usage_anchor(tmp_pa
     original = SessionController(resolve_model(runner.model_config), cwd=tmp_path, selected_model_ref=saved_ref)
     original.create_user_message("历史消息")
     original.context_state.usage_anchor = ContextUsageAnchor(99, 99, "shape", 1, "messages")
-    original.save_session("history")
+    saved_id = original.session_id
+    original.close()
     runner.switch_model("deepseek/reasoner")
 
-    assert runner.resume_session("history", force=True) == 0
+    assert runner.resume_session(saved_id) == 0
 
     expected = "anthropic/sonnet" if saved_ref == "anthropic/sonnet" else "deepseek/chat"
     assert runner.model_ref == expected
@@ -310,7 +307,8 @@ def test_failed_resume_preparation_keeps_current_session(tmp_path: Path) -> None
     runner, session, initial, _, _ = _runner(tmp_path)
     original = SessionController(resolve_model(runner.model_config), cwd=tmp_path, selected_model_ref="anthropic/sonnet")
     original.create_user_message("另一个会话")
-    original.save_session("other")
+    saved_id = original.session_id
+    original.close()
     session.create_user_message("当前历史")
 
     def failing_factory(config):
@@ -318,11 +316,11 @@ def test_failed_resume_preparation_keeps_current_session(tmp_path: Path) -> None
 
     runner._provider_factory = failing_factory
     with pytest.raises(RuntimeError, match="创建失败"):
-        runner.resume_session("other", force=True)
+        runner.resume_session(saved_id)
     assert runner._provider is initial
     assert runner.model_ref == "deepseek/chat"
     assert session.state.messages[0].content == "当前历史"
-    assert session.active_session_name is None
+    assert session.session_id != saved_id
 
 
 @pytest.mark.asyncio

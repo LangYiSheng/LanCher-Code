@@ -34,7 +34,6 @@ def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Pat
     session = SessionController(
         provider_config,
         cwd=tmp_path,
-        plan_file_path=Path("./.lancher/plan.md"),
         permission_storage=permission_storage,
     )
     registry = ToolRegistry()
@@ -237,14 +236,13 @@ async def test_command_permission_panel_returns_each_outcome(
 
 
 @pytest.mark.asyncio
-async def test_allow_session_resolution_is_auto_saved_with_bound_session(
+async def test_allow_session_resolution_is_persisted_with_automatic_session(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
 ) -> None:
     provider = FakeProvider(responses=_permission_request_responses())
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
-    session.save_session("permission-session")
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "查看仓库状态")
@@ -253,12 +251,16 @@ async def test_allow_session_resolution_is_auto_saved_with_bound_session(
         await pilot.press("enter")
         await pilot.pause(1.5)
 
-    path = tmp_path / ".lancher" / "session" / "permission-session.jsonl"
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    permissions = next(record for record in records if record["type"] == "permissions")
-    assert permissions["data"]["rules"] == [
-        {"match": "Bash(git status)", "result": "allow", "match_kind": "exact"}
-    ]
+    saved_id = session.session_id
+    assert saved_id is not None
+    session.close()
+    restored = SessionController(openai_provider_config, cwd=tmp_path)
+    try:
+        assert restored.resume_session(saved_id) == 1
+        assert restored._permission_storage.rules_for_scope("session")[0].match == "Bash(git status)"
+        assert restored._permission_storage.rules_for_scope("session")[0].match_kind == "exact"
+    finally:
+        restored.close()
 
 
 @pytest.mark.skipif(not Path(POWERSHELL).is_file(), reason="需要 Windows PowerShell 子进程")

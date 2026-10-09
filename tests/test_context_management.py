@@ -50,19 +50,19 @@ async def test_large_tool_result_is_offloaded_once_with_safe_stable_preview(tmp_
     state = ContextManagementState(context_id="context-test")
     transcript = _tool_exchange(["你" * 20_000], ["../../escape\\name"])
 
-    first = await offload_tool_results(transcript, state, tmp_path)
+    first = await offload_tool_results(transcript, state, tmp_path, result_directory=tmp_path / "blobs" / "tool-results")
     replacement = state.replacements["../../escape\\name"]
     path = tmp_path / replacement.relative_path
 
     assert first.offloaded_count == 1
     assert path.is_file()
-    assert path.parent == tmp_path / ".lancher" / "context" / "context-test" / "tool-results"
+    assert path.parent == tmp_path / "blobs" / "tool-results"
     assert "原始大小：60000 UTF-8 字节" in replacement.preview
     assert "read_file" in replacement.preview
     assert first.transcript[1].blocks[0].text == replacement.preview
 
     modified = path.stat().st_mtime_ns
-    second = await offload_tool_results(transcript, state, tmp_path)
+    second = await offload_tool_results(transcript, state, tmp_path, result_directory=tmp_path / "blobs" / "tool-results")
     assert second.offloaded_count == 0
     assert second.transcript[1].blocks[0].text == replacement.preview
     assert path.stat().st_mtime_ns == modified
@@ -75,7 +75,7 @@ async def test_batch_offload_uses_minimum_count_and_stable_order(tmp_path: Path)
         ["a" * 50_000, "b" * 50_000, "c" * 50_000, "d" * 50_000, "e" * 50_000]
     )
 
-    result = await offload_tool_results(transcript, state, tmp_path)
+    result = await offload_tool_results(transcript, state, tmp_path, result_directory=tmp_path / "blobs" / "tool-results")
 
     assert result.offloaded_count == 1
     assert list(state.replacements) == ["call-0"]

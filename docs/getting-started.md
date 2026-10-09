@@ -102,7 +102,6 @@ ui:
 runtime:
   tool_loop_limit: 50
   unknown_tool_streak_limit: 3
-  plan_file_path: ./.lancher/plan.md
   work_phase: execute
   permission_policy: default
 ```

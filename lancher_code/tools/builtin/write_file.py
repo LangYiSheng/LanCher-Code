@@ -4,11 +4,12 @@ from pathlib import Path
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import relative_display_path, resolve_path_in_root
+from lancher_code.tools.core.common import PathWriteDeniedError, relative_display_path, resolve_writable_path
 
 WRITE_FILE_DESCRIPTION = (
     "写入完整文本文件。适合创建新文件，或在已经完整阅读过旧文件且确认没有外部变更后整体重写文件。"
     "不要用它做局部修改；局部修改应该使用 edit_file。"
+    "讨论和计划阶段只能写入当前会话的 workspace 工作目录。"
 )
 
 
@@ -35,7 +36,7 @@ class WriteFileTool:
             },
             category="write",
             is_concurrency_safe=False,
-            allowed_modes=("default", "acceptEdits", "bypass"),
+            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
@@ -57,11 +58,11 @@ class WriteFileTool:
             )
 
         try:
-            path = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+            path = resolve_writable_path(context.cwd, raw_path, context)
         except ValueError as exc:
             return build_tool_error(
                 summary="写文件失败",
-                error_code="path_outside_project",
+                error_code=exc.reason_code if isinstance(exc, PathWriteDeniedError) else "path_outside_project",
                 error_message=str(exc),
                 tool_name=self.definition.name,
             )

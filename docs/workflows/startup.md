@@ -54,7 +54,7 @@ sequenceDiagram
 | 5. 加载配置 | `config_system/loader.py load_config()` | YAML 解析 + 完整校验；失败打印 `[错误]` 并退出码 1 |
 | 6. 创建 Provider | `providers/factory.py` | 按 `protocol` 返回 OpenAI/Claude 实现 |
 | 7. 敏感值注册 | `logging_system.register_sensitive_values()` | api_key 与 MCP env/headers 值，日志脱敏 |
-| 8. 创建会话 | `session.py SessionController` | 绑定 cwd、plan 文件路径、独立的初始阶段与权限策略、权限存储 |
+| 8. 创建会话控制器 | `session.py SessionController` | 绑定 cwd、初始阶段与策略、权限存储；首条用户消息才创建 UUID Session 与独立 workspace |
 | 9. 创建工具集 | `tools/__init__.py` | 注册 read_file / write_file / edit_file / bash / glob / grep / write_plan_file / tool_search |
 | 10. 创建 MCP | `mcp/manager.py` | 加载全局+项目配置；TUI 挂载后异步初始化 |
 | 11. 创建执行链 | `tools/core/executor.py` + `permission_engine.py` | ToolExecutor 持有注册表与权限引擎 |

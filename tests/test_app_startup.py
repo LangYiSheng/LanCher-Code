@@ -27,6 +27,10 @@ class _FakeSessionController:
         self.kwargs = kwargs
 
 
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeToolExecutor:
     def __init__(self, *args, **kwargs) -> None:
         self.args = args

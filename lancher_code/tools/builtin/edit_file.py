@@ -4,12 +4,13 @@ from pathlib import Path
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import relative_display_path, resolve_path_in_root
+from lancher_code.tools.core.common import PathWriteDeniedError, relative_display_path, resolve_writable_path
 
 EDIT_FILE_DESCRIPTION = (
     "在文件中按原文做唯一匹配替换，适合局部修改代码或配置。"
     "应该在已经读过目标文件、并且确认文件没有被外部改动后使用。"
     "不要拿它做整文件重写；整文件改写请使用 write_file。"
+    "讨论和计划阶段只能修改当前会话的 workspace 工作目录中的文件。"
 )
 
 
@@ -40,7 +41,7 @@ class EditFileTool:
             },
             category="write",
             is_concurrency_safe=False,
-            allowed_modes=("default", "acceptEdits", "bypass"),
+            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
@@ -63,11 +64,11 @@ class EditFileTool:
             )
 
         try:
-            path = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+            path = resolve_writable_path(context.cwd, raw_path, context)
         except ValueError as exc:
             return build_tool_error(
                 summary="改文件失败",
-                error_code="path_outside_project",
+                error_code=exc.reason_code if isinstance(exc, PathWriteDeniedError) else "path_outside_project",
                 error_message=str(exc),
                 tool_name=self.definition.name,
             )

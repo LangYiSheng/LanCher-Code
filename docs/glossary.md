@@ -20,7 +20,7 @@
 | Plan Mode | 计划阶段：只读探索 + 专用计划写入，权限策略保持不变 |
 | `PermissionRule` | 权限规则：`{match, result, match_kind}`，match 形如 `Bash(git *)` |
 | `match_kind` | `exact` 精确匹配、`glob` 显式通配、`legacy` 旧规则兼容；新授权默认精确匹配 |
-| Rule scope | 规则作用域：`session`（内存）/ `project`（`./.lancher/permissions.yaml`）/ `user`（`~/.lancher/permissions.yaml`） |
+| Rule scope | 规则作用域：`session`（随 Session 持久化）/ `project`（`./.lancher/permissions.yaml`）/ `user`（`~/.lancher/permissions.yaml`） |
 | PermissionResolution | 用户对权限请求的决议：`allow_once` / `allow_session` / `allow_project` / `deny` |
 | Human-in-the-loop | 人在回路：阶段允许且规则与权限策略未放行时，由界面中的权限提示请用户决定 |
 
@@ -40,8 +40,8 @@
 
 | 名称 | 含义 |
 |---|---|
-| JSONL | 每行一个 JSON 对象的文本格式，会话文件使用（`.lancher/session/*.jsonl`） |
-| 会话格式版本 | 当前 `SESSION_FORMAT_VERSION = 4`，兼容读取 v1/v2/v3 |
+| JSONL | 每行一个 JSON 对象的文本格式，Session 事件使用（`.lancher/sessions/<UUID>/events.jsonl`） |
+| 会话格式版本 | 新 `EVENT_FORMAT_VERSION = 1`，使用 UUID 事件日志；不读取、不迁移旧命名会话 v1–v4 |
 | `PlanSnapshot` | 绑定当前会话的计划正文、内容摘要、来源消息与就绪标记；执行确认的来源 |
 | `PendingInput` | 工作中投递的输入：`follow_up` 排到下一轮或 `steer` 补充当前任务；恢复会话后均暂停 |
 | `ContextUsageAnchor` | 用量锚点：上次请求快照，用于增量 token 估算 |
@@ -76,7 +76,7 @@
 | 名称 | 含义 |
 |---|---|
 | 全局配置 | `~/.lancher/lancher.yaml`（主配置） |
-| 项目级数据 | `./.lancher/`（权限、MCP、plan、会话、context） |
+| 项目级数据 | `./.lancher/`（权限、MCP、sessions；每个 Session 有独立 workspace 与 blobs） |
 | legacy 配置路径 | `cwd/lancher.yaml`（`get_legacy_config_path`，预留，当前未启用） |
 
 ## 代码结构

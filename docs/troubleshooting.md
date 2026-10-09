@@ -54,7 +54,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 | 规则总是命中不了 | 匹配格式是否正确：`Bash(git *)` / `WriteFile(.env)` / `mcp__server__tool`；路径是否为项目相对路径（正斜杠、小写）；glob 用 `* ? [` |
 | 项目规则不生效 | 检查文件在 `./.lancher/permissions.yaml`（不是 `~/.lancher/`）；注意**同一作用域内最后一条命中规则生效**，后面的规则会覆盖前面的 |
 | bypass 策略下仍被拒绝 | 正常：工作阶段、危险命令黑名单、路径限制与显式 `deny` 规则依然生效 |
-| 文件写入总被要求确认 | 执行阶段的 `default` 策略默认询问写入；可选择规则或 `acceptEdits`。讨论／计划禁止普通文件写入 |
+| 文件写入总被要求确认 | 当前 Session workspace 已批准；其他项目文件在执行阶段按 `default` 询问写入，可选择规则或 `acceptEdits`。讨论／计划阶段源码只读 |
 
 ### 修改配置后不生效
 
@@ -99,10 +99,10 @@ Test-Path $HOME\.lancher\lancher.yaml
 
 | 现象 | 原因与处理 |
 |---|---|
-| `/session save` 报"会话名称已存在" | 换名称，或加 `--force` 并确认覆盖目标 |
-| `/session resume` 报"存在未保存改动" | 当前对话未保存；先 `save` 或加 `--force` |
+| `/session save` 或 `--force` 报参数错误 | 首条消息已自动保存；使用 `new/list/resume/rename/archive/remove` 与完整 UUID |
+| `/session resume` 报会话正在使用 | 同一 Session 只有一个写入者；先退出另一进程或在那里切换到新对话 |
 | 恢复会话报"该会话不属于当前项目" | 会话文件是项目绑定的，在保存它的那个目录下恢复 |
-| 会话文件损坏（`会话文件结构无效` 等） | JSONL 被手工改动；可删除该文件（`/session remove` 或直接删 `./.lancher/session/*.jsonl`） |
+| 会话事件损坏或序号不连续 | 先保留 `.lancher/sessions/<UUID>/` 备份；中间完整记录不能自动修复，确认不再需要后用 `/session remove <UUID>` 删除 |
 
 ## MCP 相关
 
