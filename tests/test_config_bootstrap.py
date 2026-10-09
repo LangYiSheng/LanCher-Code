@@ -81,7 +81,7 @@ async def test_config_bootstrap_app_renders_updated_welcome_copy(tmp_path) -> No
 
     async with app.run_test():
         assert str(app.query_one("#bootstrap-title", Static).render()) == "LanCher Code"
-        assert str(app.query_one("#bootstrap-copy", Static).render()) == "首次启动 · 配置模型供应商"
+        assert str(app.query_one("#bootstrap-copy", Static).render()) == "首次配置 · 连接供应商，再添加模型"
 
 
 @pytest.mark.asyncio
@@ -103,11 +103,11 @@ async def test_config_bootstrap_app_adapts_to_terminal_width(tmp_path, terminal_
         if terminal_size[0] < app.NARROW_WIDTH:
             assert actions.has_class("-narrow")
             assert save_button.region.width == cancel_button.region.width
-            assert save_button.region.y < cancel_button.region.y
+            assert save_button.region.y == cancel_button.region.y
         else:
             assert not actions.has_class("-narrow")
             assert save_button.region.y == cancel_button.region.y
-            assert save_button.region.x < cancel_button.region.x
+            assert cancel_button.region.x < save_button.region.x
 
 
 @pytest.mark.asyncio
@@ -202,3 +202,53 @@ async def test_config_bootstrap_tui_returns_false_when_cancelled(tmp_path) -> No
     tui._app.run_async = fake_run_async  # type: ignore[method-assign]
 
     assert await tui.run() is False
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_steps_validate_without_writing_and_preserve_back_values(tmp_path) -> None:
+    path = tmp_path / "home" / ".lancher" / "lancher.yaml"
+    app = ConfigBootstrapApp(path)
+    async with app.run_test() as pilot:
+        assert app._step == 0
+        await pilot.press("ctrl+s")
+        assert app._step == 0
+        assert not path.exists()
+        app.query_one("#api-key-input", Input).value = "${SECRET}"
+        await pilot.press("ctrl+s")
+        assert app._step == 1
+        app.query_one("#model-input", Input).value = "test-model"
+        await pilot.press("escape")
+        assert app._step == 0
+        assert app.query_one("#model-input", Input).value == "test-model"
+        await pilot.press("ctrl+s")
+        await pilot.press("ctrl+s")
+        assert app._step == 2
+        assert not path.exists()
+        summary = str(app.query_one("#bootstrap-summary", Static).render())
+        assert "本次对话使用" in summary and "新对话默认" in summary
+        assert "${SECRET}" not in summary
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+    assert load_config(path).provider.model == "test-model"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_can_return_to_invalid_model_draft_after_editing_connection(tmp_path) -> None:
+    path = tmp_path / "home" / ".lancher" / "lancher.yaml"
+    app = ConfigBootstrapApp(path)
+    async with app.run_test(size=(32, 16)) as pilot:
+        app.query_one("#protocol-select", Select).value = "claude"
+        app.query_one("#api-key-input", Input).value = "sample-key"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert app._step == 1
+        app.query_one("#model-input", Input).value = "sample-model"
+        app.query_one("#thinking-budget-input", Input).value = "invalid"
+        await pilot.press("escape")
+        assert app._step == 0
+        await pilot.press("ctrl+s")
+        assert app._step == 1
+        await pilot.press("ctrl+s")
+        assert app._step == 1
+        assert app.query_one("#bootstrap-error").display
+        assert not path.exists()

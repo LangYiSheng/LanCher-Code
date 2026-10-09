@@ -129,7 +129,7 @@ def test_session_controller_injects_exit_prompt_on_first_normal_turn_after_plan_
     assert controller.transcript[-1].blocks[0].text == "继续实现"
 
 
-def test_session_controller_uses_reentry_prompt_when_plan_file_exists(openai_provider_config, tmp_path: Path) -> None:
+def test_session_controller_does_not_trust_project_plan_file_as_session_snapshot(openai_provider_config, tmp_path: Path) -> None:
     plan_file = tmp_path / ".lancher" / "plan.md"
     plan_file.parent.mkdir(parents=True, exist_ok=True)
     plan_file.write_text("# plan", encoding="utf-8")
@@ -138,8 +138,9 @@ def test_session_controller_uses_reentry_prompt_when_plan_file_exists(openai_pro
     controller.set_runtime_mode("plan")
     controller.create_user_message("继续规划")
 
-    assert "正在重新进入 Plan Mode" in controller.transcript[0].blocks[0].text
-    assert "用户刚进入 Plan Mode" not in controller.transcript[0].blocks[0].text
+    assert "用户刚进入 Plan Mode" in controller.transcript[0].blocks[0].text
+    assert controller.plan_snapshot is None
+    assert "正在重新进入 Plan Mode" not in controller.transcript[0].blocks[0].text
 
 
 def test_session_controller_appends_trace_tool_calls_and_results(openai_provider_config) -> None:
@@ -358,7 +359,7 @@ def test_v1_session_loads_without_permissions_and_upgrades_on_save(
 
     controller.save_session("legacy")
     metadata = __import__("json").loads(path.read_text(encoding="utf-8").splitlines()[0])
-    assert metadata["version"] == 3
+    assert metadata["version"] == 4
 
 
 def test_v3_session_round_trips_context_management(openai_provider_config, tmp_path: Path) -> None:

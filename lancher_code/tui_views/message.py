@@ -4,8 +4,8 @@ import math
 from pathlib import Path
 
 from rich.console import Group, RenderableType
-from rich.table import Table
 from rich.text import Text
+from rich.markdown import Markdown
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -14,6 +14,7 @@ from textual.widgets import Static
 
 from lancher_code.models import SessionMessage, TraceEntry
 from lancher_code.mcp.manager import MCPInitializationProgress, MCPServerInitialization
+from lancher_code.tui_views.theme import theme_palette
 
 BANNER_TEXT = r"""
     __                ________                 ______          __
@@ -99,37 +100,29 @@ class BannerWidget(Static):
 
     def render(self) -> RenderableType:
         header = self._header()
-        if self._compact:
+        if self._compact or self.size.width < 64:
             return header
 
-        title = Text(BANNER_TEXT.strip("\n"), style="bold #73b6ff")
-        return Group(header, title, self._render_mcp_panel())
+        colors = theme_palette(self.app.theme)
+        greeting = Text("一起把想法做成代码。直接描述任务，或输入 / 查看命令。", style=colors["muted"])
+        return Group(header, greeting)
 
-    def _header(self) -> Table:
-        header = Table.grid(expand=True)
-        header.add_column(ratio=1, overflow="ellipsis")
-        header.add_column(justify="right", no_wrap=True)
-
-        left = Text()
-        left.append("LanCher Code", style="bold #73b6ff")
-        left.append("  cwd: ", style="#7f9ab8")
-        left.append(str(self._cwd), style="#c8d5e3")
-
-        mcp_style = "#ff9b6b" if self._mcp_has_issues else "#7f9ab8"
-        right = Text()
-        right.append(self._mcp_compact_status, style=mcp_style)
-        right.append(" · ", style="#526980")
-        right.append(self._context_usage_status, style="#7f9ab8")
-        header.add_row(left, right)
-        return header
+    def _header(self) -> Text:
+        colors = theme_palette(self.app.theme)
+        left = Text(no_wrap=True, overflow="ellipsis")
+        left.append("LanCher Code", style="bold " + colors["primary"])
+        left.append("  ·  ", style=colors["muted"])
+        left.append(self._cwd.name, style=colors["muted"])
+        return left
 
     def _render_mcp_panel(self) -> RenderableType:
+        colors = theme_palette(self.app.theme)
         progress = self._mcp_progress
         if progress is None or not progress.servers:
-            return Text(self._mcp_status, style="#97adc7")
+            return Text(self._mcp_status, style=colors["muted"])
 
         lines: list[Text] = []
-        heading = Text("MCP 服务", style="bold #c8d5e3")
+        heading = Text("MCP 服务", style="bold " + colors["text"])
         lines.append(heading)
         for server in progress.servers:
             lines.append(self._render_server_row(server))
@@ -137,59 +130,67 @@ class BannerWidget(Static):
         footer = Text()
         footer.append(
             f"  {progress.successful_servers}/{progress.total_servers} 已就绪",
-            style="#78d98a" if progress.successful_servers else "#7f9ab8",
+            style=colors["success"] if progress.successful_servers else colors["muted"],
         )
-        footer.append(f" · {progress.registered_tools} 个工具", style="#97adc7")
+        footer.append(f" · {progress.registered_tools} 个工具", style=colors["muted"])
         if progress.failed_servers:
-            footer.append(f" · {progress.failed_servers} 个失败", style="#ff7b72")
+            footer.append(f" · {progress.failed_servers} 个失败", style=colors["error"])
         if progress.warning_count:
-            footer.append(f" · {progress.warning_count} 条警告", style="#ff9b6b")
+            footer.append(f" · {progress.warning_count} 条警告", style=colors["warning"])
         lines.append(footer)
         return Group(*lines)
 
     def _render_server_row(self, server: MCPServerInitialization) -> Text:
+        colors = theme_palette(self.app.theme)
         spinners = ("◐", "◓", "◑", "◒")
         if server.state == "waiting":
-            marker, state_text, style = "○", "等待启动", "#7f9ab8"
+            marker, state_text, style = "○", "等待启动", colors["muted"]
         elif server.state == "connecting":
-            marker, state_text, style = spinners[self._spinner_frame], "正在连接…", "#73b6ff"
+            marker, state_text, style = spinners[self._spinner_frame], "正在连接…", colors["primary"]
         elif server.state == "registering":
-            marker, state_text, style = spinners[self._spinner_frame], "正在注册工具…", "#73b6ff"
+            marker, state_text, style = spinners[self._spinner_frame], "正在注册工具…", colors["primary"]
         elif server.state == "failed":
-            marker, state_text, style = "✕", "启动失败", "#ff7b72"
+            marker, state_text, style = "✕", "启动失败", colors["error"]
         elif server.warning_count:
-            marker, state_text, style = "!", f"已就绪 · {server.registered_tools} 个工具", "#ff9b6b"
+            marker, state_text, style = "!", f"已就绪 · {server.registered_tools} 个工具", colors["warning"]
         else:
-            marker, state_text, style = "✓", f"已就绪 · {server.registered_tools} 个工具", "#78d98a"
+            marker, state_text, style = "✓", f"已就绪 · {server.registered_tools} 个工具", colors["success"]
 
         row = Text("  ")
         row.append(marker, style=f"bold {style}")
-        row.append(f" {server.name:<18}", style="#c8d5e3")
+        row.append(f" {server.name:<18}", style=colors["text"])
         row.append(state_text, style=style)
         return row
 
 
-class ThinkingTraceWidget(Vertical):
-    def __init__(self, entries: list[TraceEntry], *, collapsed: bool = True) -> None:
-        super().__init__(classes="thinking-trace")
+class TraceSection(Vertical):
+    can_focus = True
+    BINDINGS = [("enter", "toggle_details", "展开/收起"), ("space", "toggle_details", "展开/收起")]
+
+    def __init__(self, entries: list[TraceEntry], *, collapsed: bool = True, kind: str = "thinking") -> None:
+        super().__init__(classes=f"trace-section {kind}-trace")
         self._entries = list(entries)
         self._collapsed = collapsed
+        self._kind = kind
 
     @property
     def collapsed(self) -> bool:
         return self._collapsed
 
     def compose(self) -> ComposeResult:
-        yield Static(classes="thinking-trace-header")
-        yield Static(classes="thinking-trace-body")
+        yield Static(classes=f"trace-header {self._kind}-trace-header")
+        yield Static(classes=f"trace-body {self._kind}-trace-body")
 
     def on_mount(self) -> None:
         self._sync_view()
 
-    @on(Click, ".thinking-trace-header")
+    @on(Click, ".trace-header")
     def toggle_collapsed(self) -> None:
         self._collapsed = not self._collapsed
         self._sync_view()
+
+    def action_toggle_details(self) -> None:
+        self.toggle_collapsed()
 
     def set_collapsed(self, collapsed: bool) -> None:
         if self._collapsed == collapsed:
@@ -202,27 +203,46 @@ class ThinkingTraceWidget(Vertical):
         self._sync_view()
 
     def _sync_view(self) -> None:
-        header = self.query_one(".thinking-trace-header", Static)
-        body = self.query_one(".thinking-trace-body", Static)
+        header = self.query_one(".trace-header", Static)
+        body = self.query_one(".trace-body", Static)
         marker = "▶" if self._collapsed else "▼"
-        header.update(f"{marker} 思考轨迹 ({len(self._entries)})")
-        header.styles.color = "#a8b9cc"
-        header.styles.text_style = "bold"
+        colors = theme_palette(self.app.theme)
+        if self._kind == "thinking":
+            summary = f"思考 ({len(self._entries)})"
+        else:
+            calls = sum(entry.kind == "tool_call" for entry in self._entries)
+            results = [entry for entry in self._entries if entry.kind == "tool_result"]
+            errors = sum(entry.ok is False for entry in results)
+            summary = f"工具 {len(results)}/{calls}" if calls else "工作记录"
+            if errors:
+                summary += f" · {errors} 项未完成"
+        header.update(Text(f"{marker} {summary}", style=colors["muted"]))
         body.display = bool(self._entries) and not self._collapsed
         if body.display:
-            body.update(_format_trace_entries(self._entries))
+            body.update(_format_trace_entries(self._entries, colors=colors))
 
 
-def _format_trace_entries(entries: list[TraceEntry]) -> Text:
+class ThinkingTraceWidget(TraceSection):
+    def __init__(self, entries: list[TraceEntry], *, collapsed: bool = True) -> None:
+        super().__init__(entries, collapsed=collapsed)
+
+
+class ToolActivityWidget(TraceSection):
+    def __init__(self, entries: list[TraceEntry]) -> None:
+        super().__init__(entries, collapsed=True, kind="tool")
+
+
+def _format_trace_entries(entries: list[TraceEntry], *, colors: dict[str, str] | None = None) -> Text:
+    colors = colors or theme_palette()
     renderable = Text()
     for entry in entries:
         if entry.kind == "thinking":
-            renderable.append(entry.text, style="#a8b9cc")
+            renderable.append(entry.text, style=colors["muted"])
         elif entry.kind == "tool_call":
-            renderable.append(_format_tool_call_entry(entry), style="#73b6ff")
+            renderable.append(_format_tool_call_entry(entry), style=colors["primary"])
         elif entry.kind == "tool_result":
             prefix = "✓ " if entry.ok else "✗ "
-            style = "#78d98a" if entry.ok else "#ff7b72"
+            style = colors["success"] if entry.ok else colors["error"]
             renderable.append(f"{prefix}{entry.text}", style=style)
             for display_line in entry.metadata.get("display_lines", []):
                 if not isinstance(display_line, dict):
@@ -231,13 +251,13 @@ def _format_trace_entries(entries: list[TraceEntry]) -> Text:
                 if not isinstance(line_text, str):
                     continue
                 tone = display_line.get("tone")
-                line_style = "#78d98a" if tone == "success" else "#ff7b72" if tone == "error" else style
+                line_style = colors["success"] if tone == "success" else colors["error"] if tone == "error" else style
                 renderable.append("\n")
                 renderable.append(line_text, style=line_style)
         elif entry.kind == "text":
-            renderable.append(entry.text, style="#e8e8e8")
+            renderable.append(entry.text, style=colors["text"])
         elif entry.kind == "notice":
-            renderable.append(f"提示：{entry.text}", style="#ffb86c")
+            renderable.append(f"提示：{entry.text}", style=colors["warning"])
         renderable.append("\n")
 
     if renderable.plain.endswith("\n"):
@@ -259,18 +279,13 @@ def _format_tool_call_entry(entry: TraceEntry) -> str:
 
 class MessageWidget(Vertical):
     ROLE_LABELS = {
-        "system": "SYSTEM",
-        "user": "YOU",
-        "assistant": "LANCHER",
-    }
-    ROLE_STYLES = {
-        "system": "#97adc7",
-        "user": "#78d98a",
-        "assistant": "#73b6ff",
+        "system": "提示",
+        "user": "你",
+        "assistant": "LanCher",
     }
     STATUS_LABELS = {
-        "error": "ERROR",
-        "cancelled": "CANCELLED",
+        "error": "未完成",
+        "cancelled": "已停止",
     }
 
     def __init__(self, message: SessionMessage, *, show_thinking: bool) -> None:
@@ -285,7 +300,8 @@ class MessageWidget(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(classes="message-label")
-        yield ThinkingTraceWidget(self.trace_entries, collapsed=self.trace_collapsed)
+        yield ToolActivityWidget([])
+        yield ThinkingTraceWidget([], collapsed=True)
         yield Static(classes="message-body")
 
     def on_mount(self) -> None:
@@ -296,11 +312,10 @@ class MessageWidget(Vertical):
         self.content = message.content
         self.status = message.status
         self.trace_entries = list(message.trace.entries)
-        self.trace_collapsed = message.trace.collapsed
         self._sync_view()
 
     def _sync_view(self) -> None:
-        self.set_class(self.status in {"error", "cancelled"}, "-error")
+        self.set_class(self.status == "error", "-error")
 
         label_widget = self.query_one(".message-label", Static)
         label_widget.update(self._label_text())
@@ -308,18 +323,23 @@ class MessageWidget(Vertical):
         label_widget.styles.text_style = "bold"
 
         trace_widget = self.query_one(ThinkingTraceWidget)
-        trace_visible = self._show_trace()
+        thinking = [entry for entry in self.trace_entries if entry.kind == "thinking"]
+        tools = [entry for entry in self.trace_entries if entry.kind != "thinking"]
+        activity = self.query_one(ToolActivityWidget)
+        activity.display = self.role == "assistant" and bool(tools)
+        if activity.display:
+            activity.update_entries(tools)
+        trace_visible = self._show_trace() and bool(thinking)
         trace_widget.display = trace_visible
         if trace_visible:
-            trace_widget.set_collapsed(self.trace_collapsed)
-            trace_widget.update_entries(self.trace_entries)
+            trace_widget.update_entries(thinking)
 
         body_widget = self.query_one(".message-body", Static)
         body_text = self._body_text()
         body_widget.display = bool(body_text)
         if body_text:
             body_widget.styles.color = self._body_color()
-            body_widget.update(body_text)
+            body_widget.update(Markdown(body_text) if self.role == "assistant" and self.status != "error" else Text(body_text))
 
     def _show_trace(self) -> bool:
         return self._show_thinking and self.role == "assistant" and bool(self.trace_entries)
@@ -330,9 +350,8 @@ class MessageWidget(Vertical):
         return self.ROLE_LABELS.get(self.role, self.role.upper())
 
     def _label_color(self) -> str:
-        if self.status in {"error", "cancelled"}:
-            return "#ff7b72"
-        return self.ROLE_STYLES.get(self.role, "#ffffff")
+        colors = theme_palette(self.app.theme)
+        return colors["error"] if self.status == "error" else colors["primary"] if self.role == "user" else colors["muted"]
 
     def _body_text(self) -> str:
         if self.status == "error":
@@ -348,6 +367,5 @@ class MessageWidget(Vertical):
         return ""
 
     def _body_color(self) -> str:
-        if self.status in {"error", "cancelled"}:
-            return "#ff7b72"
-        return "#e8e8e8"
+        colors = theme_palette(self.app.theme)
+        return colors["error"] if self.status == "error" else colors["text"]

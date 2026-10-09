@@ -52,14 +52,14 @@ class Tool(Protocol):
 
 ### `ToolExecutor`（`core/executor.py`）
 
-`execute_calls(calls, mode, plan_file_path, cancellation_token, permission_resolver, available_tool_names)`：
+`execute_calls(...)` 接收独立的 `work_phase`、`permission_policy`、`should_interrupt`、计划路径、取消令牌、审批回调与可见工具集合；旧 `mode` 参数仅供兼容：
 
 ```text
 对每个调用：
   · 已取消 → 抛 CancelledError
   · 不在可见工具集合 → tool_not_found（提示先 tool_search）
   · 注册表中不存在 → tool_not_found
-  · 当前模式不可用 → mode_disallowed
+  · 当前阶段不可用 → phase_disallowed（优先于规则与跳过询问）
   · 并发安全 → 加入 safe_batch（最后并行执行）
   · 非并发安全 → 先执行完 safe_batch，再串行执行本调用
 对每个调用（_execute_one）：
@@ -69,12 +69,12 @@ class Tool(Protocol):
 
 ## 内置工具一览
 
-| 工具 | 文件 | 分类 | 并发安全 | 可见模式 | 说明 |
+| 工具 | 文件 | 分类 | 并发安全 | 可见阶段 | 说明 |
 |---|---|---|---|---|---|
 | `read_file` | `read_file.py` | read | 是 | 全部 | 按行读取，大文件要求分页（>400 行需 offset/limit），记录文件状态缓存 |
-| `write_file` | `write_file.py` | write | 否 | default/acceptEdits/bypass | 全量覆盖写；覆盖已有文件前必须完整读过且文件未变（防盲写） |
-| `edit_file` | `edit_file.py` | write | 否 | default/acceptEdits/bypass | 唯一匹配替换；old_text 必须唯一，0 次/多次匹配都报错 |
-| `bash` | `bash.py` | command | 否 | 全部 | 执行 Windows PowerShell 命令，输出截断 12000 字符，超时 kill |
+| `write_file` | `write_file.py` | write | 否 | execute | 全量覆盖写；覆盖已有文件前必须完整读过且文件未变（防盲写） |
+| `edit_file` | `edit_file.py` | write | 否 | execute | 唯一匹配替换；old_text 必须唯一，0 次/多次匹配都报错 |
+| `bash` | `bash.py` | command | 否 | execute | 执行 Windows PowerShell 命令，输出截断 12000 字符，超时 kill |
 | `glob` | `glob.py` | read | 是 | 全部 | glob 查找文件，跳过 SKIP_DIRS，结果按修改时间倒序 |
 | `grep` | `grep.py` | read | 是 | 全部 | 正则逐行搜索，二进制跳过，单行截断 300 字符 |
 | `write_plan_file` | `write_plan_file.py` | write | 否 | **仅 plan** | 只能写配置的计划文件路径 |
@@ -87,7 +87,8 @@ class Tool(Protocol):
 - **read_file 大文件**：单次默认上限 400 行（`DEFAULT_MAX_INLINE_LINES`），超限且未给 `limit` 时返回 `large_file_requires_paging` 错误，提示分页。
 - **write_file 防盲写**（`_guard_existing_file_write`）：覆盖已有文件要求 ① 之前用 read_file 读过 ② 是完整读取 ③ mtime 未变化；否则返回 `stale_file_state` / `incomplete_file_read` / `file_changed_since_read`。
 - **edit_file 一致性**：基于缓存内容匹配，mtime 变化则拒绝。
-- **bash 特例**：退出码非零视为错误（`non_zero_exit`），但 `grep/find/diff/rg/fc/select-string` 与 `git diff` 视为"可能正常非零"（>2 才报错）；Plan 模式有额外命令校验。
+- **bash 特例**：退出码非零视为错误（`non_zero_exit`），但 `grep/find/diff/rg/fc/select-string` 与 `git diff` 视为"可能正常非零"（>2 才报错）。讨论与计划一律禁止通用 Shell。
+- **补充中断**：执行前及并发组边界检查 `should_interrupt`，尚未启动的调用补齐 `steering_superseded` 结果；已启动的操作等待结束。
 - **glob/grep 输出上限**：模型侧 800 条路径 / 400 条匹配，UI 侧 200 条，字符上限 24000。
 
 ## 文件状态缓存（`core/file_state_cache.py`）

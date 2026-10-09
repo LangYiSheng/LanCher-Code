@@ -95,13 +95,16 @@ providers:
         context_window: 128000
 default_model: openai/mini
 ui:
+  theme: dark
+  busy_enter_action: follow_up
   show_timestamps: false
   show_thinking_status: true
 runtime:
   tool_loop_limit: 50
   unknown_tool_streak_limit: 3
   plan_file_path: ./.lancher/plan.md
-  permission_mode: default
+  work_phase: execute
+  permission_policy: default
 ```
 
 完整配置项说明见 [configuration.md](configuration.md)。用 `/settings` 增加供应商及模型，用 `/model` 在当前对话中切换。旧单 `provider` 配置无需手动迁移，首次保存会备份后升级。
@@ -123,15 +126,15 @@ LanCher: （先调用 glob / read_file 工具，再给出答案）
 
 ```text
 /plan 帮我梳理这个项目的启动流程    ← 进入规划模式并提交任务
-/mode acceptEdits                 ← 切换到允许编辑模式
+/permissions acceptEdits          ← 允许自动编辑，不改变工作阶段
 /exit                             ← 退出程序
 ```
 
 ## 6. 如何判断程序运行正常
 
-- 聊天界面正常渲染，输入消息后模型开始流式回复（状态栏显示 `Busy`）
-- 状态栏左侧显示当前模型名与协议，右侧显示 Token 用量（`Tokens In / Out`）
-- 底部横幅显示 `上下文 xx%`，MCP 初始化完成后显示 `MCP：已就绪 · n/n Server · m 个工具`
+- 聊天界面正常渲染，输入消息后模型开始流式回复，HUD 显示正在处理
+- HUD 分别显示本次模型、阶段与权限，预计上下文以百分比显示
+- 展开详情可查看会话累计用量与 MCP 状态；累计用量不是上下文占比
 - 出现问题时：
   - 界面内消息会标记为 `ERROR`，附错误原因
   - 详细日志写入 `~/.lancher/logs/lancher-error.log`

@@ -23,28 +23,31 @@ class ModelPickerScreen(ModalScreen[str | None]):
         Binding("enter", "choose_model", "选择", priority=True),
     ]
     CSS = """
-    ModelPickerScreen { align: center middle; background: #08111b 70%; }
+    ModelPickerScreen { align: center middle; background: $background 85%; }
     #model-picker { width: 90%; max-width: 88; height: 90%; max-height: 32; padding: 1 2;
-        background: #0f1a26; border: solid #4b6f97; color: #f2f2f2; }
-    #model-picker-title { height: 2; text-style: bold; }
-    #model-search { height: 3; border: tall #29445f; background: #0f1a26; }
-    #model-search:focus { border: tall #73b6ff; }
+        background: $surface; border: solid $panel; color: $text; }
+    #model-picker-title { height: 1; text-style: bold; }
+    #model-picker-scope { height: auto; margin-bottom: 1; color: $text-muted; }
+    #model-search { height: 3; border: none; border-bottom: solid $panel; background: $surface; }
+    #model-search:focus { border-bottom: solid $primary; }
     #model-options { height: 1fr; background: transparent; border: none; }
-    #model-picker-empty { height: auto; color: #97adc7; display: none; }
-    #model-picker-help { height: auto; color: #97adc7; }
+    #model-picker-empty { height: auto; color: $text-muted; display: none; }
+    #model-picker-help { height: auto; color: $text-muted; }
     ModelPickerScreen.-narrow #model-picker { width: 100%; height: 100%; padding: 0 1; }
     ModelPickerScreen.-narrow #model-picker-title { height: 1; }
     """
 
-    def __init__(self, config: AppConfig, current_ref: str | None) -> None:
+    def __init__(self, config: AppConfig, current_ref: str | None, *, purpose: str = "current") -> None:
         super().__init__()
         self.config = config
         self.current_ref = current_ref
+        self.purpose = purpose
         self._visible_refs: list[str] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="model-picker"):
-            yield Static("选择主模型", id="model-picker-title")
+            yield Static("更改新对话默认模型" if self.purpose == "default" else "切换本次对话模型", id="model-picker-title")
+            yield Static("保存后用于新对话；本次对话保持原模型。" if self.purpose == "default" else "立即切换本次对话；新对话默认值保持不变。", id="model-picker-scope")
             yield Input(placeholder="搜索供应商、模型名或显示名称", id="model-search")
             yield OptionList(id="model-options", markup=False)
             yield Static("没有匹配的模型", id="model-picker-empty")
@@ -76,9 +79,9 @@ class ModelPickerScreen(ModalScreen[str | None]):
                 continue
             flags = []
             if ref == self.current_ref:
-                flags.append("当前")
+                flags.append("本次对话")
             if ref == self.config.default_model:
-                flags.append("默认")
+                flags.append("新对话默认")
             suffix = "  · " + " / ".join(flags) if flags else ""
             prompt = Text(label + suffix, style="bold" if ref == self.current_ref else "")
             prompt.append(f"\n{provider.name} · {model.model_name} · {ref}", style="dim")
@@ -88,7 +91,8 @@ class ModelPickerScreen(ModalScreen[str | None]):
         widget = self.query_one("#model-options", OptionList)
         widget.clear_options()
         widget.add_options(options)
-        widget.highlighted = refs.index(self.current_ref) if self.current_ref in refs else (0 if refs else None)
+        selected = self.config.default_model if self.purpose == "default" else self.current_ref
+        widget.highlighted = refs.index(selected) if selected in refs else (0 if refs else None)
         self.query_one("#model-picker-empty", Static).display = not refs
 
     def _move(self, delta: int) -> None:

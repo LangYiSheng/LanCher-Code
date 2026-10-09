@@ -80,6 +80,8 @@ default_model: deepseek/chat
 |---|---|---|---|---|
 | `ui.show_timestamps` | bool | `false` | 否 | 是否显示消息时间戳（当前界面实现中尚未使用该开关的渲染逻辑） |
 | `ui.show_thinking_status` | bool | `true` | 否 | 是否显示思考轨迹折叠区 |
+| `ui.theme` | str | `dark` | 否 | `dark` / `light`，统一应用于聊天与设置 |
+| `ui.busy_enter_action` | str | `follow_up` | 否 | `follow_up` 排到下一轮、`steer` 补充当前任务、`draft` 保留草稿 |
 
 ### `runtime`
 
@@ -88,7 +90,10 @@ default_model: deepseek/chat
 | `runtime.tool_loop_limit` | int | `50` | 否 | 单轮对话最大工具循环次数 |
 | `runtime.unknown_tool_streak_limit` | int | `3` | 否 | 连续请求未知工具达到该次数即停止本轮 |
 | `runtime.plan_file_path` | str | `./.lancher/plan.md` | 否 | Plan Mode 计划文件路径（相对路径基于启动时 cwd 解析） |
-| `runtime.permission_mode` | str | `default` | 否 | 启动时的权限模式：`default` / `plan` / `acceptEdits` / `bypass` |
+| `runtime.work_phase` | str | `execute` | 否 | 初始工作阶段：`discuss` / `plan` / `execute` |
+| `runtime.permission_policy` | str | `default` | 否 | 权限策略：`default` / `acceptEdits` / `bypass`，不改变阶段 |
+
+旧 `runtime.permission_mode` 仍可读取：`plan` 映射到计划阶段与标准权限，其他值映射到执行阶段与同名权限。新字段优先，保存时写入新字段。工具记录与思考显示开关独立；关闭思考显示不会隐藏工具活动。
 
 ### 环境变量展开
 
@@ -98,7 +103,7 @@ default_model: deepseek/chat
 
 ## 权限规则文件
 
-`permissions.yaml` 顶层为 `rules` 数组，每项 `{match, result}`：
+`permissions.yaml` 顶层为 `rules` 数组，每项 `{match, result, match_kind}`。`match_kind` 可为 `exact`、`glob`、`legacy`；旧文件缺少此字段时按原规则解释。新的命令授权默认 `exact`，完整命令精确匹配，不把 `*` 等字符当通配符：
 
 ```yaml
 rules:
@@ -109,6 +114,8 @@ rules:
 ```
 
 三层规则优先级：**session > project > user**（session 层仅内存，不落盘；project / user 层落盘）。
+
+会话规则会随命名会话保存。阶段硬限制先于三层规则；讨论和计划阶段不开放通用 Shell，且 MCP 必须明确声明只读。
 
 ### 匹配格式
 

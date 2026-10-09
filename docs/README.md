@@ -17,14 +17,16 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 
 | 功能 | 说明 |
 |---|---|
-| 终端多轮对话 | Textual TUI，流式输出，支持思考轨迹、工具调用轨迹展示 |
+| 终端多轮对话 | 安静对话为主体，流式回答；状态栏显示模型、阶段与权限，思考/工具轨迹可展开 |
+| 工作中输入 | 可补充当前任务、排到下一轮或保留草稿；取消/失败会暂停队列 |
 | 双协议后端 | 支持 OpenAI 兼容协议与 Anthropic Claude 协议 |
 | 内置工具 | `read_file`、`write_file`、`edit_file`、`glob`、`grep`、`bash`、`write_plan_file`、`tool_search` |
 | ReAct 工具循环 | 模型可多轮调用工具直到给出最终回答（默认上限 50 轮） |
-| Plan Mode | `/plan` 进入只读规划模式，唯一允许写入的是计划文件 `./.lancher/plan.md` |
-| 五层权限系统 | 危险命令黑名单、路径沙箱、三层规则（会话/项目/用户）、四档权限模式、人在回路确认弹窗 |
+| 工作阶段 | 讨论、计划、执行独立切换；`/plan` 可只读探索并生成会话计划，`/do` 切到执行；计划执行按钮验证快照后实际提交任务 |
+| 权限系统 | 阶段边界、路径沙箱、危险命令黑名单、三层规则、逐次确认/自动编辑/跳过询问；阶段切换不改变权限 |
+| 模型与设置 | 供应商下管理模型，本次使用与新对话默认分别选择；单条保存，支持深浅主题和忙时 Enter 偏好 |
 | 上下文治理 | Token 估算、大工具结果落盘卸载、自动/紧急上下文压缩 |
-| 会话持久化 | 按项目保存/恢复会话（`.lancher/session/*.jsonl`），含会话级权限规则 |
+| 会话持久化 | 按项目保存/恢复会话（`.lancher/session/*.jsonl`），使用 v4 格式，含权限匹配方式、计划快照与待处理输入，兼容读取 v1–v3 |
 | MCP 扩展 | 支持 stdio / Streamable HTTP 两种 MCP Server，工具延迟加载 |
 
 ## 技术栈
@@ -51,7 +53,7 @@ TurnRunner（lancher_code/turn_runner.py）── 工具循环
  ├── SessionController（会话状态 / 提示词组装）
  ├── Provider（openai / claude 流式请求）
  ├── ToolExecutor + ToolRegistry（内置工具 + MCP 工具）
- └── PermissionEngine（五层权限判定）
+ └── PermissionEngine（阶段边界 + 权限判定）
  ↓
 外部：模型 API / 本地 shell / 文件系统 / MCP Server
 ```
@@ -63,11 +65,11 @@ TurnRunner（lancher_code/turn_runner.py）── 工具循环
 | 模块 | 位置 | 职责 |
 |---|---|---|
 | 应用装配 | `lancher_code/app.py` | 启动流程：加载配置、创建 Provider、会话、工具、MCP、TUI |
-| 会话层 | `lancher_code/session.py` | `SessionController`：消息、transcript、模式切换、用法统计 |
-| 工具循环 | `lancher_code/turn_runner.py` | `TurnRunner`：ReAct 循环、事件流、取消、自动压缩 |
+| 会话层 | `lancher_code/session.py` | `SessionController`：消息、transcript、阶段/权限、计划与队列状态 |
+| 工具循环 | `lancher_code/turn_runner.py` | `TurnRunner`：ReAct 循环、事件流、输入投递、取消、自动压缩 |
 | 上下文管理 | `lancher_code/context_management.py` | Token 估算、工具结果卸载、摘要压缩 |
-| 权限引擎 | `lancher_code/permission_engine.py` | 五层权限判定、规则存储 |
-| 提示词构建 | `lancher_code/prompting.py` | system prompt、Plan Mode 提示、动态提醒 |
+| 权限引擎 | `lancher_code/permission_engine.py` | 阶段边界、权限判定、精确/通配规则存储 |
+| 提示词构建 | `lancher_code/prompting.py` | system prompt、阶段/权限提示、动态提醒 |
 | 工具系统 | `lancher_code/tools/` | 工具注册表、执行器、8 个内置工具 |
 | 模型供应商 | `lancher_code/providers/` | OpenAI / Claude 流式适配 |
 | MCP | `lancher_code/mcp/` | MCP Server 配置、连接、工具适配 |
@@ -86,7 +88,7 @@ python -m lancher_code
 python main.py
 ```
 
-首次启动会自动进入配置引导界面，填写 `protocol / model / base_url / api_key` 后保存到 `~/.lancher/lancher.yaml`。
+首次启动依次配置供应商连接、添加第一个模型、确认使用关系，最终保存到 `~/.lancher/lancher.yaml`。随后可在设置中分别调整本次模型、新对话默认模型、MCP、权限规则和界面偏好。
 
 详细步骤见 [getting-started.md](getting-started.md)。
 

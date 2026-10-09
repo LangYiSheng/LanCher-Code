@@ -71,7 +71,7 @@ async def test_model_picker_keyboard_search_and_cancel(tmp_path, size):
         await pilot.press("enter")
         await pilot.pause()
         assert runner.model_ref == "other/chat"
-        assert app._status_left_text() == "日常编程"
+        assert app._status_left_text() == "日常编程 · 执行 · 逐次确认"
         assert config.default_model == "deepseek/chat"
         assert session.transcript == []
         assert len(constructed) == 1
@@ -100,7 +100,7 @@ async def test_model_picker_empty_search_then_direct_selection(tmp_path):
         await pilot.pause()
         await app._execute_slash_command("model", "deepseek/reason")
         assert runner.model_ref == "deepseek/reason"
-        assert app._status_left_text() == "deepseek-reasoner (DeepSeek)"
+        assert app._status_left_text() == "deepseek-reasoner (DeepSeek) · 执行 · 逐次确认"
         await app._execute_slash_command("model", "missing/model")
         assert runner.model_ref == "deepseek/reason"
         assert len(constructed) == 1
@@ -143,7 +143,7 @@ async def test_chat_applies_settings_without_changing_active_model_for_new_defau
         app._handle_settings_result(SettingsResult(saved=True, config=changed))
         await pilot.pause()
         assert runner.model_ref == "other/chat"
-        assert app._status_left_text() == "日常编程"
+        assert app._status_left_text() == "日常编程 · 执行 · 逐次确认"
 
 
 @pytest.mark.asyncio
@@ -164,3 +164,18 @@ async def test_chat_resume_restores_saved_model_then_missing_model_falls_back(tm
         await app._execute_slash_command("session", "resume second --force")
         assert runner.model_ref == "deepseek/chat"
         assert "不存在" in runner.model_notice
+
+
+@pytest.mark.asyncio
+async def test_default_picker_highlights_default_and_explains_scope(tmp_path):
+    app, runner, _, config, _ = build_model_app(tmp_path)
+    async with app.run_test() as pilot:
+        app.push_screen(ModelPickerScreen(config, "other/chat", purpose="default"))
+        await pilot.pause()
+        screen = app.screen
+        options = screen.query_one("#model-options", OptionList)
+        assert screen._visible_refs[options.highlighted] == "deepseek/chat"
+        assert "新对话默认" in str(screen.query_one("#model-picker-title", Static).render())
+        assert "本次对话保持" in str(screen.query_one("#model-picker-scope", Static).render())
+        await pilot.press("escape")
+        assert runner.model_ref == "deepseek/chat"

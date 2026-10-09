@@ -5,7 +5,7 @@ import copy
 from datetime import date, datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from lancher_code.models import (
     ChatRequest,
@@ -21,6 +21,10 @@ from lancher_code.models import (
     ProviderConfig,
     PromptContext,
     RuntimeMode,
+    WorkPhase,
+    PermissionPolicy,
+    PlanSnapshot,
+    PendingInput,
     SessionMessage,
     SessionState,
     ThinkingConfig,
@@ -30,6 +34,9 @@ from lancher_code.models import (
     ToolResultReplacement,
     TraceEntry,
     ThinkingTrace,
+    legacy_runtime_mode,
+    resolve_runtime_axes,
+    tool_available_in_phase,
 )
 from lancher_code.context_management import (
     compact_transcript,
@@ -71,7 +78,9 @@ class SessionController:
         cwd: Path | None = None,
         current_date: date | None = None,
         plan_file_path: Path | None = None,
-        initial_runtime_mode: RuntimeMode = "default",
+        initial_runtime_mode: RuntimeMode | None = None,
+        initial_work_phase: WorkPhase | None = None,
+        initial_permission_policy: PermissionPolicy | None = None,
         permission_storage: PermissionStorage | None = None,
         selected_model_ref: str | None = None,
     ) -> None:
@@ -90,8 +99,10 @@ class SessionController:
         self._active_dynamic_context: str | None = None
         self._permission_storage = permission_storage or PermissionStorage()
         self._permission_storage.subscribe_session_rules_changed(self._mark_dirty)
-        if initial_runtime_mode != self._state.runtime_mode:
-            self.set_runtime_mode(initial_runtime_mode)
+        if any(value is not None for value in (initial_runtime_mode, initial_work_phase, initial_permission_policy)):
+            phase, policy = resolve_runtime_axes(initial_runtime_mode, initial_work_phase, initial_permission_policy)
+            self.set_permission_policy(policy)
+            self.set_work_phase(phase)
 
     @property
     def state(self) -> SessionState:
@@ -104,6 +115,43 @@ class SessionController:
     @property
     def runtime_mode(self) -> RuntimeMode:
         return self._state.runtime_mode
+
+    @property
+    def work_phase(self) -> WorkPhase:
+        return self._state.work_phase
+
+    @property
+    def permission_policy(self) -> PermissionPolicy:
+        return self._state.permission_policy
+
+    @property
+    def session_id(self) -> str:
+        return self._state.session_id
+
+    @property
+    def plan_snapshot(self) -> PlanSnapshot | None:
+        return copy.deepcopy(self._state.plan_snapshot)
+
+    @property
+    def pending_inputs(self) -> list[PendingInput]:
+        return copy.deepcopy(self._state.pending_inputs)
+
+    def set_plan_snapshot(
+        self, snapshot: PlanSnapshot | str | None, *, source_message_id: str = "", ready: bool = False
+    ) -> PlanSnapshot | None:
+        if isinstance(snapshot, str):
+            snapshot = PlanSnapshot.create(snapshot, source_message_id, ready=ready)
+        if snapshot is not None:
+            snapshot = self._decode_plan_snapshot(asdict(snapshot))
+        self._state.plan_snapshot = copy.deepcopy(snapshot)
+        self._mark_dirty()
+        self.auto_save()
+        return self.plan_snapshot
+
+    def update_pending_inputs(self, items: list[PendingInput]) -> None:
+        self._state.pending_inputs = self._decode_pending_inputs([asdict(item) for item in items], restore=False)
+        self._mark_dirty()
+        self.auto_save()
 
     @property
     def plan_file_path(self) -> Path:
@@ -162,31 +210,46 @@ class SessionController:
         context.automatic_compaction_disabled = False
 
     def set_runtime_mode(self, mode: RuntimeMode) -> RuntimeMode:
-        previous_mode = self._state.runtime_mode
-        if mode == previous_mode:
-            return mode
+        """兼容旧显式调用；新业务只能分别设置阶段和权限。"""
+        phase, policy = resolve_runtime_axes(mode)
+        if mode != "plan":
+            self.set_permission_policy(policy)
+        self.set_work_phase(phase)
+        return self.runtime_mode
 
-        self._state.previous_runtime_mode = previous_mode
-        if mode == "plan" and previous_mode != "plan":
-            self._state.plan_restore_mode = previous_mode
-            self._state.pending_plan_entry_kind = "reentry" if self._plan_file_path.exists() else "initial"
+    def set_work_phase(self, phase: WorkPhase) -> WorkPhase:
+        resolve_runtime_axes(work_phase=phase, permission_policy=self.permission_policy)
+        previous_phase = self.work_phase
+        if phase == previous_phase:
+            return phase
+        self._state.previous_runtime_mode = self.runtime_mode
+        if phase == "plan":
+            self._state.pending_plan_entry_kind = "reentry" if self._state.plan_snapshot else "initial"
             self._state.pending_plan_exit_notice = False
             self._state.plan_mode_turn_count = 0
-        elif previous_mode == "plan" and mode != "plan":
+        elif previous_phase == "plan":
             self._state.pending_plan_exit_notice = self._state.plan_mode_turn_count > 0
             self._state.pending_plan_entry_kind = None
-
-        self._state.runtime_mode = mode
+        self._state.work_phase = phase
         self._mark_dirty()
         self.auto_save()
-        return mode
+        return phase
+
+    def set_permission_policy(self, policy: PermissionPolicy) -> PermissionPolicy:
+        resolve_runtime_axes(work_phase=self.work_phase, permission_policy=policy)
+        if policy != self.permission_policy:
+            self._state.permission_policy = policy
+            self._mark_dirty()
+            self.auto_save()
+        return policy
 
     def restore_mode_after_plan(self) -> RuntimeMode:
-        restore_mode = self._state.plan_restore_mode
-        self.set_runtime_mode(restore_mode)
-        return restore_mode
+        self.set_work_phase("execute")
+        return self.runtime_mode
 
     def create_user_message(self, text: str) -> SessionMessage:
+        if self.work_phase == "plan" and self._state.plan_snapshot is not None:
+            self._state.plan_snapshot.ready = False
         message = SessionMessage(
             id=self._new_message_id(),
             role="user",
@@ -195,7 +258,7 @@ class SessionController:
             timestamp=self._now(),
         )
         self._state.messages.append(message)
-        self._active_dynamic_context = build_dynamic_context_prompt(self._prompt_context(self.runtime_mode))
+        self._active_dynamic_context = build_dynamic_context_prompt(self._prompt_context())
         self._transcript.append(
             build_user_message(text=text, dynamic_context=self._active_dynamic_context)
         )
@@ -352,18 +415,22 @@ class SessionController:
         *,
         allow_tool_calls: bool,
         mode: RuntimeMode | None = None,
+        work_phase: WorkPhase | None = None,
+        permission_policy: PermissionPolicy | None = None,
         deferred_tool_groups: list[DeferredToolGroup] | None = None,
     ) -> ChatRequest:
-        active_mode = mode or self.runtime_mode
+        active_phase, active_policy = resolve_runtime_axes(
+            mode,
+            work_phase if work_phase is not None else (None if mode is not None else self.work_phase),
+            permission_policy if permission_policy is not None else (None if mode is not None else self.permission_policy),
+        )
         thinking = self._request_thinking()
         if not allow_tool_calls:
             filtered_tools = []
-        elif all(active_mode in tool.allowed_modes for tool in tools):
-            filtered_tools = tools
         else:
-            filtered_tools = self._filter_tools_for_mode(tools, active_mode)
+            filtered_tools = [tool for tool in tools if tool_available_in_phase(tool, active_phase)]
         payload = build_chat_request_payload(
-            context=self._prompt_context(active_mode),
+            context=self._prompt_context(work_phase=active_phase, permission_policy=active_policy),
             transcript=self._request_transcript(),
             tools=filtered_tools,
             deferred_tool_groups=deferred_tool_groups,
@@ -376,7 +443,9 @@ class SessionController:
             tools=payload.tools,
             allow_tool_calls=allow_tool_calls,
             thinking=thinking,
-            mode=active_mode,
+            mode=legacy_runtime_mode(active_phase, active_policy),
+            work_phase=active_phase,
+            permission_policy=active_policy,
         )
 
     def estimate_request_tokens(self, request: ChatRequest) -> int:
@@ -546,6 +615,7 @@ class SessionController:
         records = self._session_store.load(normalized)
         state, transcript, created_at, permission_rules = self._decode_records(records, normalized)
         model_ref = self._decode_model_ref(records[0])
+        transcript = self._recover_interrupted_history(state, transcript)
         if resolved_model is not None:
             self._reset_model_context(state.context_management)
         elif model_ref != self._selected_model_ref:
@@ -562,6 +632,7 @@ class SessionController:
         self._permission_storage.replace_session_rules(permission_rules, notify=False)
         self._state = state
         self._transcript = transcript
+        self._active_dynamic_context = None
         self._active_session_name = normalized
         self._session_created_at = created_at
         self._selected_model_ref = model_ref
@@ -569,6 +640,54 @@ class SessionController:
             self._provider_config, self._selected_model_ref = resolved_model
         self._dirty = False
         return len(permission_rules)
+
+    @staticmethod
+    def _recover_interrupted_history(
+        state: SessionState, transcript: list[ConversationMessage]
+    ) -> list[ConversationMessage]:
+        """恢复自动保存的活动任务；补齐未知结果，绝不重放工具操作。"""
+        interrupted_ids: set[str] = set()
+        for message in state.messages:
+            if message.role == "assistant" and message.status == "streaming":
+                interrupted_ids.add(message.id)
+                message.status = "cancelled"
+                message.trace.collapsed = True
+                if not message.content.strip():
+                    message.content = "上次任务已中断。"
+                message.trace.entries.append(TraceEntry(
+                    kind="notice", text="会话恢复前的任务已中断；请先检查工具操作的实际状态。",
+                ))
+        if state.plan_snapshot is not None and state.plan_snapshot.source_message_id in interrupted_ids:
+            state.plan_snapshot.ready = False
+
+        recovered: list[ConversationMessage] = []
+        cursor = 0
+        while cursor < len(transcript):
+            message = transcript[cursor]
+            recovered.append(message)
+            cursor += 1
+            calls = [block for block in message.blocks if block.kind == "tool_use"]
+            if message.role != "assistant" or not calls:
+                continue
+            # 调用标识可在后续批次复用，只在紧邻本批调用的结果中查找。
+            result_message: ConversationMessage | None = None
+            recorded_ids: set[str] = set()
+            while cursor < len(transcript) and transcript[cursor].role == "tool":
+                result_message = transcript[cursor]
+                recovered.append(result_message)
+                recorded_ids.update(block.call_id for block in result_message.blocks if block.kind == "tool_result")
+                cursor += 1
+            missing = [call for call in calls if call.call_id not in recorded_ids]
+            if not missing:
+                continue
+            if result_message is None:
+                result_message = ConversationMessage(role="tool", blocks=[])
+                recovered.append(result_message)
+            result_message.blocks.extend(ContentBlock.tool_result_block(
+                call_id=call.call_id, is_error=True,
+                text="上次任务在保存后中断，未获得此工具调用的完整结果。操作可能已部分执行，请先检查当前状态，勿直接重复执行。",
+            ) for call in missing)
+        return recovered
 
     def _write_active_session(self) -> None:
         assert self._active_session_name is not None
@@ -586,23 +705,26 @@ class SessionController:
                 "message_count": len(self._state.messages),
                 "permission_rule_count": len(self._permission_storage.rules_for_scope("session")),
                 "context_management": self._encode_context_management(),
+                "session_id": self.session_id,
             },
             {
                 "type": "state",
                 "data": {
-                    "runtime_mode": self._state.runtime_mode,
+                    "work_phase": self.work_phase,
+                    "permission_policy": self.permission_policy,
                     "previous_runtime_mode": self._state.previous_runtime_mode,
-                    "plan_restore_mode": self._state.plan_restore_mode,
                     "plan_mode_turn_count": self._state.plan_mode_turn_count,
                     "pending_plan_exit_notice": self._state.pending_plan_exit_notice,
                     "pending_plan_entry_kind": self._state.pending_plan_entry_kind,
+                    "plan_snapshot": asdict(self._state.plan_snapshot) if self._state.plan_snapshot else None,
+                    "pending_inputs": [asdict(item) for item in self._state.pending_inputs],
                 },
             },
             {
                 "type": "permissions",
                 "data": {
                     "rules": [
-                        {"match": rule.match, "result": rule.result}
+                        {"match": rule.match, "result": rule.result, "match_kind": rule.match_kind}
                         for rule in self._permission_storage.rules_for_scope("session")
                     ]
                 },
@@ -644,8 +766,8 @@ class SessionController:
             messages = [self._decode_message(record["data"]) for record in records if record.get("type") == "message"]
             transcript = [self._decode_transcript(record["data"]) for record in records if record.get("type") == "transcript"]
             permission_records = [record for record in records if record.get("type") == "permissions"]
-            if version in {2, 3} and len(permission_records) != 1:
-                raise SessionStoreError("v2/v3 会话必须包含且仅包含一条 permissions 记录。")
+            if version in {2, 3, 4} and len(permission_records) != 1:
+                raise SessionStoreError("v2/v3/v4 会话必须包含且仅包含一条 permissions 记录。")
             if version == 1 and permission_records:
                 raise SessionStoreError("v1 会话不能包含 permissions 记录。")
             permission_rules = (
@@ -653,22 +775,50 @@ class SessionController:
                 if permission_records
                 else []
             )
+            if version == 4:
+                phase, policy = resolve_runtime_axes(
+                    work_phase=state_data["work_phase"], permission_policy=state_data["permission_policy"]
+                )
+                session_id = metadata.get("session_id")
+                if not isinstance(session_id, str) or not session_id.strip():
+                    raise ValueError("会话 session_id 无效。")
+                plan_snapshot = self._decode_plan_snapshot(state_data.get("plan_snapshot"))
+                pending_inputs = self._decode_pending_inputs(state_data.get("pending_inputs", []), restore=True)
+            else:
+                old_mode = state_data.get("runtime_mode", "default")
+                phase, policy = resolve_runtime_axes(old_mode)
+                if old_mode == "plan":
+                    restore_policy = state_data.get("plan_restore_mode", "default")
+                    policy = restore_policy if restore_policy in {"default", "acceptEdits", "bypass"} else "default"
+                session_id = uuid5(NAMESPACE_URL, f"{self._cwd}|{created_at.isoformat()}").hex
+                # 旧共享文件不构成该会话的计划快照，也不继承任何待执行输入。
+                plan_snapshot = None
+                pending_inputs = []
+            previous_mode = state_data.get("previous_runtime_mode")
+            if previous_mode is not None and previous_mode not in {"default", "plan", "acceptEdits", "bypass"}:
+                raise ValueError("previous_runtime_mode 无效。")
+            entry_kind = state_data.get("pending_plan_entry_kind")
+            if entry_kind not in {None, "initial", "reentry"}:
+                raise ValueError("pending_plan_entry_kind 无效。")
+            if entry_kind == "reentry" and plan_snapshot is None:
+                entry_kind = "initial"
             state = SessionState(
                 messages=messages,
-                runtime_mode=str(state_data.get("runtime_mode", "default")),  # type: ignore[arg-type]
-                previous_runtime_mode=state_data.get("previous_runtime_mode"),  # type: ignore[arg-type]
-                plan_restore_mode=str(state_data.get("plan_restore_mode", "default")),  # type: ignore[arg-type]
+                work_phase=phase,
+                permission_policy=policy,
+                session_id=session_id,
+                plan_snapshot=plan_snapshot,
+                pending_inputs=pending_inputs,
+                previous_runtime_mode=previous_mode,
                 plan_mode_turn_count=int(state_data.get("plan_mode_turn_count", 0)),
                 pending_plan_exit_notice=bool(state_data.get("pending_plan_exit_notice", False)),
-                pending_plan_entry_kind=state_data.get("pending_plan_entry_kind"),  # type: ignore[arg-type]
+                pending_plan_entry_kind=entry_kind,
                 context_management=(
                     self._decode_context_management(metadata.get("context_management"))
-                    if version == 3
+                    if version in {3, 4}
                     else ContextManagementState()
                 ),
             )
-            if state.runtime_mode not in {"default", "plan", "acceptEdits", "bypass"}:
-                raise SessionStoreError("会话运行模式无效。")
             if len(messages) != int(metadata.get("message_count", -1)):
                 raise SessionStoreError("会话消息数量与 metadata 不一致。")
             if len(permission_rules) != int(metadata.get("permission_rule_count", 0)):
@@ -676,6 +826,47 @@ class SessionController:
         except (KeyError, StopIteration, TypeError, ValueError) as exc:
             raise SessionStoreError(f"会话文件结构无效：{exc}") from exc
         return state, transcript, created_at, permission_rules
+
+    @staticmethod
+    def _decode_plan_snapshot(value: object) -> PlanSnapshot | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("计划快照必须为对象。")
+        content, source = value.get("content"), value.get("source_message_id")
+        ready = value.get("ready", False)
+        if not isinstance(content, str) or not content.strip() or not isinstance(source, str) or not source.strip():
+            raise ValueError("计划快照正文或来源消息无效。")
+        if not isinstance(ready, bool):
+            raise ValueError("计划快照 ready 必须为布尔值。")
+        snapshot = PlanSnapshot.create(content, source, ready=ready)
+        if value.get("digest") != snapshot.digest:
+            raise ValueError("计划快照内容与摘要不一致。")
+        return snapshot
+
+    @staticmethod
+    def _decode_pending_inputs(value: object, *, restore: bool) -> list[PendingInput]:
+        if not isinstance(value, list):
+            raise ValueError("待处理输入必须为数组。")
+        items: list[PendingInput] = []
+        seen: set[str] = set()
+        for raw in value:
+            if not isinstance(raw, dict):
+                raise ValueError("待处理输入格式无效。")
+            item_id, text = raw.get("id"), raw.get("text")
+            if not isinstance(item_id, str) or not item_id.strip() or item_id in seen:
+                raise ValueError("待处理输入 id 为空或重复。")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("待处理输入正文无效。")
+            delivery, state = raw.get("delivery", "follow_up"), raw.get("state", "pending")
+            target = raw.get("target_task_id")
+            if delivery not in {"follow_up", "steer"} or state not in {"pending", "paused"}:
+                raise ValueError("待处理输入动作或状态无效。")
+            if target is not None and (not isinstance(target, str) or not target.strip()):
+                raise ValueError("待处理输入的目标任务无效。")
+            seen.add(item_id)
+            items.append(PendingInput(item_id, text, delivery, target, "paused" if restore else state))
+        return items
 
     def _encode_context_management(self) -> dict[str, object]:
         context = self.context_state
@@ -740,8 +931,11 @@ class SessionController:
                 raise ValueError("权限规则 match 无效。")
             if result not in {"allow", "deny"}:
                 raise ValueError("权限规则 result 无效。")
+            match_kind = item.get("match_kind", "legacy")
+            if match_kind not in {"exact", "glob", "legacy"}:
+                raise ValueError("权限规则 match_kind 无效。")
             rules.append(
-                PermissionRule(match=match.strip(), result=result, scope="session")  # type: ignore[arg-type]
+                PermissionRule(match=match.strip(), result=result, scope="session", match_kind=match_kind)
             )
         return rules
 
@@ -803,11 +997,17 @@ class SessionController:
             raw_path = self._cwd / raw_path
         return raw_path.resolve()
 
-    def _prompt_context(self, mode: RuntimeMode) -> "PromptContext":
+    def _prompt_context(
+        self, mode: RuntimeMode | None = None, *, work_phase: WorkPhase | None = None,
+        permission_policy: PermissionPolicy | None = None,
+    ) -> "PromptContext":
         return build_prompt_context(
             cwd=self._cwd,
             current_date=self._current_date,
             runtime_mode=mode,
+            work_phase=work_phase if work_phase is not None else self.work_phase,
+            permission_policy=permission_policy if permission_policy is not None else self.permission_policy,
+            plan_snapshot=self.plan_snapshot,
             plan_file_path=self._plan_file_path,
             previous_runtime_mode=self._state.previous_runtime_mode,
             plan_mode_turn_count=self._state.plan_mode_turn_count,
@@ -835,7 +1035,7 @@ class SessionController:
         return messages
 
     def _advance_dynamic_prompt_state_after_user_turn(self) -> None:
-        if self._state.runtime_mode == "plan":
+        if self.work_phase == "plan":
             self._state.plan_mode_turn_count += 1
             self._state.pending_plan_entry_kind = None
             return

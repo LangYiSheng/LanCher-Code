@@ -47,12 +47,15 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
         "ui": {
             "show_timestamps": config.ui.show_timestamps,
             "show_thinking_status": config.ui.show_thinking_status,
+            "theme": config.ui.theme,
+            "busy_enter_action": config.ui.busy_enter_action,
         },
         "runtime": {
             "tool_loop_limit": config.runtime.tool_loop_limit,
             "unknown_tool_streak_limit": config.runtime.unknown_tool_streak_limit,
             "plan_file_path": config.runtime.plan_file_path,
-            "permission_mode": config.runtime.permission_mode,
+            "work_phase": config.runtime.work_phase,
+            "permission_policy": config.runtime.permission_policy,
         },
     }
 

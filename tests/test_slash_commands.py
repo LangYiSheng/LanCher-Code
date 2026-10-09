@@ -38,16 +38,11 @@ def test_registry_suggests_commands_by_mode() -> None:
     registry = create_default_slash_command_registry()
 
     assert [command.name for command in registry.suggest("", "default")] == [
-        "plan",
-        "mode",
-        "session",
-        "compact",
-        "settings",
-        "model",
-        "exit",
+        "discuss", "plan", "do", "mode", "session", "compact", "settings",
+        "permissions", "status", "model", "exit",
     ]
-    assert [command.name for command in registry.suggest("d", "default")] == []
-    assert [command.name for command in registry.suggest("d", "plan")] == ["do"]
+    assert [command.name for command in registry.suggest("d", "default")] == ["discuss", "do"]
+    assert [command.name for command in registry.suggest("d", "plan")] == ["discuss", "do"]
 
 
 def test_registry_parses_submission_and_keeps_payload() -> None:

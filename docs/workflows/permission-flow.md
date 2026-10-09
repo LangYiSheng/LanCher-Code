@@ -1,107 +1,91 @@
-# 流程：权限判定与人在回路
+# 流程：工作阶段、权限判定与确认
 
-本文描述一个工具调用从发起申请到获得决议的完整链路。
+每次工具调用先受工作阶段限制，再使用权限策略和规则判断是否需要确认。切换阶段不会改变权限策略；`bypass` 和任何已保存的允许规则都不能突破阶段限制。
+
+## 两个独立维度
+
+| 工作阶段 `work_phase` | 可用能力 |
+|---|---|
+| `discuss`（讨论） | 原生只读调查工具，以及已配置且明确声明 `readOnlyHint=true` 的 MCP 工具 |
+| `plan`（计划） | 讨论阶段的能力，加 `write_plan_file` 写入专用计划文件 |
+| `execute`（执行） | 已注册且在执行阶段可用的工具；实际调用仍受权限判定约束 |
+
+讨论和计划阶段都禁止通用 Shell，包括看似只读的 `git status`、`git diff` 等命令。MCP 的只读边界依赖服务端声明；未声明或声明为 `false` 的工具在这两个阶段不可用。`write_plan_file` 只在计划阶段可用，正文必须非空。
+
+| 权限策略 `permission_policy` | 原生读工具 / 只读 MCP | 原生写工具 | Shell / 其他 MCP |
+|---|---|---|---|
+| `default` | allow | ask | ask |
+| `acceptEdits` | allow | allow | ask |
+| `bypass` | allow | allow | allow |
+
+此表只作用于已经通过阶段、路径、危险命令黑名单和规则判定的调用。`write_plan_file` 也遵循写工具策略，因此 `default` 下需要确认。显式规则按 session → project → user 的作用域优先级匹配，同一作用域取最后一条命中规则。
 
 ## 判定链
 
 ```mermaid
 flowchart TD
-    A[工具调用 ToolCall] --> B[构造匹配目标<br/>_build_match_target]
-    B -->|路径越界| D[deny<br/>path_outside_project]
-    B --> C{bash?}
-    C -->|是| E{危险命令黑名单?}
-    E -->|命中| D2[deny<br/>permission_blacklist_denied]
-    E -->|未命中| F{plan 模式?}
-    F -->|是| G{Plan 命令校验<br/>validate_plan_command}
-    G -->|违规| D3[deny<br/>plan_mode_command_rejected]
-    G -->|通过| H
-    F -->|否| H[规则引擎<br/>session > project > user]
-    H -->|命中规则| I[allow / deny<br/>permission_rule_*]
-    H -->|未命中| J{权限模式<br/>_mode_decision}
-    J -->|allow| K[allow 放行]
-    J -->|deny| D4[deny<br/>permission_mode_denied]
+    A[工具调用 ToolCall] --> B{阶段允许此工具?}
+    B -->|否| D[拒绝 phase_disallowed]
+    B -->|是| C[构造匹配目标]
+    C -->|路径越界| E[拒绝 path_outside_project]
+    C --> F{命中 Shell 危险命令黑名单?}
+    F -->|是| G[拒绝 permission_blacklist_denied]
+    F -->|否| H{匹配权限规则}
+    H -->|allow| K[允许]
+    H -->|deny| I[拒绝 permission_rule_deny]
+    H -->|未命中| J{权限策略}
+    J -->|allow| K
     J -->|ask| L[生成 PermissionRequest]
-    L --> M[TUI InlinePermissionPanel 弹窗]
-    M --> N{用户选择}
-    N -->|allow_once| K
-    N -->|allow_session| O[写 session 规则] --> K
-    N -->|allow_project| P[写 project 规则落盘] --> K
-    N -->|deny| D5[deny<br/>permission_user_denied]
+    L --> M[聊天内联权限面板]
+    M --> N{等待决议}
+    N -->|用户拒绝| O[拒绝 permission_user_denied]
+    N -->|任务补充撤销审批| P[跳过 steering_superseded]
+    N -->|用户允许| Q{执行前仍有效?}
+    Q -->|否| P
+    Q -->|是| R[按选择保存精确规则并执行]
 ```
 
-## 各阶段说明
+工具发现、执行器和权限引擎共享阶段边界。模型即使直接猜中隐藏工具名，也不能绕过阶段过滤。执行器在每组工具开始前及审批返回后检查取消或补充消息；已经启动的并行组收齐结果，尚未启动的后续组返回 `steering_superseded`。
 
-### ① 匹配目标构造（`_build_match_target`）
+## 匹配目标与授权范围
 
-| 工具 | 匹配值 |
+| 工具 | 新确认产生的精确规则 |
 |---|---|
-| `bash` | 命令文本规范化（小写、空白折叠为单空格） |
-| `read_file` / `write_file` / `edit_file` | 解析符号链接后的项目相对路径（正斜杠、小写） |
-| `write_plan_file` | 计划文件相对路径 |
-| `glob` | 模式本身（小写） |
-| `grep` | 搜索范围路径 |
-| MCP 外部工具 | 空值，规则按工具名精确匹配 |
+| `bash` | 完整命令，例如 `Bash(git status --short)`；保留大小写及命令内部空白 |
+| `read_file` / `write_file` / `edit_file` | 解析符号链接后的项目相对路径，按现有路径规范化规则比较 |
+| `write_plan_file` | 专用计划文件的项目相对路径 |
+| `glob` / `grep` | 分别为搜索模式、搜索范围 |
+| MCP 工具 | 完整可见名，例如 `mcp__github__get_issue`；授权该工具，不绑定某组参数 |
 
-### ② 黑名单与 Plan 校验
+新确认保存 `match_kind: exact`，字符 `*`、`?`、`[` 不会被当作授权通配符。不会把 `git status` 自动扩成 `Bash(git *)`。人工维护的 `match_kind: glob` 支持通配符；未带 `match_kind` 的旧规则作为 `legacy` 保留原匹配行为。
 
-- 黑名单（`COMMAND_BLACKLIST_PATTERNS`）命中即拒绝，**任何模式（含 bypass）都不可绕过**
-- Plan 模式只允许白名单前缀（查看、搜索、git 只读、版本查询），禁止重定向/管道/包管理命令
+## 确认与关闭
 
-### ③ 规则引擎（`_match_rules`）
-
-- 作用域顺序：session → project → user，**第一个有命中规则的作用域生效**；同一作用域内取最后一条
-- 规则格式 `ToolLabel(value)`，支持 glob 通配符；MCP 工具用可见名 `mcp__<server>__<tool>`
-
-### ④ 模式默认行为（`_mode_decision`）
-
-| 模式 | read 工具 | write 工具（非 bash） | bash | MCP 外部工具 |
-|---|---|---|---|---|
-| default | allow | ask | ask | ask |
-| plan | allow | ask | ask（Plan 校验约束） | 非只读 deny |
-| acceptEdits | allow | allow | ask | ask |
-| bypass | allow | allow | allow | allow |
-
-（黑名单、显式 deny 规则、Plan 命令校验始终优先于表格结果。）
-
-> 注：`write_file` / `edit_file` 的 `allowed_modes` 不含 `plan`，Plan 模式下它们在工具列表中被过滤；模型若仍调用会先在 `ToolExecutor` 被 `mode_disallowed` 拦截，不会走到权限引擎。`write_plan_file` 则只允许 plan 模式。
-
-## 人在回路（⑤）
-
-触发条件：规则与模式均未放行 → `PermissionEngine._build_permission_request()` 生成请求：
+`PermissionRequest` 包含 `request_id`、工具调用、`work_phase`、`permission_policy`、命令或文件差异预览、`session_rule` / `project_rule` 以及 `match_kind`。
 
 ```text
-PermissionRequest
- ├─ request_id（perm-xxxx）
- ├─ kind: command | file_edit | external_tool
- ├─ title / prompt / details（含命令、文件路径、diff 预览）
- ├─ session_rule / project_rule（建议规则，如 Bash(git *)）
- └─ metadata（mode、tool 信息）
+ToolExecutor → PermissionEngine.evaluate → ask
+→ TurnRunner._request_permission 创建 Future
+→ permission_request_created → 聊天内联权限面板
+→ 用户选择 → resolve_permission_request 唤醒 Future
+→ 执行器重新检查取消与补充 → apply_resolution → 执行工具
 ```
-
-传递路径：
-
-```text
-ToolExecutor._execute_one → PermissionEngine.evaluate → ask
-→ ToolExecutor._handle_permission_check → permission_resolver(request)
-   = TurnRunner._request_permission
-       → 创建 Future，发 permission_request_created 事件
-       → TUI _request_inline_permission：隐藏输入框，挂载 InlinePermissionPanel
-       → 用户选择 → InlinePermissionPanel.Resolved(PermissionResolution)
-       → TurnRunner.resolve_permission_request(resolution) 唤醒 Future
-       → ToolExecutor.apply_resolution：allow_session/allow_project 写规则
-```
-
-## 决议后果
 
 | 决议 | 本次调用 | 后续影响 |
 |---|---|---|
-| `allow_once` | 放行 | 无 |
-| `allow_session` | 放行 | 会话规则 +1（内存，随会话保存/恢复） |
-| `allow_project` | 放行 | 写入 `./.lancher/permissions.yaml` |
-| `deny` | 拒绝 | 模型收到 `permission_user_denied`，可调整策略继续 |
+| `allow_once` | 放行 | 不保存规则 |
+| `allow_session` | 放行 | 保存会话精确规则，随命名会话持久化 |
+| `allow_project` | 放行 | 精确规则写入 `./.lancher/permissions.yaml` |
+| `deny` | 拒绝 | 返回 `permission_user_denied`，模型可调整策略 |
+| `superseded`（内部状态） | 跳过 | 不保存规则，返回 `steering_superseded` |
 
-## 异常路径
+提交“补充当前任务”立即撤销仍在等待的审批。`superseded` 不是用户可选按钮，也不表示用户拒绝；即使随后删除该补充，已撤销的审批仍不会执行或保存允许规则。旧面板的迟到决议返回 `False`。
 
-- 活动回合不存在或 Future 已 done → `resolve_permission_request` 返回 False，决议不生效
-- 回合被取消 → 挂起的权限 Future 被取消，面板消失
-- 无权限处理器（非 TUI 环境）→ `permission_confirmation_unavailable` 错误
+每个审批退出时发 `permission_request_closed`，用于移除内联面板；撤销的审批不发 `permission_request_resolved`。正常等待审批时输入区仍可用于补充或排队。
+
+## 中断与恢复
+
+- 取消任务会取消挂起的审批并暂停待处理队列；没有权限处理器时返回 `permission_confirmation_unavailable`。
+- 工具调用中断后，历史记录补齐未知结果，并说明操作可能已经部分执行，不能直接重试。
+- v4 会话恢复时所有待处理输入均为 `paused`。自动保存时尚在生成的消息收拢为已取消；缺少结果的工具调用按批次补齐未知错误结果，不自动重放工具。
+- 恢复会话不会读取项目旧 `plan.md` 并把它当成已确认计划。执行计划使用当前会话的快照正文与摘要，阶段切换不附带权限升级。

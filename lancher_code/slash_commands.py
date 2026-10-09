@@ -104,7 +104,7 @@ class SlashCommandRegistry:
         return [
             command
             for command in self.visible_commands(mode)
-            if command.name.casefold().startswith(normalized)
+            if command.name.casefold().startswith(normalized) or normalized in command.description.casefold()
         ]
 
     def complete(self, context: SlashCompletionContext) -> list[SlashCompletionCandidate]:
@@ -211,10 +211,14 @@ def extract_exact_command_name(text: str) -> str | None:
 
 def create_default_slash_command_registry() -> SlashCommandRegistry:
     registry = SlashCommandRegistry()
+    registry.register(SlashCommandDefinition(
+        name="discuss", description="讨论想法 · 只读调查代码", usage="/discuss [问题]",
+        insert_trailing_space=True,
+    ))
     registry.register(
         SlashCommandDefinition(
             name="plan",
-            description="继续补充或修改计划",
+            description="制定计划 · 确认后执行",
             usage="/plan [任务]",
             argument_hint="任务描述",
             visible_modes=("default", "acceptEdits", "bypass"),
@@ -225,16 +229,16 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
     registry.register(
         SlashCommandDefinition(
             name="do",
-            description="回到进入 plan 前的模式",
-            usage="/do",
-            visible_modes=("plan",),
+            description="切换到执行 · 保留当前审批策略",
+            usage="/do [任务]",
+            visible_modes=("default", "plan", "acceptEdits", "bypass"),
             executable_modes=("default", "plan", "acceptEdits", "bypass"),
         )
     )
     registry.register(
         SlashCommandDefinition(
             name="mode",
-            description="切换权限模式",
+            description="兼容命令 · 切换旧运行模式",
             usage="/mode <default|plan|acceptEdits|bypass>",
             argument_hint="default | plan | acceptEdits | bypass",
             visible_modes=("default", "plan", "acceptEdits", "bypass"),
@@ -274,9 +278,15 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
         )
     )
     registry.register(
+        SlashCommandDefinition(name="permissions", description="更改本次对话审批策略", usage="/permissions")
+    )
+    registry.register(
+        SlashCommandDefinition(name="status", description="查看模型、用量和连接详情", usage="/status")
+    )
+    registry.register(
         SlashCommandDefinition(
             name="model",
-            description="选择当前会话的主模型",
+            description="切换本次对话模型 · 不更改新对话默认",
             usage="/model [供应商ID/模型ID]",
             argument_hint="不带参数打开搜索面板，或输入模型标识直接切换",
             insert_trailing_space=True,
@@ -319,8 +329,8 @@ def _complete_mode_arguments(
     if completed:
         return []
     return [
-        SlashArgumentSuggestion(value=mode, description=f"切换到 {mode} 模式")
-        for mode in ("default", "plan", "acceptEdits", "bypass")
+        SlashArgumentSuggestion(value=mode, description=description)
+        for mode, description in (("default", "执行 · 逐次确认"), ("plan", "制定计划"), ("acceptEdits", "执行 · 自动编辑"), ("bypass", "执行 · 跳过询问"))
     ]
 
 

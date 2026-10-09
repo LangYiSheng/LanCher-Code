@@ -71,7 +71,7 @@ uv run pytest            # 运行全部测试
 | 协议（Protocol） | `tools/core/base.py`、`providers/base.py` | 定义"工具/供应商必须长什么样" |
 | 异步生成器 + 队列 | `turn_runner.py` | 后台任务产事件，消费者逐条消费 |
 | 门面 | `ChatTUI` / `ConfigBootstrapTUI` | 包装 Textual App |
-| 状态机 | `SessionController.set_runtime_mode` | plan 进入/退出/恢复模式 |
+| 状态机 | `SessionController.set_work_phase` / `set_permission_policy` | 阶段与策略独立，旧模式入口仅供兼容 |
 | 原子写 | `session_store.save`、`settings_service._atomic_write_many` | 临时文件 + `os.replace` |
 
 ## 运行测试

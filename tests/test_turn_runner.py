@@ -123,6 +123,7 @@ async def test_turn_runner_completes_plain_text_turn(openai_provider_config, tmp
         "assistant_text_delta",
         "usage_updated",
         "assistant_message_completed",
+        "turn_completed",
     ]
     assert events[-1].message is not None
     assert events[-1].message.content == "直接回答"
@@ -146,7 +147,7 @@ async def test_turn_runner_emergency_compacts_and_retries_once(openai_provider_c
 
     events = [event async for event in runner.run_user_turn("继续任务")]
 
-    assert events[-1].kind == "assistant_message_completed"
+    assert events[-1].kind == "turn_completed"
     assert events[-1].message is not None and events[-1].message.content == "恢复成功"
     assert len(provider.requests) == 3
     assert provider.requests[1].allow_tool_calls is False
@@ -193,7 +194,7 @@ async def test_automatic_compaction_triggers_before_normal_request(openai_provid
 
     events = [event async for event in runner.run_user_turn("x" * 5_000)]
 
-    assert events[-1].kind == "assistant_message_completed"
+    assert events[-1].kind == "turn_completed"
     assert provider.requests[0].allow_tool_calls is False
     assert provider.requests[1].allow_tool_calls is True
     assert session.context_state.automatic_failure_count == 0
@@ -252,7 +253,7 @@ async def test_turn_runner_adds_discovered_schema_only_to_next_loop(openai_provi
 
     events = [event async for event in runner.run_user_turn("使用远程 echo")]
 
-    assert events[-1].kind == "assistant_message_completed"
+    assert events[-1].kind == "turn_completed"
     assert [tool.name for tool in provider.requests[0].tools] == ["tool_search"]
     assert [tool.name for tool in provider.requests[1].tools] == ["tool_search", "mcp__demo__echo"]
     assert "mcp__demo__echo" in provider.requests[0].system[-1]
@@ -337,7 +338,7 @@ async def test_turn_runner_executes_multiple_tool_calls_in_one_reply(openai_prov
 
     events = [event async for event in runner.run_user_turn("帮我执行工具")]
 
-    assert events[-1].kind == "assistant_message_completed"
+    assert events[-1].kind == "turn_completed"
     assert len(provider.requests) == 2
     assert sum(event.kind == "tool_call_started" for event in events) == 2
     assert sum(event.kind == "tool_result_received" for event in events) == 2
@@ -375,7 +376,7 @@ async def test_turn_runner_loops_until_text_after_multiple_batches(openai_provid
 
     events = [event async for event in runner.run_user_turn("多轮工具")]
 
-    assert events[-1].kind == "assistant_message_completed"
+    assert events[-1].kind == "turn_completed"
     assert len(provider.requests) == 3
     assert session.state.messages[-1].content == "终于答完"
     assert [entry.kind for entry in session.state.messages[-1].trace.entries] == [
@@ -409,7 +410,7 @@ async def test_turn_runner_records_parser_error_and_continues(openai_provider_co
 
     events = [event async for event in runner.run_user_turn("坏参数")]
 
-    assert events[-1].kind == "assistant_message_completed"
+    assert events[-1].kind == "turn_completed"
     assert session.state.messages[-1].content == "解析失败后的最终说明"
     assert any(entry.kind == "tool_result" and entry.ok is False for entry in session.state.messages[-1].trace.entries)
 

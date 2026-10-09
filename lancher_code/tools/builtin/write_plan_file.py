@@ -22,6 +22,7 @@ class WritePlanFileTool:
                 "properties": {
                     "content": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "要覆盖写入计划文件的完整文本。",
                     }
                 },
@@ -43,11 +44,11 @@ class WritePlanFileTool:
             )
 
         content = arguments.get("content")
-        if not isinstance(content, str):
+        if not isinstance(content, str) or not content.strip():
             return build_tool_error(
                 summary="写入计划文件失败",
                 error_code="invalid_arguments",
-                error_message="content 必须是字符串。",
+                error_message="content 必须是包含计划正文的非空字符串。",
                 tool_name=self.definition.name,
             )
 

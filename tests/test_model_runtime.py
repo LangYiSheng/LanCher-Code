@@ -264,7 +264,7 @@ def test_switch_autosaves_reference_without_credentials(tmp_path: Path) -> None:
     runner.switch_model("anthropic/sonnet")
     raw = (tmp_path / ".lancher/session/saved.jsonl").read_text(encoding="utf-8")
     metadata = json.loads(raw.splitlines()[0])
-    assert metadata["version"] == 3
+    assert metadata["version"] == 4
     assert metadata["model_ref"] == "anthropic/sonnet"
     assert "secret-key" not in raw
     assert "base_url" not in raw
@@ -377,7 +377,7 @@ async def test_http_switch_uses_inherited_and_overridden_connection_and_keeps_to
         if index:
             runner.switch_model(model_ref)
         events = [event async for event in runner.run_user_turn(f"继续第 {index + 1} 轮")]
-        assert events[-1].kind == "assistant_message_completed"
+        assert events[-1].kind == "turn_completed"
     assert len(seen) == len(expected)
 
 
@@ -458,6 +458,6 @@ async def test_interrupted_tools_are_paired_before_cross_protocol_switch(tmp_pat
     assert not runner.has_active_turn
     runner.switch_model("anthropic/sonnet")
     continuation = [event async for event in runner.run_user_turn("检查状态后继续")]
-    assert continuation[-1].kind == "assistant_message_completed"
+    assert continuation[-1].kind == "turn_completed"
     assert len(requests) == 3
     assert executions == ([False, True] if interruption == "cancel" else [False])

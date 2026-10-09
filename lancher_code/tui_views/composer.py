@@ -10,13 +10,15 @@ from textual.events import Click, Message
 from textual.widgets import Static, TextArea
 
 from lancher_code.slash_commands import SlashCompletionCandidate
+from lancher_code.tui_views.theme import theme_palette
 
 
 class ComposerSubmitted(Message):
-    def __init__(self, composer: "ComposerTextArea", value: str) -> None:
+    def __init__(self, composer: "ComposerTextArea", value: str, delivery: str | None = None) -> None:
         super().__init__()
         self.composer = composer
         self.value = value
+        self.delivery = delivery
 
 
 class SlashMenuNavigateRequested(Message):
@@ -49,6 +51,7 @@ class ComposerTextArea(TextArea):
         Binding("tab", "accept_slash_menu_selection", "补全命令", show=False, priority=True),
         Binding("shift+tab", "cycle_permission_mode", "切换模式", show=False, priority=True),
         Binding("shift+enter", "insert_newline", "换行", show=False, priority=True),
+        Binding("ctrl+enter", "submit_steering", "补充当前任务", show=False, priority=True),
     ] + TextArea.BINDINGS
 
     def __init__(self, *args, **kwargs) -> None:
@@ -92,6 +95,9 @@ class ComposerTextArea(TextArea):
     def action_insert_newline(self) -> None:
         self.insert("\n")
 
+    def action_submit_steering(self) -> None:
+        self.post_message(ComposerSubmitted(self, self.text, "steer"))
+
     def remember_accepted_slash_command(self, command_text: str) -> None:
         self._accepted_slash_command_text = command_text
 
@@ -115,10 +121,12 @@ class SlashCompletionMenuItem(Static):
         self.refresh()
 
     def render(self) -> RenderableType:
+        colors = theme_palette(self.app.theme)
         text = Text()
-        text.append(self.candidate.display, style="bold #73b6ff" if not self._active else "bold #f2f2f2")
+        text.append("› " if self._active else "  ", style=colors["primary"])
+        text.append(self.candidate.description, style="bold " + colors["text"] if self._active else colors["text"])
         text.append("  ")
-        text.append(self.candidate.description, style="#a8b9cc" if not self._active else "#dbe7f3")
+        text.append(self.candidate.display, style=colors["muted"])
         return text
 
     def on_click(self, event: Click) -> None:

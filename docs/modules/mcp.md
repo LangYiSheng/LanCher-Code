@@ -58,7 +58,7 @@ load_mcp_config(cwd) 合并全局+项目配置
 | 可见名 | `mcp__<server>__<tool>` |
 | 分类 | 远程标注 `readOnlyHint` → read，否则 command |
 | 并发安全 | 只读工具并发安全 |
-| 权限 | `source="external"`，规则键为可见名；模式矩阵：default=ask、plan 非只读=deny、bypass=allow |
+| 权限 | `source="external"`，规则键为可见名；讨论／计划仅接纳服务器明确声明 `readOnlyHint=true` 的工具，再按独立审批策略处理。声明不等于系统隔离保证；规则与 bypass 不能越过阶段限制 |
 
 调用通过 `MCPServerConnection.call_tool()` 转发；返回内容只保留 `TextContent`，其他块类型标记 `[已忽略非文本 MCP 内容: <类型>]`。
 

@@ -1,105 +1,46 @@
 # 模块：TUI 界面
 
-## 作用
+TUI 基于 Textual 构建，消费 `TurnRunner` 的事件，不直接执行工具或调用模型。实现位于 `lancher_code/tui_views/`。
 
-TUI 层基于 [Textual](https://textual.textualize.io/) 构建，是用户唯一直接交互的界面。它**不直接调用模型或执行工具**，而是：
-
-- 消费 `TurnRunner` 的事件流更新界面
-- 渲染斜杠命令补全、权限确认弹窗、设置面板
-- 管理 MCP 初始化门控与进度展示
-
-实现位置：`lancher_code/tui_views/`。
-
-## 目录结构
+## 组件职责
 
 | 文件 | 内容 |
 |---|---|
-| `chat.py` | 主界面 `LanCherTextualApp` + 门面 `ChatTUI` |
-| `composer.py` | 输入框 `ComposerTextArea`、斜杠补全菜单、消息事件定义 |
-| `message.py` | `MessageWidget`（消息气泡）、`ThinkingTraceWidget`（思考轨迹）、`BannerWidget`（顶部横幅） |
-| `permission.py` | `InlinePermissionPanel`（内联权限确认面板） |
-| `settings.py` | `SettingsScreen`（设置面板，4 个标签页） |
-| `bootstrap.py` | `ConfigBootstrapApp` / `ConfigBootstrapTUI`（首次配置引导） |
-| `__init__.py` | 对外 re-export |
+| `chat.py` | 主界面、事件消费、输入回执、队列调度、设置运行时回调 |
+| `theme.py` | 共享深浅主题、语义颜色与主题切换 |
+| `composer.py` | 可持续编辑的输入框、中文意图及命令补全 |
+| `chat_controls.py` | 阶段栏、待发送队列、计划预览、策略选择与队列编辑 |
+| `message.py` | 连续消息正文、分别折叠的工具与思考、紧凑标题 |
+| `permission.py` | 按请求 ID 返回结果的非阻塞内联审批 |
+| `settings.py` | 模型、MCP、权限、外观与输入目录；每个编辑单独提交 |
+| `model_settings.py` | 供应商连接、模型继承与覆盖、独立默认选择 |
+| `model_picker.py` | 按供应商、API 模型名及显示名搜索，区分本次／默认 |
+| `bootstrap.py` | 连接供应商 → 第一个模型 → 确认并启动 |
 
-## 主界面（`chat.py`）
+## 输入与事件
 
-### 组件布局
+普通 Enter 在空闲时提交；工作期间根据 `busy_enter_action` 排队、补充或保留草稿。输入只有在取得接受回执后才清空。工作期间斜杠命令保留在草稿中，不作为用户文本发送。
 
-```text
-BannerWidget（横幅：cwd、MCP 状态、上下文用量）
-VerticalScroll #chat-view（消息列表）
-SlashCommandMenu（斜杠补全菜单）
-ComposerTextArea（输入框）+ 提示符（模式字形）
-CommandHintBar（命令提示）
-状态栏：status-left（模型/模式） | status-center（Ready/Busy） | status-right（Token 用量）
-```
+`assistant_message_completed` 仅表示一个消息段结束；只有 `turn_completed` 表示整个任务成功，可启动下一条 FIFO 消息。失败、取消和恢复会话后均暂停队列，用户需明确继续。队列编辑使用独立编辑器，不覆盖输入区的新草稿。
 
-### 关键流程
+`permission_request_created` 挂载面板后立即返回事件循环；决议通过 `resolve_permission_request()` 提交。`permission_request_closed` 使面板失效并恢复焦点，不依赖用户作答才能响应取消。补充会撤销旧审批；已启动操作完成后才继续。
 
-```text
-ComposerSubmitted（Enter）
-→ handle_input_submitted：
-    · 解析斜杠命令（/plan /do /mode /session /compact /settings /exit）
-    · 非命令 → TurnRunner.run_user_turn(text)（@work 后台任务）
-→ _consume_turn_event：逐个消费 TurnEvent
-    · user_message_created / assistant_message_started → 挂载 MessageWidget
-    · 其他事件 → _sync_message_widget 增量更新
-    · permission_request_created → 挂载 InlinePermissionPanel，await 用户决议
-    · CONTEXT_REFRESH_EVENTS → 刷新上下文用量估算
-→ 结束后恢复输入框、自动保存、滚动到底
-```
+事件消费者使用 `aclosing` 保证异常或关闭界面时收拢生成器；卸载界面会等待 `stop_and_wait()`，避免后台命令的资源回收被拖到事件循环关闭之后。
 
-### 消息渲染（`message.py`）
+阶段、模型和策略在工作、压缩、等待审批期间均由服务层拒绝变更。`Shift+Tab` 循环工作阶段，策略通过 HUD 或 `/permissions` 选择。计划执行携带当前会话 ID 与内容摘要；服务层验证快照并冻结正文，界面提交一次真实执行请求。
 
-- `MessageWidget`：按角色着色（YOU 绿 / LANCHER 蓝 / SYSTEM 灰），错误/取消红色标记
-- `ThinkingTraceWidget`：可折叠的思考轨迹（thinking / tool_call / tool_result / text / notice）
-- `BannerWidget`：顶部横幅，含 ASCII Logo、MCP 初始化进度（spinner）、上下文用量百分比；首条消息后进入紧凑模式
+## 阅读与布局
 
-### 权限面板（`permission.py`）
+正文使用连续文本及角色标记。工具记录与思考独立开关，工具记录默认折叠，失败操作直接显示。流式更新保留折叠状态；仅在用户处于底部时跟随，阅读历史时不抢滚动。
 
-- `InlinePermissionPanel` 内联在输入框区域，挂起输入
-- 选项由 `_option_specs()` 按请求类型生成（命令 4 项 / 文件编辑 2 项 / MCP 4 项）
-- 键盘：`↑↓` 或 `Tab/Shift+Tab` 移动，`Enter` 确认，`Esc` 拒绝
-- 决议经 `PermissionResolution` 返回给 `TurnRunner.resolve_permission_request()`
+HUD 分别展示模型、阶段、策略、预计上下文和任务状态。累计用量、缓存用量、MCP 状态放在详情，不推断没有真实数据的耗时和百分比。窄屏优先保留输入、阶段与待处理状态；长内容通过滚动和焦点导航访问。
 
-### 设置面板（`settings.py`）
+## 设置提交
 
-- 四个标签页：模型设置 / MCP 服务器 / 项目权限 / 全局权限（左右键或点击切换）
-- 数据来自 `SettingsService.load()`（快照）；保存走 `SettingsService.save()`（原子写盘 + 热切换权限）
-- 有未保存修改时按 Esc/取消会弹出"放弃修改"确认
-- 模型目录由 `model_settings.py` 管理，供应商与模型分层编辑、逐字段继承、默认模型选择；保存后热更新，MCP 仍需重启
-- `/model` 打开 `model_picker.py` 的模型选择器，可按供应商、API 模型名或显示名搜索，标记当前/默认模型
+`SettingsService` 按模型、界面偏好、MCP 作用范围、权限作用范围提交。模型保存不写 MCP 和权限文件。已提交快照与草稿分离；保存 A 后取消 B 不会撤销 A。
 
-### 首次引导（`bootstrap.py`）
+模型保存回调刷新运行时，默认变更不替换本次模型；本次切换失败保留旧模型。配置落盘成功而运行时应用失败分别提示。MCP 保存后持续显示待重启。首次配置最终确认前不写文件，返回上一步保留输入。
 
-- 仅在 `~/.lancher/lancher.yaml` 不存在时出现
-- 字段：供应商名称 / protocol / model_name / display_name / base_url / api_key / 超时 / thinking
-- 保存时调用 `write_config_data()` 写全局配置，并生成全局 `mcp.yaml` 模板
-- 窄终端（宽度 < 48）自动切换按钮竖排布局
+## 验证入口
 
-## 关键事件（Message 子类）
-
-`composer.py` 定义了 TUI 内部消息：`ComposerSubmitted`、`SlashMenuNavigateRequested`、`SlashMenuAcceptRequested`、`SlashMenuDismissRequested`、`SlashCompletionChosen`、`PermissionModeCycleRequested`。`permission.py` 定义了 `PermissionOptionChosen` 与 `InlinePermissionPanel.Resolved`。
-
-## 输入与输出
-
-| 方向 | 说明 |
-|---|---|
-| 输入 | 键盘事件、`TurnEvent` 流、`PermissionResolution`、`MCPInitializationProgress` |
-| 输出 | 用户文本、斜杠命令、权限决议、模式切换请求 |
-
-## 与其他模块的关系
-
-- → `turn_runner.py`：`run_user_turn()` / `resolve_permission_request()` / `cancel_active_turn()` / `set_mode()`
-- → `session.py`：读写状态、会话管理（/session）
-- → `settings_service.py`：设置数据
-- → `mcp/manager.py`：初始化与进度回调
-- → `slash_commands.py`：命令注册与补全
-
-## 注意事项
-
-- `ChatTUI` 是薄门面：构造 `LanCherTextualApp`，`run()` 调 `app.run_async()`；`configure_settings` / `configure_mcp` 是 app.py 装配时注入的后门方法。
-- `Ctrl+C` 在回复中只取消当前回合，不退出；空闲时才退出（`action_request_quit`）。
-- 输入框在 MCP 初始化完成前禁用，占位提示 "正在初始化 MCP，请稍候…"。
-- TUI 测试（`tests/test_tui_*.py`）通过 Textual 的异步测试机制直接驱动 `LanCherTextualApp`。
+`tests/test_tui_*.py` 通过模拟 Provider 和 Textual Pilot 验证交互，`tests/test_task_interaction.py` 验证任务边界。测试覆盖深浅主题、100×40／60×24／32×16、流式阅读、队列操作和审批期间取消。

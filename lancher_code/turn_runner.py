@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import os
 from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
@@ -23,6 +24,8 @@ from lancher_code.models import (
     ChatRequest,
     ContextCompactionResult,
     MessageUsage,
+    PendingInput,
+    PermissionPolicy,
     PermissionRequest,
     PermissionResolution,
     ProviderConfig,
@@ -30,6 +33,7 @@ from lancher_code.models import (
     ToolCall,
     ToolExecutionResult,
     TurnEvent,
+    WorkPhase,
 )
 from lancher_code.providers.base import ChatProvider
 from lancher_code.providers.factory import create_provider
@@ -50,6 +54,8 @@ class _ActiveTurn:
     task: asyncio.Task[None]
     queue: asyncio.Queue[TurnEvent | object]
     cancellation_token: CancellationToken
+    task_id: str = field(default_factory=lambda: uuid4().hex)
+    accepting_input: bool = True
     pending_permissions: dict[str, asyncio.Future[PermissionResolution]] = field(default_factory=dict)
 
 
@@ -187,13 +193,165 @@ class TurnRunner:
         return permission_count
 
     def set_mode(self, mode: RuntimeMode) -> TurnEvent:
-        self._session.set_runtime_mode(mode)
-        label = _mode_status_label(mode)
-        return TurnEvent(kind="mode_changed", mode=mode, progress_message=label)
+        """旧命令入口：阶段和权限不再相互覆盖。"""
+        if mode == "plan":
+            return self.set_phase("plan")
+        return self.set_permission_policy(mode)
+
+    def set_phase(self, phase: WorkPhase) -> TurnEvent:
+        self._ensure_model_idle()
+        self._session.set_work_phase(phase)
+        label = {"discuss": "讨论", "plan": "计划", "execute": "执行"}[phase]
+        return TurnEvent(kind="phase_changed", work_phase=phase, progress_message=f"已切换到{label}阶段，权限策略不变")
+
+    def set_permission_policy(self, policy: PermissionPolicy) -> TurnEvent:
+        self._ensure_model_idle()
+        self._session.set_permission_policy(policy)
+        return TurnEvent(kind="policy_changed", permission_policy=policy, progress_message="权限策略已更新，工作阶段不变")
 
     def restore_mode_after_plan(self) -> TurnEvent:
-        mode = self._session.restore_mode_after_plan()
-        return TurnEvent(kind="mode_changed", mode=mode, progress_message=_mode_status_label(mode))
+        return self.set_phase("execute")
+
+    @property
+    def pending_inputs(self) -> list[PendingInput]:
+        return deepcopy(self._session.pending_inputs)
+
+    @property
+    def queue_paused(self) -> bool:
+        return any(item.state == "paused" for item in self.pending_inputs)
+
+    def _pending_changed(self, items: list[PendingInput], item_id: str | None = None) -> None:
+        self._session.update_pending_inputs(items)
+        if self._active_turn is not None:
+            self._active_turn.queue.put_nowait(TurnEvent(kind="pending_input_changed", pending_input_id=item_id))
+
+    def enqueue_input(self, text: str, delivery: str = "follow_up") -> PendingInput:
+        text = text.strip()
+        if not text or text.startswith("/"):
+            raise ConfigError("待处理消息不能为空；斜杠命令请在当前任务结束后执行。")
+        if delivery not in {"follow_up", "steer"}:
+            raise ConfigError("未知的消息发送方式。")
+        active = self._active_turn
+        can_steer = active is not None and active.accepting_input and not active.cancellation_token.is_cancelled
+        item = PendingInput(
+            id=uuid4().hex, text=text, delivery=delivery,
+            target_task_id=active.task_id if delivery == "steer" and can_steer else None,
+            state=("pending" if can_steer else "paused") if delivery == "steer"
+                else ("paused" if self.queue_paused else "pending"),
+        )
+        self._pending_changed([*self.pending_inputs, item], item.id)
+        if delivery == "steer" and can_steer:
+            self._supersede_permissions()
+        return deepcopy(item)
+
+    def update_pending_input(self, item_id: str, text: str) -> PendingInput:
+        if not text.strip() or text.lstrip().startswith("/"):
+            raise ConfigError("待处理消息不能为空，也不能是斜杠命令。")
+        items = self.pending_inputs
+        item = next((entry for entry in items if entry.id == item_id), None)
+        if item is None:
+            raise ConfigError("这条消息已经生效或被移除，请刷新待处理列表。")
+        item.text = text.strip()
+        self._pending_changed(items, item_id)
+        return deepcopy(item)
+
+    def remove_pending_input(self, item_id: str) -> None:
+        items = self.pending_inputs
+        if not any(item.id == item_id for item in items):
+            raise ConfigError("这条消息已经生效或被移除。")
+        self._pending_changed([item for item in items if item.id != item_id], item_id)
+
+    def convert_pending_input(self, item_id: str, delivery: str) -> PendingInput:
+        if delivery not in {"follow_up", "steer"}:
+            raise ConfigError("未知的消息发送方式。")
+        items = self.pending_inputs
+        item = next((entry for entry in items if entry.id == item_id), None)
+        if item is None:
+            raise ConfigError("这条消息已经生效或被移除。")
+        active = self._active_turn
+        can_steer = active is not None and active.accepting_input and not active.cancellation_token.is_cancelled
+        item.delivery = delivery
+        item.target_task_id = active.task_id if delivery == "steer" and can_steer else None
+        if delivery == "steer":
+            item.state = "pending" if can_steer else "paused"
+        self._pending_changed(items, item_id)
+        if delivery == "steer" and can_steer and item.state == "pending":
+            self._supersede_permissions()
+        return deepcopy(item)
+
+    def pause_queue(self) -> None:
+        items = self.pending_inputs
+        if not items or all(item.state == "paused" for item in items):
+            return
+        for item in items:
+            item.state = "paused"
+        self._pending_changed(items)
+
+    def resume_queue(self) -> None:
+        items = self.pending_inputs
+        if not items:
+            return
+        for item in items:
+            item.state = "pending"
+            if self._active_turn is None or item.target_task_id != self._active_turn.task_id:
+                item.delivery = "follow_up"
+                item.target_task_id = None
+        self._pending_changed(items)
+        if self._has_steering():
+            self._supersede_permissions()
+
+    def _has_steering(self) -> bool:
+        active = self._active_turn
+        return bool(active and any(item.delivery == "steer" and item.state == "pending"
+            and item.target_task_id == active.task_id for item in self._session.pending_inputs))
+
+    def _supersede_permissions(self) -> None:
+        if self._active_turn is not None:
+            for request_id, future in self._active_turn.pending_permissions.items():
+                if not future.done():
+                    future.set_result(PermissionResolution(request_id=request_id, outcome="superseded"))
+
+    async def _apply_steering(self, message_id: str, usage: MessageUsage, queue: asyncio.Queue) -> str | None:
+        if not self._has_steering():
+            return None
+        active = self._active_turn
+        assert active is not None
+        items = self.pending_inputs
+        selected = [item for item in items if item.delivery == "steer" and item.state == "pending"
+                    and item.target_task_id == active.task_id]
+        selected_ids = {item.id for item in selected}
+        self._pending_changed([item for item in items if item.id not in selected_ids])
+        message = self._session.complete_message(message_id, usage)
+        await self._emit(queue, TurnEvent(kind="assistant_message_completed", message=message, usage=usage))
+        for item in selected:
+            user = self._session.create_user_message(item.text)
+            await self._emit(queue, TurnEvent(kind="user_message_created", message=user))
+            await self._emit(queue, TurnEvent(kind="steering_applied", pending_input_id=item.id, text=item.text))
+        assistant = self._session.create_assistant_message()
+        await self._emit(queue, TurnEvent(kind="assistant_message_started", message=assistant))
+        return assistant.id
+
+    async def run_next_queued_turn(self) -> AsyncIterator[TurnEvent]:
+        self._ensure_model_idle()
+        items = self.pending_inputs
+        if self.queue_paused or not items or items[0].state != "pending" or items[0].delivery != "follow_up":
+            return
+        item = items.pop(0)
+        self._pending_changed(items, item.id)
+        async with aclosing(self.run_user_turn(item.text)) as events:
+            async for event in events:
+                yield event
+
+    def prepare_plan_execution(self, session_id: str, digest: str) -> str:
+        self._ensure_model_idle()
+        snapshot = self._session.plan_snapshot
+        if session_id != self._session.session_id or snapshot is None or not snapshot.ready or snapshot.digest != digest:
+            raise ConfigError("计划已改变或尚未完成，请查看当前会话的最新计划后再开始。")
+        content = snapshot.content
+        snapshot.ready = False
+        self._session.set_plan_snapshot(snapshot)
+        self._session.set_work_phase("execute")
+        return f"按我确认的以下计划开始执行。\n计划版本：{digest}\n\n{content}"
 
     def resolve_permission_request(self, resolution: PermissionResolution) -> bool:
         active_turn = self._active_turn
@@ -208,8 +366,11 @@ class TurnRunner:
     def cancel_active_turn(self) -> bool:
         if self._active_turn is None:
             return False
+        self._active_turn.accepting_input = False
+        self.pause_queue()
         self._active_turn.cancellation_token.cancel()
-        self._active_turn.task.cancel()
+        if not self._active_turn.task.cancelling():
+            self._active_turn.task.cancel()
         for future in self._active_turn.pending_permissions.values():
             if not future.done():
                 future.cancel()
@@ -220,6 +381,15 @@ class TurnRunner:
     def has_active_turn(self) -> bool:
         return self._active_turn is not None
 
+    async def stop_and_wait(self) -> None:
+        """界面关闭前等待当前任务收尾，不能把资源回收留给事件循环析构。"""
+        active = self._active_turn
+        if active is not None:
+            self.cancel_active_turn()
+            await asyncio.gather(active.task, return_exceptions=True)
+            if self._active_turn is active:
+                self._active_turn = None
+
     async def compact_context(self) -> ContextCompactionResult:
         if self.has_active_turn or self._manual_compaction:
             raise ContextCompactionError("模型正在响应，暂时不能压缩上下文。")
@@ -228,12 +398,14 @@ class TurnRunner:
             visible_tools = self._tool_registry.list_definitions(
                 discovered_names=set(),
                 mode=self._session.runtime_mode,
+                work_phase=self._session.work_phase,
             )
             return await self._session.compact_context(
                 provider=self._provider,
                 visible_tools=visible_tools,
                 deferred_tool_groups=self._tool_registry.list_deferred_index(
-                    mode=self._session.runtime_mode
+                    mode=self._session.runtime_mode,
+                    work_phase=self._session.work_phase,
                 ),
                 persist=True,
             )
@@ -259,9 +431,21 @@ class TurnRunner:
                 assert isinstance(item, TurnEvent)
                 yield item
         finally:
-            if self._active_turn is active_turn:
-                self._active_turn = None
-            await asyncio.gather(active_turn.task, return_exceptions=True)
+            if not active_turn.task.done():
+                # 消费者退出也必须收拢后台任务，不能遗留仍在等待批准的执行器。
+                active_turn.cancellation_token.cancel()
+                # 重复停止不能打断工具正在进行的子进程及管道清理。
+                if not active_turn.task.cancelling():
+                    active_turn.task.cancel()
+                for future in active_turn.pending_permissions.values():
+                    if not future.done():
+                        future.cancel()
+                self.pause_queue()
+            try:
+                await asyncio.gather(active_turn.task, return_exceptions=True)
+            finally:
+                if self._active_turn is active_turn:
+                    self._active_turn = None
 
     async def _run_turn(
         self,
@@ -275,6 +459,10 @@ class TurnRunner:
         unknown_tool_streak = 0
         discovered_tool_names: set[str] = set()
         pending_tool_calls: list[ToolCall] = []
+        phase = self._session.work_phase
+        policy = self._session.permission_policy
+        completed = False
+        written_plan_digest: str | None = None
 
         try:
             user_message = self._session.create_user_message(text)
@@ -304,15 +492,19 @@ class TurnRunner:
                 visible_tools = self._tool_registry.list_definitions(
                     discovered_names=discovered_tool_names,
                     mode=self._session.runtime_mode,
+                    work_phase=phase,
                 )
                 await self._session.offload_large_tool_results()
                 deferred_tool_groups = self._tool_registry.list_deferred_index(
-                    mode=self._session.runtime_mode
+                    mode=self._session.runtime_mode,
+                    work_phase=phase,
                 )
                 request = self._session.build_request(
                     visible_tools,
                     allow_tool_calls=True,
                     mode=self._session.runtime_mode,
+                    work_phase=phase,
+                    permission_policy=policy,
                     deferred_tool_groups=deferred_tool_groups,
                 )
                 request.cancellation_token = cancellation_token
@@ -381,6 +573,8 @@ class TurnRunner:
                             visible_tools,
                             allow_tool_calls=True,
                             mode=self._session.runtime_mode,
+                            work_phase=phase,
+                            permission_policy=policy,
                             deferred_tool_groups=deferred_tool_groups,
                         )
                         request.cancellation_token = cancellation_token
@@ -454,6 +648,8 @@ class TurnRunner:
                             visible_tools,
                             allow_tool_calls=True,
                             mode=self._session.runtime_mode,
+                            work_phase=phase,
+                            permission_policy=policy,
                             deferred_tool_groups=deferred_tool_groups,
                         )
                         request.cancellation_token = cancellation_token
@@ -521,11 +717,15 @@ class TurnRunner:
                     results = precomputed_results or await self._tool_executor.execute_calls(
                         tool_calls,
                         mode=self._session.runtime_mode,
+                        work_phase=phase,
+                        permission_policy=policy,
                         plan_file_path=self._session.plan_file_path,
                         cancellation_token=cancellation_token,
                         permission_resolver=self._request_permission,
                         available_tool_names={tool.name for tool in visible_tools},
+                        should_interrupt=self._has_steering,
                     )
+                    calls_by_id = {call.call_id: call for call in tool_calls}
                     for result in results:
                         discovered = result.metadata.get("discovered_tool_names")
                         if isinstance(discovered, list):
@@ -533,6 +733,11 @@ class TurnRunner:
                                 name for name in discovered if isinstance(name, str)
                             )
                         self._session.record_read_file_result(result)
+                        if phase == "plan" and result.ok and result.tool_name == "write_plan_file":
+                            plan_content = calls_by_id[result.call_id].arguments.get("content")
+                            if isinstance(plan_content, str):
+                                snapshot = self._session.set_plan_snapshot(plan_content, source_message_id=assistant_message.id)
+                                written_plan_digest = snapshot.digest if snapshot else None
                     self._session.append_tool_results(results)
                     recorded_ids = {result.call_id for result in results}
                     pending_tool_calls = [call for call in pending_tool_calls if call.call_id not in recorded_ids]
@@ -548,6 +753,14 @@ class TurnRunner:
                             ),
                         )
 
+                    next_message_id = await self._apply_steering(assistant_message.id, total_usage, queue)
+                    if next_message_id is not None:
+                        assistant_message = self._session.get_message(next_message_id)
+                        total_usage = MessageUsage()
+                        unknown_tool_streak = 0
+                        written_plan_digest = None
+                        continue
+
                     unknown_tool_streak = self._next_unknown_tool_streak(unknown_tool_streak, results)
                     if unknown_tool_streak >= self._unknown_tool_streak_limit:
                         error_text = (
@@ -561,11 +774,27 @@ class TurnRunner:
                     continue
 
                 unknown_tool_streak = 0
+                next_message_id = await self._apply_steering(assistant_message.id, total_usage, queue)
+                if next_message_id is not None:
+                    assistant_message = self._session.get_message(next_message_id)
+                    total_usage = MessageUsage()
+                    written_plan_digest = None
+                    continue
+                # 最终检查与关闭接收在同一事件循环片段完成；晚到的补充保留为暂停消息。
+                if self._active_turn is not None:
+                    self._active_turn.accepting_input = False
                 message = self._session.complete_message(assistant_message.id, total_usage)
+                snapshot = self._session.plan_snapshot
+                if phase == "plan" and snapshot is not None and snapshot.digest == written_plan_digest:
+                    snapshot.ready = True
+                    self._session.set_plan_snapshot(snapshot)
+                completed = True
                 await self._emit(
                     queue,
                     TurnEvent(kind="assistant_message_completed", message=message, usage=total_usage),
                 )
+                await self._emit(queue, TurnEvent(kind="turn_completed", message=message,
+                    task_id=self._active_turn.task_id if self._active_turn else None))
                 return
         except asyncio.CancelledError:
             cancellation_token.cancel()
@@ -599,7 +828,10 @@ class TurnRunner:
                 await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
         finally:
             if self._active_turn is not None:
+                self._active_turn.accepting_input = False
                 self._active_turn.pending_permissions.clear()
+            if not completed:
+                self.pause_queue()
             auto_save_error = self._session.auto_save()
             if auto_save_error:
                 logger.error("event=session_auto_save_failed error=%s", auto_save_error)
@@ -670,19 +902,23 @@ class TurnRunner:
         active_turn = self._active_turn
         if active_turn is None:
             return PermissionResolution(request_id=permission_request.request_id, outcome="deny")
+        if self._has_steering():
+            return PermissionResolution(request_id=permission_request.request_id, outcome="superseded")
 
         future: asyncio.Future[PermissionResolution] = asyncio.get_running_loop().create_future()
         active_turn.pending_permissions[permission_request.request_id] = future
         await self._emit(active_turn.queue, TurnEvent(kind="permission_request_created", permission_request=permission_request))
         try:
             resolution = await future
-            await self._emit(
-                active_turn.queue,
-                TurnEvent(kind="permission_request_resolved", permission_resolution=resolution),
-            )
+            if resolution.outcome != "superseded":
+                await self._emit(
+                    active_turn.queue,
+                    TurnEvent(kind="permission_request_resolved", permission_resolution=resolution),
+                )
             return resolution
         finally:
             active_turn.pending_permissions.pop(permission_request.request_id, None)
+            await self._emit(active_turn.queue, TurnEvent(kind="permission_request_closed", permission_request=permission_request))
 
     @staticmethod
     async def _emit(queue: asyncio.Queue[TurnEvent | object], event: TurnEvent) -> None:

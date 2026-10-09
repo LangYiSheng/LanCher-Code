@@ -1,124 +1,98 @@
 # 模块：权限引擎（Permission Engine）
 
-## 作用
+权限引擎决定工具调用是允许、拒绝还是需要确认。它将工作阶段硬限制、路径边界、危险命令黑名单、分层规则和权限策略组合成一条判定链。
 
-权限引擎是 LanCher Code 的安全核心。它决定**每个工具调用是否可以执行**，并把"危险命令黑名单、路径沙箱、三层规则、四档模式、人在回路确认"整合成一条判定链。
+实现位置：`lancher_code/permission_engine.py`；阶段能力公共判定在 `models.py` 的 `tool_available_in_phase()`，由工具注册表、执行器及权限引擎共同使用。
 
-实现位置：`lancher_code/permission_engine.py`。
+## 公共类型
 
-## 在系统中的位置
+| 类型 | 值 / 用途 |
+|---|---|
+| `WorkPhase` | `discuss`、`plan`、`execute` |
+| `PermissionPolicy` | `default`、`acceptEdits`、`bypass` |
+| `PermissionMatchKind` | `exact`、`glob`、`legacy` |
+| `PermissionCheck` | `decision: allow / deny / ask`、原因和可选确认请求 |
 
-```text
-ToolExecutor.execute_calls()
-  对每个工具调用
-    → PermissionEngine.evaluate(call, tool, context)
-        → 返回 PermissionCheck（allow / deny / ask）
-    → deny → 返回结构化错误给模型
-    → ask → 生成 PermissionRequest → TUI 弹窗 → PermissionResolution → apply_resolution()
-```
+`ToolContext` 携带 `work_phase`、`permission_policy`、`cwd`、`project_root`、`plan_file_path`。旧 `mode` / `RuntimeMode` 只用于调用边界兼容；新逻辑使用独立两轴。
+
+新会话默认 `execute + default`。v1–v3 会话的 `default` / `acceptEdits` / `bypass` 映射为执行阶段和对应策略；旧 `plan` 映射为计划阶段，并保留有效的旧 `plan_restore_mode` 策略，否则采用 `default`。
 
 ## 核心类
 
-### `PermissionStorage`
+`PermissionStorage` 管理三个作用域：
 
-规则存储，维护三个作用域：
-
-| 作用域 | 存储位置 | 生命周期 |
+| 作用域 | 位置 | 生命周期 |
 |---|---|---|
-| `session` | 内存（`SessionController` 订阅变更回调） | 会话内；随命名会话保存/恢复 |
-| `project` | `./.lancher/permissions.yaml` | 落盘 |
-| `user` | `~/.lancher/permissions.yaml` | 落盘 |
+| `session` | 内存，由 `SessionController` 订阅变更 | 随命名会话保存和恢复 |
+| `project` | `./.lancher/permissions.yaml` | 项目内持久化 |
+| `user` | `~/.lancher/permissions.yaml` | 用户级持久化 |
 
-主要方法：`rules_for_scope()`、`replace_rules()`、`add_session_rule()`、`replace_session_rules()`、`add_project_rule()`、`subscribe_session_rules_changed()`。
+主要方法为 `rules_for_scope()`、`replace_rules()`、`add_session_rule()`、`replace_session_rules()`、`add_project_rule()` 和 `subscribe_session_rules_changed()`。读写规则均保留 `match_kind`。
 
-### `PermissionEngine`
+`PermissionEngine.evaluate(call, tool, context)` 返回判定。`apply_resolution(request, resolution)` 只负责落实 `allow_session` / `allow_project` 的规则；执行器必须先检查取消、任务补充和审批撤销，不能先保存规则再决定是否执行。
 
-| 方法 | 作用 |
-|---|---|
-| `evaluate(call, tool, context)` | 五层判定，返回 `PermissionCheck` |
-| `apply_resolution(request, resolution)` | 把用户决议写入规则（allow_session / allow_project） |
+## 判定顺序
 
-## 判定链（五层）
+1. **工作阶段硬限制。** 讨论和计划允许原生只读调查工具、已配置且显式声明 `readOnlyHint=true` 的 MCP；计划额外允许专用 `write_plan_file`。两阶段均禁止通用 Shell 和普通文件写入。未声明只读的 MCP 也禁止。违规返回 `phase_disallowed`，任何允许规则及 `bypass` 均不能放行。
+2. **匹配目标与路径边界。** 路径解析后必须位于项目根内，否则返回 `path_outside_project`。Shell 同时保留旧匹配所需的规范化文本和新精确规则所需的原始完整命令。
+3. **危险命令黑名单。** Shell 命中 `COMMAND_BLACKLIST_PATTERNS` 时返回 `permission_blacklist_denied`，规则和 `bypass` 无法覆盖。
+4. **分层规则。** 按 session → project → user 顺序，采用第一个存在命中规则的作用域；同一作用域最后一条命中规则生效，结果为 allow 或 deny。
+5. **权限策略。** `bypass` 允许；读工具允许；非只读外部工具需要确认；`acceptEdits` 允许原生写工具；其他调用需要确认。
+6. **人在回路。** 生成 `PermissionRequest`，由聊天内联权限面板收集决议。
 
-```text
-① 构造匹配目标（_build_match_target）
-   · bash → 规范化命令文本（小写、折叠空白）
-   · 文件工具 → 项目相对路径（正斜杠、小写）
-   · glob → 模式本身；grep → 搜索路径
-   · MCP 外部工具 → 可见名 mcp__<server>__<tool>（精确匹配）
-   路径非法（越界）→ 直接 deny（path_outside_project）
+MCP 只读能力依赖服务端 `readOnlyHint` 声明，并不等同于本地执行沙箱验证。`write_plan_file` 在 `default` 下需要确认，在 `acceptEdits` / `bypass` 下可直接写入；它只能写预设计划路径，且拒绝空白正文。
 
-② bash 危险命令黑名单（COMMAND_BLACKLIST_PATTERNS）
-   remove-item/del/rm、shutdown、format/diskpart/cipher、runas/sudo、
-   git reset --hard / clean -fdx / checkout --、重定向符号 >> > 等
-   → 命中即 deny（permission_blacklist_denied），bypass 模式也生效
+`validate_plan_command()` 仅保留兼容入口，始终拒绝通用 Shell。不存在计划阶段的 Shell 前缀白名单放行路径。
 
-③ Plan Mode 命令校验（validate_plan_command）
-   仅允许白名单前缀（ls/dir/pwd/cat/rg/git status/git diff/版本查询等）
-   禁止重定向、管道、&&、set-content、npm/pip/uv 等
-   → 违规即 deny（plan_mode_command_rejected）
-
-④ 规则引擎（_match_rules）
-   按 session > project > user 顺序，同一作用域内**最后一条**命中规则生效
-   格式 ToolLabel(value)，支持 glob（* ? [）
-   → allow / deny（permission_rule_allow / permission_rule_deny）
-
-⑤ 权限模式（_mode_decision）
-   bypass          → allow（黑名单与规则仍优先）
-   读工具(read)    → allow
-   plan 模式外部工具 → deny
-   acceptEdits + 写工具（非 bash）→ allow
-   其余            → ask（进入人在回路）
-
-⑥ 人在回路
-   生成 PermissionRequest → TUI InlinePermissionPanel
-   用户选择 allow_once / allow_session / allow_project / deny
-```
-
-## 匹配规则格式
+## 规则格式与精确授权
 
 ```yaml
 rules:
-  - match: "Bash(git *)"       # 命令 glob
+  - match: 'Bash(git status --short)'
+    match_kind: exact
     result: allow
-  - match: "WriteFile(.env)"   # 项目相对路径
+  - match: 'WriteFile(src/[draft].py)'
+    match_kind: exact
+    result: allow
+  - match: 'WriteFile(.env)'
+    match_kind: exact
     result: deny
-  - match: "mcp__github__*"    # MCP 工具名 glob
+  - match: 'mcp__github__get_issue'
+    match_kind: exact
+    result: allow
+  - match: 'ReadFile(docs/*)'
+    match_kind: glob
     result: allow
 ```
 
-规则标签 → 工具名映射（`TOOL_LABELS`）：`Bash`、`ReadFile`、`WriteFile`、`EditFile`、`Glob`、`Grep`、`WritePlanFile`。MCP 工具使用 `mcp__<server>__<tool>` 可见名（见 `tests/mcp/test_permission.py`）。
+新权限确认默认 `exact`：Shell 授权完整命令，保留命令内部空白及大小写；文件授权精确路径，仍使用现有的正斜杠、小写路径规范化。`*`、`?`、`[` 在精确规则中按普通字符匹配。MCP 精确规则匹配整个可见工具名，仍允许该工具的不同参数组合。
+
+`glob` 只用于明确配置的通配匹配。缺失 `match_kind` 的旧规则按 `legacy` 读取，保留原行为；修改或保存旧规则时不能意外丢失已有的 `exact` 字段。不会从 `git status` 自动生成 `Bash(git *)` 一类宽授权。
+
+标签映射为 `Bash`、`ReadFile`、`WriteFile`、`EditFile`、`Glob`、`Grep`、`WritePlanFile`。MCP 使用 `mcp__<server>__<tool>` 可见名。
 
 ## 权限请求与决议
 
-`PermissionRequest` 字段（`models.py`）包含请求标题、详情、命令/文件预览、建议规则等。`PermissionResolution.outcome` 取值：
+`PermissionRequest` 包含工具、标题、命令或差异预览、建议规则、`match_kind`、`work_phase` 和 `permission_policy`。用户有四种选择：
 
 | outcome | 效果 |
 |---|---|
 | `allow_once` | 仅本次放行 |
-| `allow_session` | 写入 session 规则（内存） |
-| `allow_project` | 写入 project 规则（落盘 `./.lancher/permissions.yaml`） |
-| `deny` | 拒绝，工具返回 `permission_user_denied` 错误 |
+| `allow_session` | 保存本会话的精确允许规则 |
+| `allow_project` | 保存项目级精确允许规则 |
+| `deny` | 返回 `permission_user_denied` |
 
-建议规则（`_suggest_rule`）：命令含空格时生成 `Bash(首个单词 *)` 形式的 glob 规则。
+内部另有 `superseded`：用户补充当前任务时撤销等待中的审批，工具返回 `steering_superseded`，不保存允许规则。即使补充随后被删除或改成排队，已撤销的审批也不能再执行。它不是 UI 按钮，不应显示为用户拒绝。
 
-## 输入与输出
-
-| 方向 | 说明 |
-|---|---|
-| 输入 | `ToolCall`、`ToolDefinition`、`ToolContext`（mode / cwd / project_root / plan_file_path） |
-| 输出 | `PermissionCheck`（decision + reason_code + 可选 PermissionRequest） |
+`ToolExecutor.execute_calls(..., should_interrupt=...)` 在每组开始前与审批返回后检查任务补充。已启动的并行组等待结果；后续未启动调用全部记录为跳过。`TurnRunner` 最终发出 `permission_request_closed`，迟到的面板决议不生效。
 
 ## 与其他模块的关系
 
-- ← `tools/core/executor.py`：每个工具调用前调用 `evaluate()`
-- ← `app.py`：构造 `PermissionStorage`（项目/用户规则路径）
-- ← `tui_views/chat.py`、`permission.py`：弹窗与决议回调
-- → `tools/core/common.py`：路径沙箱（`resolve_path_in_root` / `ensure_path_in_root`）
-- ↔ `SessionController`：会话规则变更订阅（用于自动保存）
+- `tools/core/registry.py`：按阶段过滤普通工具与延迟发现索引。
+- `tools/core/executor.py`：每个调用前判定，处理确认、补充撤销和结果配对。
+- `app.py`：构造项目和用户权限存储。
+- `tui_views/chat.py`、`permission.py`：内联权限面板与决议回调。
+- `tools/core/common.py`：路径解析与项目根边界。
+- `SessionController`：保存会话规则、阶段、策略和暂停队列；恢复中断任务时补未知工具结果，不自动重执行。
 
-## 注意事项
-
-- 同一作用域内多条规则命中时取**最后一条**（列表顺序即优先级）。
-- `bypass` 模式不能绕过：黑名单、Plan 校验、显式 `deny` 规则。
-- 路径沙箱基于 `path.resolve()`（解析符号链接）后判断是否位于项目根内，防目录穿越与符号链接逃逸（见 `tests/tools/test_path_sandbox.py`）。
+相关测试：`tests/test_permission_engine.py`、`tests/test_work_phase_core.py`、`tests/test_task_interaction.py`、`tests/test_task_safety_regressions.py`、`tests/mcp/test_permission.py`。

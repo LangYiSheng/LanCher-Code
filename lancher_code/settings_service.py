@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -11,7 +12,7 @@ import yaml
 from lancher_code.config_system.loader import load_config_data
 from lancher_code.config_system.writer import backup_legacy_config, serialize_config
 from lancher_code.errors import ConfigError
-from lancher_code.models import AppConfig, PermissionRule
+from lancher_code.models import AppConfig, PermissionRule, UIConfig
 from lancher_code.permission_engine import PermissionStorage
 
 
@@ -45,6 +46,8 @@ class SettingsService:
         self.global_mcp_path = global_mcp_path
         self.project_mcp_path = project_mcp_path
         self.permission_storage = permission_storage
+        # 服务与本次应用运行同寿命；关闭设置页不会清除待重启状态。
+        self.mcp_restart_required = False
 
     def load(self) -> SettingsSnapshot:
         try:
@@ -93,6 +96,68 @@ class SettingsService:
         self.permission_storage.replace_rules("project", snapshot.project_rules, persist=False)
         self.permission_storage.replace_rules("user", snapshot.user_rules, persist=False)
 
+    def save_models(self, config: AppConfig) -> AppConfig:
+        """只提交模型目录；使用磁盘上的其他设置，避免覆盖无关编辑。"""
+        current = self._read_config()
+        current.providers = deepcopy(config.providers)
+        current.default_model = config.default_model
+        return self._save_config(current)
+
+    def save_ui(self, ui: UIConfig) -> AppConfig:
+        current = self._read_config()
+        current.ui = deepcopy(ui)
+        return self._save_config(current)
+
+    def _read_config(self) -> AppConfig:
+        try:
+            return load_config_data(self._read_yaml(self.config_path, required=True))
+        except ConfigError as exc:
+            raise SettingsError(exc.user_message) from exc
+
+    def _save_config(self, config: AppConfig) -> AppConfig:
+        # 保留未由当前版本管理的顶层键；模型旧格式只在有效提交时迁移。
+        raw = deepcopy(self._read_yaml(self.config_path, required=True))
+        raw.pop("provider", None)
+        data = serialize_config(config)
+        for key in ("ui", "runtime"):
+            data[key] = {**(raw.get(key) or {}), **data[key]}
+        raw.update(data)
+        try:
+            validated = load_config_data(raw)
+            backup_legacy_config(self.config_path)
+            self._atomic_write_many({self.config_path: raw})
+        except (ConfigError, OSError) as exc:
+            raise SettingsError(f"无法保存设置：{exc}") from exc
+        return validated
+
+    def save_mcp(self, scope: Literal["global", "project"], servers: dict[str, dict[str, Any]]) -> None:
+        if scope not in {"global", "project"}:
+            raise SettingsError("未知 MCP 作用范围。")
+        self._validate_mcp(servers, "全局 MCP" if scope == "global" else "项目 MCP")
+        path = self.global_mcp_path if scope == "global" else self.project_mcp_path
+        raw = self._read_yaml(path)
+        if not isinstance(raw, dict):
+            raise SettingsError("MCP 配置必须是对象。")
+        changed = raw.get("mcp_servers", {}) != servers
+        self._write_domain(path, {**raw, "mcp_servers": deepcopy(servers)})
+        self.mcp_restart_required |= changed
+
+    def save_rules(self, scope: Literal["project", "user"], rules: list[PermissionRule]) -> None:
+        if scope not in {"project", "user"}:
+            raise SettingsError("未知权限作用范围。")
+        self._validate_rules(rules)
+        path = self.permission_storage.project_rules_path if scope == "project" else self.permission_storage.user_rules_path
+        if path is None:
+            raise SettingsError("权限规则文件路径未配置。")
+        self._write_domain(path, self._rules_data(rules))
+        self.permission_storage.replace_rules(scope, deepcopy(rules), persist=False)
+
+    def _write_domain(self, path: Path, payload: dict[str, Any]) -> None:
+        try:
+            self._atomic_write_many({path: payload})
+        except OSError as exc:
+            raise SettingsError(f"无法保存设置：{exc}") from exc
+
     @staticmethod
     def _read_yaml(path: Path, *, required: bool = False) -> Any:
         if not path.exists():
@@ -123,16 +188,21 @@ class SettingsService:
             required = "command" if kind == "stdio" else "url"
             if server.get("enabled", True) and not str(server.get(required, "")).strip():
                 raise SettingsError(f"Server {name}.{required} 不能为空。", field_id="mcp-target")
+            if kind == "stdio" and (not isinstance(server.get("args", []), list) or not all(isinstance(arg, str) for arg in server.get("args", []))):
+                raise SettingsError("Args 必须是字符串数组。", field_id="mcp-args")
+            mapping = server.get("env" if kind == "stdio" else "headers", {})
+            if not isinstance(mapping, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()):
+                raise SettingsError("环境变量或请求头必须是字符串对象。", field_id="mcp-map")
 
     @staticmethod
     def _validate_rules(rules: list[PermissionRule]) -> None:
         for rule in rules:
-            if not rule.match.strip() or rule.result not in {"allow", "deny"}:
+            if not rule.match.strip() or rule.result not in {"allow", "deny"} or rule.match_kind not in {"exact", "glob", "legacy"}:
                 raise SettingsError("权限规则必须包含 match，result 只能是 allow 或 deny。", field_id="rule-match")
 
     @staticmethod
     def _rules_data(rules: list[PermissionRule]) -> dict[str, Any]:
-        return {"rules": [{"match": rule.match, "result": rule.result} for rule in rules]}
+        return {"rules": [{"match": rule.match, "result": rule.result, "match_kind": rule.match_kind} for rule in rules]}
 
     @staticmethod
     def _atomic_write_many(payloads: dict[Path, Any]) -> None:

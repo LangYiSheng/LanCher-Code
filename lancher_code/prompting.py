@@ -9,10 +9,15 @@ from lancher_code.models import (
     ConversationMessage,
     DeferredToolGroup,
     PlanModeEntryKind,
+    PlanSnapshot,
+    WorkPhase,
+    PermissionPolicy,
     PromptContext,
     PromptPayload,
     RuntimeMode,
     ToolDefinition,
+    legacy_runtime_mode,
+    resolve_runtime_axes,
 )
 
 
@@ -66,7 +71,10 @@ def build_environment_prompt(context: PromptContext) -> str:
         "# 当前环境上下文\n"
         f"- 当前系统：{context.os_label}\n"
         f"- 当前工作目录：{context.cwd}\n"
-        f"- 当前日期：{context.current_date.isoformat()}"
+        f"- 当前日期：{context.current_date.isoformat()}\n"
+        f"- 工作阶段：{context.work_phase}\n"
+        f"- 权限策略：{context.permission_policy}\n"
+        + _phase_instruction(context.work_phase)
     )
 
 
@@ -112,9 +120,14 @@ def build_dynamic_context_prompt(context: PromptContext) -> str | None:
 
 
 def build_plan_mode_prompt(context: PromptContext) -> str | None:
-    if context.runtime_mode == "plan":
+    if context.work_phase == "discuss":
+        return "当前为讨论阶段：可以使用只读工具调查并解释，不运行通用 Shell、不修改文件，也不保存计划文件。"
+    if context.work_phase == "plan":
         if context.pending_plan_entry_kind == "reentry" and context.plan_exists:
-            return build_plan_mode_reentry_prompt(context.plan_file_path)
+            snapshot = context.plan_snapshot
+            return build_plan_mode_reentry_prompt(context.plan_file_path) + (
+                f"\n本会话计划快照（{snapshot.digest}）：\n{snapshot.content}" if snapshot is not None else ""
+            )
         if context.pending_plan_entry_kind == "initial":
             return build_plan_mode_initial_prompt(context.plan_file_path)
         if _is_plan_mode_refresh_turn(context.plan_mode_turn_count):
@@ -125,6 +138,14 @@ def build_plan_mode_prompt(context: PromptContext) -> str | None:
         return build_plan_mode_exit_prompt(context.plan_file_path if context.plan_exists else None)
 
     return None
+
+
+def _phase_instruction(phase: WorkPhase) -> str:
+    if phase == "discuss":
+        return "- 讨论阶段只允许只读调查；不执行通用 Shell，不写入文件。"
+    if phase == "plan":
+        return "- 计划阶段只允许只读调查；不执行通用 Shell，唯一允许写入的是专用计划文件。等待用户明确开始执行。"
+    return "- 执行阶段按用户请求实施；工具调用仍受权限策略和规则约束。"
 
 
 def build_plan_mode_initial_prompt(plan_file_path: Path) -> str:
@@ -162,7 +183,8 @@ def build_plan_mode_exit_prompt(plan_file_path: Path | None) -> str:
 def build_plan_mode_reentry_prompt(plan_file_path: Path) -> str:
     return (
         "正在重新进入 Plan Mode。\n"
-        f"请优先读取已有计划文件：{plan_file_path}\n"
+        "继续修改本会话保存的计划快照，不要把项目中其他会话的旧计划当成已批准任务。\n"
+        f"更新后通过专用工具保存到：{plan_file_path}\n"
         "从上次中断的位置继续补充和修正计划，而不是从头重新规划。"
     )
 
@@ -183,25 +205,32 @@ def build_prompt_context(
     *,
     cwd: Path,
     current_date: date,
-    runtime_mode: RuntimeMode,
+    runtime_mode: RuntimeMode | None = None,
     plan_file_path: Path,
     previous_runtime_mode: RuntimeMode | None = None,
     plan_mode_turn_count: int = 0,
     pending_plan_entry_kind: PlanModeEntryKind | None = None,
     pending_plan_exit_notice: bool = False,
+    work_phase: WorkPhase | None = None,
+    permission_policy: PermissionPolicy | None = None,
+    plan_snapshot: PlanSnapshot | None = None,
 ) -> PromptContext:
     resolved_plan_file_path = plan_file_path.resolve()
+    phase, policy = resolve_runtime_axes(runtime_mode, work_phase, permission_policy)
     return PromptContext(
         cwd=cwd.resolve(),
         current_date=current_date,
-        runtime_mode=runtime_mode,
+        runtime_mode=legacy_runtime_mode(phase, policy),
         plan_file_path=resolved_plan_file_path,
         os_label=_runtime_label(),
         previous_runtime_mode=previous_runtime_mode,
         plan_mode_turn_count=plan_mode_turn_count,
         pending_plan_entry_kind=pending_plan_entry_kind,
         pending_plan_exit_notice=pending_plan_exit_notice,
-        plan_exists=resolved_plan_file_path.exists(),
+        plan_exists=plan_snapshot is not None,
+        work_phase=phase,
+        permission_policy=policy,
+        plan_snapshot=plan_snapshot,
     )
 
 

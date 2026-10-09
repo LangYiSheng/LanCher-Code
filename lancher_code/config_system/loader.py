@@ -18,6 +18,7 @@ from lancher_code.models import (
     RuntimeMode,
     ThinkingConfig,
     UIConfig,
+    resolve_runtime_axes,
 )
 
 SUPPORTED_PROTOCOLS: tuple[ProviderProtocol, ...] = ("openai", "claude")
@@ -167,9 +168,17 @@ def _load_thinking(raw_value: Any, path: str = "thinking") -> ThinkingConfig | N
 
 
 def _load_ui(raw_value: dict[str, Any]) -> UIConfig:
+    theme = raw_value.get("theme", "dark")
+    busy_enter_action = raw_value.get("busy_enter_action", "follow_up")
+    if not isinstance(theme, str) or theme not in {"dark", "light"}:
+        raise ConfigError("ui.theme 必须是 dark 或 light。")
+    if not isinstance(busy_enter_action, str) or busy_enter_action not in {"follow_up", "steer", "draft"}:
+        raise ConfigError("ui.busy_enter_action 必须是 follow_up、steer 或 draft。")
     return UIConfig(
         show_timestamps=bool(raw_value.get("show_timestamps", False)),
         show_thinking_status=bool(raw_value.get("show_thinking_status", True)),
+        theme=theme,
+        busy_enter_action=busy_enter_action,
     )
 
 
@@ -180,14 +189,27 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         "runtime.unknown_tool_streak_limit",
     )
     plan_file_path = raw_value.get("plan_file_path", "./.lancher/plan.md")
-    permission_mode = _read_runtime_mode(raw_value.get("permission_mode", "default"), "runtime.permission_mode")
+    for key, choices in (("work_phase", {"discuss", "plan", "execute"}), ("permission_policy", {"default", "acceptEdits", "bypass"})):
+        if key in raw_value and (not isinstance(raw_value[key], str) or raw_value[key] not in choices):
+            raise ConfigError(f"runtime.{key} 配置无效。")
+    permission_mode = (
+        None if "work_phase" in raw_value and "permission_policy" in raw_value
+        else _read_runtime_mode(raw_value.get("permission_mode", "default"), "runtime.permission_mode")
+    )
+    try:
+        work_phase, permission_policy = resolve_runtime_axes(
+            permission_mode, raw_value.get("work_phase"), raw_value.get("permission_policy")
+        )
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"runtime 阶段或权限配置无效：{exc}") from exc
     if not isinstance(plan_file_path, str) or not plan_file_path.strip():
         raise ConfigError("runtime.plan_file_path 必须是非空字符串。")
     return RuntimeConfig(
         tool_loop_limit=tool_loop_limit,
         unknown_tool_streak_limit=unknown_tool_streak_limit,
         plan_file_path=plan_file_path.strip(),
-        permission_mode=permission_mode,
+        work_phase=work_phase,
+        permission_policy=permission_policy,
     )
 
 

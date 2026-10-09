@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -13,12 +14,16 @@ MessageRole = Literal["system", "user", "assistant"]
 ConversationRole = Literal["system", "user", "assistant", "tool"]
 MessageStatus = Literal["streaming", "complete", "error", "cancelled"]
 RuntimeMode = Literal["default", "plan", "acceptEdits", "bypass"]
+WorkPhase = Literal["discuss", "plan", "execute"]
+PermissionPolicy = Literal["default", "acceptEdits", "bypass"]
+PermissionMatchKind = Literal["exact", "glob", "legacy"]
+BusyEnterAction = Literal["follow_up", "steer", "draft"]
 PlanModeEntryKind = Literal["initial", "reentry"]
 RuleScope = Literal["session", "project", "user"]
 PermissionDecision = Literal["allow", "deny", "ask"]
 PermissionRuleResult = Literal["allow", "deny"]
 PermissionRequestKind = Literal["command", "file_edit", "external_tool"]
-PermissionResolutionOutcome = Literal["allow_once", "allow_session", "allow_project", "deny"]
+PermissionResolutionOutcome = Literal["allow_once", "allow_session", "allow_project", "deny", "superseded"]
 StreamEventKind = Literal[
     "text_delta",
     "thinking_delta",
@@ -41,11 +46,41 @@ TurnEventKind = Literal[
     "turn_cancelled",
     "assistant_message_completed",
     "turn_failed",
+    "phase_changed",
+    "policy_changed",
+    "pending_input_changed",
+    "steering_applied",
+    "permission_request_closed",
+    "turn_completed",
 ]
 ContentBlockKind = Literal["text", "tool_use", "tool_result"]
 TraceEntryKind = Literal["thinking", "tool_call", "tool_result", "text", "notice"]
 ToolCategory = Literal["read", "write", "command"]
 ToolSource = Literal["builtin", "external"]
+
+
+def resolve_runtime_axes(
+    mode: RuntimeMode | None = None,
+    work_phase: WorkPhase | None = None,
+    permission_policy: PermissionPolicy | None = None,
+) -> tuple[WorkPhase, PermissionPolicy]:
+    """仅在旧调用边界把混合模式拆成两轴，新参数优先。"""
+    if (work_phase is None or permission_policy is None) and mode is not None and (
+        not isinstance(mode, str) or mode not in {"default", "plan", "acceptEdits", "bypass"}
+    ):
+        raise ValueError("旧运行模式无效。")
+    phase = work_phase if work_phase is not None else ("plan" if mode == "plan" else "execute")
+    policy = permission_policy if permission_policy is not None else (mode if mode in {"acceptEdits", "bypass"} else "default")
+    if not isinstance(phase, str) or phase not in {"discuss", "plan", "execute"}:
+        raise ValueError("工作阶段无效。")
+    if not isinstance(policy, str) or policy not in {"default", "acceptEdits", "bypass"}:
+        raise ValueError("权限策略无效。")
+    return phase, policy  # type: ignore[return-value]
+
+
+def legacy_runtime_mode(work_phase: WorkPhase, permission_policy: PermissionPolicy) -> RuntimeMode:
+    """只读兼容投影，安全判定不得依赖此值。"""
+    return "plan" if work_phase == "plan" else permission_policy
 
 
 @dataclass(slots=True, frozen=True)
@@ -67,14 +102,29 @@ class ThinkingConfig:
 class UIConfig:
     show_timestamps: bool = False
     show_thinking_status: bool = True
+    theme: Literal["dark", "light"] = "dark"
+    busy_enter_action: BusyEnterAction = "follow_up"
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, init=False)
 class RuntimeConfig:
     tool_loop_limit: int = 50
     unknown_tool_streak_limit: int = 3
     plan_file_path: str = "./.lancher/plan.md"
-    permission_mode: RuntimeMode = "default"
+    work_phase: WorkPhase = "execute"
+    permission_policy: PermissionPolicy = "default"
+
+    def __init__(self, tool_loop_limit: int = 50, unknown_tool_streak_limit: int = 3,
+                 plan_file_path: str = "./.lancher/plan.md", permission_mode: RuntimeMode | None = None,
+                 *, work_phase: WorkPhase | None = None, permission_policy: PermissionPolicy | None = None) -> None:
+        self.tool_loop_limit = tool_loop_limit
+        self.unknown_tool_streak_limit = unknown_tool_streak_limit
+        self.plan_file_path = plan_file_path
+        self.work_phase, self.permission_policy = resolve_runtime_axes(permission_mode, work_phase, permission_policy)
+
+    @property
+    def permission_mode(self) -> RuntimeMode:
+        return legacy_runtime_mode(self.work_phase, self.permission_policy)
 
 
 @dataclass(slots=True)
@@ -236,6 +286,18 @@ class ToolDefinition:
         return self.params_model
 
 
+def tool_available_in_phase(tool: ToolDefinition, work_phase: WorkPhase) -> bool:
+    """工具发现和实际执行共享同一个不可被权限覆盖的阶段边界。"""
+    if tool.name == "write_plan_file":
+        return work_phase == "plan"
+    if work_phase == "execute":
+        return any(mode in tool.allowed_modes for mode in ("default", "acceptEdits", "bypass"))
+    if tool.name == "bash":
+        return False
+    # MCP adapter 仅在服务端明确 readOnlyHint=true 时标记 read；缺省为 command。
+    return tool.category == "read" and "plan" in tool.allowed_modes
+
+
 class CancellationToken:
     def __init__(self) -> None:
         self._event = asyncio.Event()
@@ -260,8 +322,12 @@ class ToolContext:
     plan_file_path: Path | None = None
     cancellation_token: CancellationToken | None = None
     file_state_cache: "FileStateCache | None" = None
+    work_phase: WorkPhase | None = None
+    permission_policy: PermissionPolicy | None = None
 
     def __post_init__(self) -> None:
+        self.work_phase, self.permission_policy = resolve_runtime_axes(self.mode, self.work_phase, self.permission_policy)
+        self.mode = legacy_runtime_mode(self.work_phase, self.permission_policy)
         if self.project_root is None:
             self.project_root = self.cwd.resolve()
         if self.file_state_cache is None:
@@ -275,6 +341,7 @@ class PermissionRule:
     match: str
     result: PermissionRuleResult
     scope: RuleScope
+    match_kind: PermissionMatchKind = "legacy"
 
 
 @dataclass(slots=True)
@@ -295,6 +362,9 @@ class PermissionRequest:
     session_rule: str | None = None
     project_rule: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    match_kind: PermissionMatchKind = "exact"
+    work_phase: WorkPhase = "execute"
+    permission_policy: PermissionPolicy = "default"
 
 
 @dataclass(slots=True)
@@ -444,11 +514,35 @@ class SessionMessage:
 
 
 @dataclass(slots=True)
+class PlanSnapshot:
+    content: str
+    digest: str
+    source_message_id: str
+    ready: bool = False
+
+    @classmethod
+    def create(cls, content: str, source_message_id: str, *, ready: bool = False) -> "PlanSnapshot":
+        return cls(content, hashlib.sha256(content.encode("utf-8")).hexdigest(), source_message_id, ready)
+
+
+@dataclass(slots=True)
+class PendingInput:
+    id: str
+    text: str
+    delivery: Literal["follow_up", "steer"] = "follow_up"
+    target_task_id: str | None = None
+    state: Literal["pending", "paused"] = "pending"
+
+
+@dataclass(slots=True)
 class SessionState:
     messages: list[SessionMessage] = field(default_factory=list)
-    runtime_mode: RuntimeMode = "default"
+    work_phase: WorkPhase = "execute"
+    permission_policy: PermissionPolicy = "default"
+    session_id: str = field(default_factory=lambda: uuid4().hex)
+    plan_snapshot: PlanSnapshot | None = None
+    pending_inputs: list[PendingInput] = field(default_factory=list)
     previous_runtime_mode: RuntimeMode | None = None
-    plan_restore_mode: RuntimeMode = "default"
     plan_mode_turn_count: int = 0
     pending_plan_exit_notice: bool = False
     pending_plan_entry_kind: PlanModeEntryKind | None = None
@@ -456,6 +550,14 @@ class SessionState:
 
     def snapshot(self) -> list[SessionMessage]:
         return list(self.messages)
+
+    @property
+    def runtime_mode(self) -> RuntimeMode:
+        return legacy_runtime_mode(self.work_phase, self.permission_policy)
+
+    @property
+    def plan_restore_mode(self) -> PermissionPolicy:
+        return self.permission_policy
 
 
 @dataclass(slots=True)
@@ -470,6 +572,9 @@ class PromptContext:
     pending_plan_entry_kind: PlanModeEntryKind | None = None
     pending_plan_exit_notice: bool = False
     plan_exists: bool = False
+    work_phase: WorkPhase = "execute"
+    permission_policy: PermissionPolicy = "default"
+    plan_snapshot: PlanSnapshot | None = None
 
 
 @dataclass(slots=True)
@@ -489,6 +594,8 @@ class ChatRequest:
     thinking: ThinkingConfig | None = None
     mode: RuntimeMode = "default"
     cancellation_token: CancellationToken | None = None
+    work_phase: WorkPhase = "execute"
+    permission_policy: PermissionPolicy = "default"
 
 
 @dataclass(slots=True)
@@ -512,3 +619,7 @@ class TurnEvent:
     mode: RuntimeMode | None = None
     permission_request: PermissionRequest | None = None
     permission_resolution: PermissionResolution | None = None
+    work_phase: WorkPhase | None = None
+    permission_policy: PermissionPolicy | None = None
+    task_id: str | None = None
+    pending_input_id: str | None = None

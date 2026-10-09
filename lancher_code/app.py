@@ -56,7 +56,8 @@ async def run_app() -> int:
         active_config,
         cwd=cwd,
         plan_file_path=Path(config.runtime.plan_file_path),
-        initial_runtime_mode=config.runtime.permission_mode,
+        initial_work_phase=config.runtime.work_phase,
+        initial_permission_policy=config.runtime.permission_policy,
         permission_storage=permission_storage,
     )
     tool_registry = create_default_tool_registry()

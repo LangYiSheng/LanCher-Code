@@ -10,19 +10,21 @@ LanCher Code 支持**按项目**保存 / 恢复会话。会话文件存放在启
 
 每个项目（cwd）维护自己的会话列表。实现位置：`lancher_code/session_store.py`（存储）、`lancher_code/session.py`（`SessionController` 的 save / auto_save / resume）。
 
-## 会话文件格式（JSONL，版本 3）
+## 会话文件格式（JSONL，版本 4）
 
 每行一个 JSON 对象，记录类型：
 
 | 类型 | 内容 |
 |---|---|
 | `metadata` | 格式版本、会话名、项目根、创建/更新时间、消息数、会话权限规则数、上下文治理状态（v3）、可选 `model_ref` |
-| `state` | 运行模式、previous 模式、plan 恢复模式、plan 轮次计数、待处理 plan 提醒 |
+| `state` | 稳定会话 ID、工作阶段、权限策略、计划快照、待处理消息及计划提示状态 |
 | `permissions` | 会话级权限规则列表 |
 | `message` | 界面消息（`SessionMessage`，含 usage 与 trace） |
 | `transcript` | 协议无关消息（`ConversationMessage`） |
 
-版本兼容：当前写版本 `3`（`SESSION_FORMAT_VERSION`），支持读取 `1 / 2 / 3`；v1 无 permissions 记录，v2/v3 必须恰好一条 permissions 记录，v3 额外带 `context_management` 元数据。
+版本兼容：当前写版本 `4`（`SESSION_FORMAT_VERSION`），支持读取 `1 / 2 / 3 / 4`；v1 无 permissions 记录，其余版本必须恰好一条 permissions 记录，v3/v4 带 `context_management` 元数据。旧非计划模式映射为执行阶段与同名权限；旧计划模式保留有效的恢复权限，否则使用标准权限。
+
+v4 保存当前会话的计划正文、摘要与来源消息；项目旧计划文件不会被自动导入为可批准快照。待处理消息尚未进入正式 transcript，恢复时一律暂停，需用户明确继续；恢复本身不会调用模型。
 
 `model_ref` 保存稳定的 `供应商ID/模型ID`，不保存 API Key、Base URL 或解析后的连接快照。恢复时从当前全局目录解析最新连接参数。旧记录没有此字段仍可正常读取，使用默认模型并提示；原引用已删除时也回退默认模型。
 

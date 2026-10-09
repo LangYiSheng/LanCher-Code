@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from pathlib import Path
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Static, TextArea
+from textual.widgets import Button, Static, TextArea
 
 from lancher_code.errors import LanCherError
 from lancher_code.model_catalog import iter_model_refs, model_display_name
 from lancher_code.models import (
     MessageUsage,
     PermissionRequest,
-    PermissionResolution,
     ProviderConfig,
     RuntimeMode,
     SessionMessage,
@@ -47,6 +47,11 @@ from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.tui_views.settings import SettingsResult, SettingsScreen
 from lancher_code.tui_views.model_picker import ModelPickerScreen
+from lancher_code.tui_views.theme import apply_theme
+from lancher_code.tui_views.chat_controls import (
+    ChatAction, StageBar, PendingQueue, PendingInputEditor, PlanPanel,
+    PlanReviewScreen, PermissionPolicyScreen, ReadOnlyDetailsScreen,
+)
 from lancher_code.turn_runner import TurnRunner
 from lancher_code.tools.core.registry import ToolRegistry
 
@@ -57,7 +62,7 @@ MAX_COMPOSER_LINES = 6
 COMPOSER_FRAME_HEIGHT = 1
 DEFAULT_COMMAND_HINT = ""
 DEFAULT_PLACEHOLDER = "发送一条消息"
-PLAN_PLACEHOLDER = "Plan Mode: 继续补充或修改计划"
+PLAN_PLACEHOLDER = "补充或修改计划，确认后再开始执行"
 MCP_PLACEHOLDER = "正在初始化 MCP，请稍候…"
 MODE_SEQUENCE: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
 MODE_GLYPHS: dict[RuntimeMode, str] = {
@@ -65,12 +70,6 @@ MODE_GLYPHS: dict[RuntimeMode, str] = {
     "plan": "#",
     "acceptEdits": "+",
     "bypass": "!",
-}
-MODE_STATUS_LABELS: dict[RuntimeMode, str] = {
-    "default": "",
-    "plan": "计划模式",
-    "acceptEdits": "允许编辑",
-    "bypass": "完全访问",
 }
 
 CONTEXT_REFRESH_EVENTS: frozenset[str] = frozenset(
@@ -88,289 +87,95 @@ CONTEXT_REFRESH_EVENTS: frozenset[str] = frozenset(
 
 class LanCherTextualApp(App[int]):
     CSS = """
-    Screen {
-        layout: vertical;
-        color: #f2f2f2;
-    }
-
-    #root {
-        height: 100%;
-        width: 100%;
-        layout: vertical;
-    }
-
-    #banner {
-        margin: 1 2 0 2;
-        padding: 0;
-        border: none;
-        width: 1fr;
-    }
-
-    #banner.-compact {
-        margin: 0 2;
-        padding: 0;
-        height: auto;
-        color: #7f9ab8;
-    }
-
-    #chat-view {
-        margin: 1 1 0 1;
-        padding: 1;
-        border: none;
-        height: 1fr;
-        width: 100%;
-    }
-
-    .message {
-        margin: 0 0 2 0;
-        padding: 0 0 0 1;
-        width: 100%;
-        height: auto;
-        layout: vertical;
-    }
-
-    .message-label, .message-body, .thinking-trace-header, .thinking-trace-body {
-        width: 1fr;
-        height: auto;
-    }
-
-    .thinking-trace {
-        margin: 0 0 1 0;
-        width: 1fr;
-        height: auto;
-        layout: vertical;
-    }
-
-    .thinking-trace-body {
-        color: #a8b9cc;
-    }
-
-    #chat-view.-banner-collapsed {
-        margin-top: 0;
-    }
-
-    .message--user {
-        border-left: wide #78d98a;
-    }
-
-    .message--assistant {
-        border-left: wide #73b6ff;
-    }
-
-    .message--system {
-        border-left: wide #97adc7;
-    }
-
-    .message.-error {
-        border-left: wide #ff7b72;
-    }
-
-    #composer-region {
-        margin: 1 2 0 2;
-        width: 1fr;
-        layout: vertical;
-        height: auto;
-    }
-
-    #slash-command-menu {
-        border-left: solid #4b6f97;
-        background: #0f1a26;
-        padding: 0 0;
-        margin: 0 0 1 0;
-        display: none;
-        width: 1fr;
-        height: auto;
-        max-height: 8;
-    }
-
-    .slash-command-item {
-        padding: 0 1;
-        width: 1fr;
-        color: #c8d5e3;
-    }
-
-    .slash-command-item.-active {
-        background: #203246;
-    }
-
-    #composer {
-        border-top: solid #4b6f97;
-        height: 2;
-        min-height: 2;
-        max-height: 7;
-        layout: horizontal;
-        width: 1fr;
-        padding: 0 1;
-    }
-
-    #composer:focus-within {
-        border-top: solid #73b6ff;
-    }
-
-    #prompt-glyph {
-        width: 2;
-        content-align: center middle;
-        color: #73b6ff;
-        text-style: bold;
-    }
-
-    #prompt-glyph.-default {
-        color: #73b6ff;
-    }
-
-    #prompt-glyph.-plan {
-        color: #f5c451;
-    }
-
-    #prompt-glyph.-acceptEdits {
-        color: #78d98a;
-    }
-
-    #prompt-glyph.-bypass {
-        color: #ff9b6b;
-    }
-
-    #composer-input {
-        width: 1fr;
-        height: 100%;
-        min-height: 1;
-        max-height: 6;
-        margin: 0;
-        padding: 0;
-        background: transparent;
-        border: none;
-    }
-
-    #composer-input:focus {
-        border: none;
-        background: transparent;
-    }
-
-    #composer-input .text-area--cursor-line {
-        background: transparent;
-    }
-
-    #composer-input .text-area--placeholder {
-        color: #7f9ab8;
-    }
-
-    #composer-input .text-area--cursor {
-        background: #73b6ff;
-        color: black;
-    }
-
-    #command-hint {
-        margin: 0 0 1 0;
-        color: #7f9ab8;
-        height: 1;
-        width: 1fr;
-    }
-
-    #inline-permission-panel {
-        border-left: solid #4b6f97;
-        padding: 1 2;
-        width: 1fr;
-        height: auto;
-        background: #0f1a26;
-    }
-
-    #inline-permission-panel:focus {
-        border-left: solid #73b6ff;
-    }
-
-    #permission-title {
-        color: #73b6ff;
-        text-style: bold;
-        margin-bottom: 1;
-        height: auto;
-    }
-
-    #permission-command, #permission-details {
-        color: #f2f2f2;
-        margin-left: 2;
-        height: auto;
-    }
-
-    #permission-description {
-        color: #a8b9cc;
-        margin: 0 0 1 2;
-        height: auto;
-    }
-
-    #permission-prompt {
-        color: #c8d5e3;
-        margin-bottom: 1;
-        height: auto;
-    }
-
-    .permission-preview {
-        color: #c8d5e3;
-        height: auto;
-        margin-left: 2;
-    }
-
-    .permission-preview.-error {
-        color: #ff7b72;
-    }
-
-    .permission-preview.-success {
-        color: #78d98a;
-    }
-
-    .permission-option {
-        width: 1fr;
-        height: auto;
-        padding: 0 1;
-        color: #c8d5e3;
-    }
-
-    .permission-option.-active {
-        background: #203246;
-    }
-
-    #permission-help {
-        color: #7f9ab8;
-        margin-top: 1;
-        height: auto;
-    }
-
-    #status-bar {
-        margin: 1 1 1 1;
-        height: 1;
-        layout: horizontal;
-        color: #97adc7;
-        width: 1fr;
-    }
-
-    #status-left {
-        width: 1fr;
-    }
-
-    #status-left.-plan {
-        color: #f5c451;
-    }
-
-    #status-left.-acceptEdits {
-        color: #78d98a;
-    }
-
-    #status-left.-bypass {
-        color: #ff9b6b;
-    }
-
-    #status-center {
-        width: auto;
-        text-align: center;
-    }
-
-    #status-right {
-        width: 1fr;
-        text-align: right;
-    }
+    #root { height: 100%; width: 100%; layout: vertical; }
+    #chat-view { height: 1fr; width: 100%; }
+    .message { width: 100%; height: auto; layout: vertical; }
+    .message-label, .message-body { height: auto; width: 1fr; }
+    #chat-view.-banner-collapsed { margin-top: 0; }
+    #composer-region { width: 1fr; height: auto; layout: vertical; }
+    #composer { height: 2; min-height: 2; max-height: 7; width: 1fr; }
+    #prompt-glyph { width: 2; content-align: center middle; text-style: bold; }
+    #composer-input { width: 1fr; height: 100%; min-height: 1; max-height: 6; margin: 0; padding: 0; background: transparent; border: none; }
+    #composer-input:focus { border: none; background: transparent; }
+    #composer-input .text-area--cursor-line { background: transparent; }
+    #slash-command-menu { display: none; width: 1fr; height: auto; }
+    .slash-command-item { padding: 0 1; width: 1fr; height: auto; }
+    #command-hint { width: 1fr; }
+    #inline-permission-panel { width: 1fr; }
+    #permission-title, #permission-command, #permission-details, #permission-description,
+    #permission-prompt, .permission-preview, .permission-option, #permission-help { height: auto; }
+    #permission-title { text-style: bold; }
+    .permission-option { width: 1fr; padding: 0 1; }
+    #status-bar { width: 1fr; }
+    #status-center, #status-right { text-align: right; }
+    Screen { background: $background; color: $text; }
+    #banner { margin: 1 2 0 2; height: auto; color: $text-muted; }
+    #banner.-compact { margin: 0 2; }
+    #stage-bar { margin: 0 2; height: 1; width: 1fr; }
+    .stage-arrow { width: 2; height: 1; color: $text-muted; content-align: center middle; }
+    #phase-explanation { width: 1fr; height: 1; color: $text-muted; padding-left: 2; }
+    .quiet-action { border: none; height: 1; min-height: 1; min-width: 4; width: auto; padding: 0 1; background: transparent; color: $text-muted; }
+    .quiet-action:hover, .quiet-action:focus { background: $surface; color: $primary; }
+    .quiet-action.-selected { color: $primary; text-style: bold; }
+    #chat-view { margin: 1 1 0 1; padding: 0 1; }
+    .message { padding: 0; margin: 0 0 1 0; border: none; }
+    .message--user, .message--assistant, .message--system, .message.-error { border: none; }
+    .message-label { color: $text-muted; }
+    .trace-section { height: auto; width: 1fr; margin: 0; }
+    .trace-header, .trace-body { height: auto; width: 1fr; }
+    .trace-section:focus .trace-header { color: $primary; text-style: underline; }
+    .trace-body { margin: 0 0 1 2; color: $text-muted; }
+    #composer-region { margin: 0 2; max-height: 75%; }
+    #composer { border-top: solid $primary-muted; padding: 0; }
+    #composer:focus-within { border-top: solid $primary; }
+    #composer-input { color: $text; }
+    #composer-input .text-area--placeholder { color: $text-muted; }
+    #composer-input .text-area--cursor { background: $primary; color: $background; }
+    #prompt-glyph, #prompt-glyph.-default, #prompt-glyph.-plan, #prompt-glyph.-acceptEdits, #prompt-glyph.-bypass { color: $primary; }
+    #composer-actions { height: 1; width: 1fr; }
+    #composer-help { width: 1fr; height: 1; color: $text-muted; }
+    #command-hint { margin: 0; color: $text-muted; height: auto; }
+    #slash-command-menu { border: none; background: $surface; max-height: 7; margin: 0; }
+    .slash-command-item.-active { background: $primary 15%; }
+    #approval-region { height: auto; max-height: 12; display: none; }
+    #inline-permission-panel { height: auto; max-height: 12; background: $surface; border-left: solid $warning; padding: 0 1; }
+    #inline-permission-panel:focus { border-left: solid $warning; }
+    #permission-title { color: $warning; margin: 0; }
+    #permission-command, #permission-details, #permission-description, #permission-prompt, .permission-preview { color: $text; margin: 0; }
+    .permission-preview.-error { color: $error; }
+    .permission-preview.-success { color: $success; }
+    .permission-option.-active { background: $primary 15%; }
+    #permission-help { color: $text-muted; margin: 0; }
+    #pending-queue { display: none; height: auto; max-height: 8; overflow-y: auto; background: $surface; }
+    .queue-heading, .queue-actions { height: 1; }
+    .queue-heading Static { width: 1fr; height: 1; }
+    .queue-item { height: auto; padding: 0 1; margin-bottom: 1; }
+    .queue-text { height: auto; max-height: 2; }
+    #plan-panel { display: none; height: auto; max-height: 6; color: $text-muted; }
+    #plan-preview { height: auto; max-height: 4; }
+    .plan-actions { height: 1; }
+    #plan-execute { color: $primary; }
+    #status-bar { margin: 0 2 1 2; height: 1; color: $text-muted; }
+    #status-left, #status-left.-plan, #status-left.-acceptEdits, #status-left.-bypass { color: $text-muted; width: 1fr; }
+    #status-center { width: auto; max-width: 35%; }
+    #status-right { width: auto; margin-left: 1; color: $text-muted; }
+    #status-details { display: none; height: auto; max-height: 8; margin: 0 2; color: $text-muted; }
+    Screen.-narrow #phase-explanation { display: none; }
+    Screen.-narrow #status-center { display: none; }
+    Screen.-narrow #status-bar { height: 2; }
+    Screen.-narrow #status-left { height: 2; }
+    Screen.-tiny #status-bar, Screen.-tiny #status-left { height: 3; }
+    Screen.-tiny #composer-actions.-working #chat-model,
+    Screen.-tiny #composer-actions.-working #chat-policy,
+    Screen.-tiny #composer-actions.-working #chat-details { display: none; }
+    Screen.-narrow #status-right { display: none; }
+    Screen.-narrow #composer-help { display: none; }
+    Screen.-narrow #banner { margin-top: 0; }
     """
 
     BINDINGS = [
         ("ctrl+c", "request_quit", "取消/退出"),
+        ("ctrl+d", "toggle_details", "状态详情"),
     ]
 
     def __init__(
@@ -389,14 +194,18 @@ class LanCherTextualApp(App[int]):
         self._provider_config = provider_config
         self._session_controller = session_controller
         self._ui_config = ui_config
+        apply_theme(self, getattr(ui_config, "theme", "dark"))
         self._slash_command_registry = slash_command_registry or create_default_slash_command_registry()
         self._is_streaming = False
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
-        self._status_hint = "Ready"
+        self._status_hint = "就绪"
         self._slash_menu_matches: list[SlashCompletionCandidate] = []
         self._slash_menu_index = 0
-        self._permission_resolution_future: asyncio.Future[PermissionResolution] | None = None
+        self._pending_permissions: dict[str, PermissionRequest] = {}
+        self._permission_ui_lock = asyncio.Lock()
+        self._turn_succeeded = False
+        self._details_open = False
         self._mcp_manager = mcp_manager
         self._tool_registry = tool_registry
         self._settings_service = settings_service
@@ -405,8 +214,12 @@ class LanCherTextualApp(App[int]):
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
             yield BannerWidget(Path.cwd())
+            yield StageBar()
             yield VerticalScroll(id="chat-view")
             with Vertical(id="composer-region"):
+                yield PlanPanel()
+                yield PendingQueue()
+                yield Vertical(id="approval-region")
                 yield SlashCommandMenu()
                 with Horizontal(id="composer"):
                     yield Static(MODE_GLYPHS["default"], id="prompt-glyph")
@@ -420,12 +233,21 @@ class LanCherTextualApp(App[int]):
                         id="composer-input",
                     )
                 yield CommandHintBar()
+                with Horizontal(id="composer-actions"):
+                    yield Static("Enter 发送 · Shift+Enter 换行", id="composer-help", markup=False)
+                    yield Button("模型", id="chat-model", classes="quiet-action")
+                    yield Button("审批", id="chat-policy", classes="quiet-action")
+                    yield Button("详情", id="chat-details", classes="quiet-action")
+                    yield Button("补充", id="chat-steer", classes="quiet-action")
+                    yield Button("排队", id="chat-queue", classes="quiet-action")
             with Horizontal(id="status-bar"):
                 yield Static(id="status-left", markup=False)
                 yield Static(id="status-center")
                 yield Static(id="status-right")
+            yield Static(id="status-details", markup=False)
 
     async def on_mount(self) -> None:
+        self.screen.set_class(self.size.width < 64, "-narrow")
         composer = self.query_one(ComposerTextArea)
         composer.disabled = not self.mcp_initialization_complete
         if self.mcp_initialization_complete:
@@ -436,10 +258,12 @@ class LanCherTextualApp(App[int]):
         await self._refresh_command_ui()
         self._refresh_status_bar()
         self._refresh_context_usage()
+        await self._refresh_pending_queue()
+        self._refresh_plan_panel()
         if self._mcp_manager is not None:
             self._mcp_manager.add_progress_callback(self._handle_mcp_progress)
             if self._mcp_manager.has_servers:
-                self._status_hint = "Initializing MCP"
+                self._status_hint = "正在连接 MCP"
                 self.initialize_mcp()
             else:
                 self._handle_mcp_progress(MCPInitializationProgress(0, 0, 0, 0, 0, None, "complete"))
@@ -459,7 +283,7 @@ class LanCherTextualApp(App[int]):
             self.mcp_initialization_complete = True
             composer = self.query_one("#composer-input", ComposerTextArea)
             composer.disabled = False
-            self._status_hint = "Ready"
+            self._status_hint = "就绪"
             self._refresh_composer_placeholder()
             self._refresh_status_bar()
             composer.focus()
@@ -470,12 +294,16 @@ class LanCherTextualApp(App[int]):
             self._refresh_context_usage()
 
     def on_resize(self) -> None:
+        self.screen.set_class(self.size.width < 64, "-narrow")
+        self.screen.set_class(self.size.width < 48, "-tiny")
+        self.call_after_refresh(self._refresh_status_bar)
         self.call_after_refresh(self._update_composer_height)
+        self.call_after_refresh(self._fit_chat_panels)
 
     async def action_request_quit(self) -> None:
         if self._is_streaming:
             if self._turn_runner.cancel_active_turn():
-                self._status_hint = "Cancelling..."
+                self._status_hint = "正在停止 · 草稿和队列会保留"
                 self._refresh_status_bar()
             return
         self.exit(0)
@@ -505,8 +333,9 @@ class LanCherTextualApp(App[int]):
     async def handle_permission_mode_cycle_requested(self) -> None:
         if self._is_streaming:
             return
-        next_mode = _next_runtime_mode(self._session_controller.runtime_mode)
-        self._apply_turn_event(self._turn_runner.set_mode(next_mode))
+        phases = ("discuss", "plan", "execute")
+        phase = self._session_controller.work_phase
+        self._apply_turn_event(self._turn_runner.set_phase(phases[(phases.index(phase) + 1) % len(phases)]))
         await self._refresh_command_ui()
         self._refresh_status_bar()
         self.query_one("#composer-input", ComposerTextArea).focus()
@@ -516,9 +345,27 @@ class LanCherTextualApp(App[int]):
         if not self.mcp_initialization_complete:
             return
         text = event.value.strip()
-        event.composer.clear()
-        await self._refresh_command_ui()
-        if not text or self._is_streaming:
+        if not text:
+            return
+
+        if self._is_streaming:
+            if text.startswith("/"):
+                self._status_hint = "当前任务结束后可使用命令 · 输入已保留"
+                self._refresh_status_bar()
+                return
+            delivery = event.delivery or getattr(self._ui_config, "busy_enter_action", "follow_up")
+            if delivery == "draft":
+                self._status_hint = "草稿已保留 · 可点击补充或排队"
+                self._refresh_status_bar()
+                return
+            try:
+                self._turn_runner.enqueue_input(text, delivery=delivery)
+            except (LanCherError, ValueError, RuntimeError) as exc:
+                self.notify(str(exc), severity="warning")
+                return
+            event.composer.clear()
+            await self._refresh_command_ui()
+            await self._refresh_pending_queue()
             return
 
         slash_match = self._slash_command_registry.parse_submission(
@@ -527,9 +374,20 @@ class LanCherTextualApp(App[int]):
         )
         if slash_match is not None:
             payload = await self._execute_slash_command(slash_match.definition.name, slash_match.arguments_text)
+            event.composer.clear()
+            await self._refresh_command_ui()
             if payload is None:
                 return
             text = payload
+        else:
+            event.composer.clear()
+            await self._refresh_command_ui()
+
+        self._begin_turn(text)
+
+    def _begin_turn(self, text: str, *, queued: bool = False) -> None:
+        if self._is_streaming:
+            return
 
         if not self._chat_started:
             self._chat_started = True
@@ -537,57 +395,136 @@ class LanCherTextualApp(App[int]):
             self.query_one("#chat-view", VerticalScroll).set_class(True, "-banner-collapsed")
 
         self._is_streaming = True
-        self._status_hint = "Busy"
-        event.composer.disabled = True
+        self._turn_succeeded = False
+        self._status_hint = "正在处理"
+        self._refresh_composer_placeholder()
         self._refresh_status_bar()
-        self.process_prompt(text)
+        self._refresh_plan_panel()
+        self.process_prompt(text, queued=queued)
 
     @on(InlinePermissionPanel.Resolved)
-    def handle_permission_resolved(self, event: InlinePermissionPanel.Resolved) -> None:
+    async def handle_permission_resolved(self, event: InlinePermissionPanel.Resolved) -> None:
         event.stop()
-        future = self._permission_resolution_future
-        if future is not None and not future.done():
-            future.set_result(event.resolution)
+        request_id = event.resolution.request_id
+        if request_id not in self._pending_permissions:
+            return
+        self._turn_runner.resolve_permission_request(event.resolution)
+        await self._close_inline_permission(request_id)
 
     @work(exclusive=False, exit_on_error=False)
-    async def process_prompt(self, text: str) -> None:
+    async def process_prompt(self, text: str, *, queued: bool = False) -> None:
         try:
-            async for event in self._turn_runner.run_user_turn(text):
-                await self._consume_turn_event(event)
+            stream = self._turn_runner.run_next_queued_turn() if queued else self._turn_runner.run_user_turn(text)
+            # 消费事件期间也可能关闭界面；显式关闭生成器，等待执行器清理。
+            async with aclosing(stream):
+                async for event in stream:
+                    await self._consume_turn_event(event)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.exception(
                 "event=tui_turn_worker_failed exception_type=%s", type(exc).__name__
             )
+            self._turn_runner.pause_queue()
+            self._status_hint = "未完成 · 队列已暂停"
+            self.notify(str(exc), title="本轮未完成", severity="error")
         finally:
             self._is_streaming = False
-            auto_save_error = self._session_controller.auto_save()
-            if auto_save_error:
-                self.notify(auto_save_error, title="Session 自动保存", severity="error", timeout=10)
-            self._status_hint = "Ready"
-            input_widget = self.query_one("#composer-input", ComposerTextArea)
-            input_widget.disabled = False
+            if self.is_running:
+                await self._finish_turn_view()
+            else:
+                self._pending_permissions.clear()
+                self._session_controller.auto_save()
+
+    async def on_unmount(self) -> None:
+        # Textual 取消 worker 后不会等待所有后台执行器；退出前显式完成收尾。
+        await self._turn_runner.stop_and_wait()
+
+    async def _finish_turn_view(self) -> None:
+        for request_id in list(self._pending_permissions):
+            await self._close_inline_permission(request_id)
+        auto_save_error = self._session_controller.auto_save()
+        if auto_save_error:
+            self.notify(auto_save_error, title="会话自动保存", severity="error", timeout=10)
+        if self._turn_succeeded:
+            self._status_hint = "已完成"
+        input_widget = self.query_one("#composer-input", ComposerTextArea)
+        input_widget.disabled = False
+        if len(self.screen_stack) == 1:
             input_widget.focus()
-            self._refresh_mode_chrome()
-            self._refresh_composer_placeholder()
-            await self._refresh_command_ui()
-            self._refresh_status_bar()
-            self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
+        self._refresh_mode_chrome()
+        self._refresh_composer_placeholder()
+        await self._refresh_command_ui()
+        self._refresh_status_bar()
+        self._refresh_plan_panel()
+        await self._refresh_pending_queue()
+        if self._turn_succeeded:
+            self.call_later(self._start_next_queued)
+
+    def _start_next_queued(self) -> None:
+        if self._is_streaming or self._turn_runner.has_active_turn or self._turn_runner.queue_paused:
+            return
+        items = self._turn_runner.pending_inputs
+        if items and items[0].state == "pending" and items[0].delivery == "follow_up":
+            self._begin_turn("", queued=True)
 
     def _refresh_status_bar(self) -> None:
         usage = self._session_controller.total_usage()
-        center_text = self._status_hint or ("Busy" if self._is_streaming else "Ready")
+        center_text = self._status_hint or ("正在处理" if self._is_streaming else "就绪")
         status_left = self.query_one("#status-left", Static)
         status_center = self.query_one("#status-center", Static)
         status_right = self.query_one("#status-right", Static)
 
-        status_left.update(self._status_left_text())
+        banner = self.query_one(BannerWidget)
+        estimate = banner._context_usage_status.replace("上下文 ", "预计 ")
+        action = getattr(self._ui_config, "busy_enter_action", "follow_up")
+        enter_action = {"follow_up": "排队", "steer": "补充", "draft": "草稿"}[action] if self._is_streaming else "发送"
+        compact_state = center_text.split(" · ", 1)[0]
+        if self._pending_permissions:
+            compact_state = "等待确认"
+        elif self._turn_runner.queue_paused:
+            compact_state = "队列暂停"
+        elif self._is_streaming:
+            compact_state = "正在停止" if "停止" in compact_state else "处理中"
+        compact_state = compact_state[:6]
+        label = self._status_left_text()
+        if self.size.width < 64:
+            model, phase, policy = label.rsplit(" · ", 2)
+            available = max(8, self.size.width - 4)
+            model_limit = max(5, available - (10 if self.size.width < 48 else 28))
+            if len(model) > model_limit:
+                model = model[:model_limit - 1] + "…"
+            if self.size.width < 48:
+                label = f"{model} · {phase}\n{policy} · {estimate}\n{compact_state} · Enter {enter_action}"
+            else:
+                label = f"{model} · {phase} · {policy}\n{estimate} · {compact_state} · Enter {enter_action}"
+        status_left.update(label)
         for candidate in MODE_SEQUENCE:
             status_left.set_class(candidate != "default" and candidate == self._session_controller.runtime_mode, f"-{candidate}")
 
-        status_center.update(center_text)
-        status_right.update(self._format_usage_text(usage))
+        status_center.update(f"{estimate} · {center_text}")
+        status_right.update("Ctrl+D 详情")
+        self.query_one(StageBar).update_phase(self._session_controller.work_phase, busy=self._is_streaming)
+        config = getattr(self._turn_runner, "model_config", None)
+        ref = getattr(self._turn_runner, "model_ref", None)
+        details = (
+            f"本次模型：{self._status_left_text()}\n"
+            f"工作目录：{self._session_controller._cwd}\n"
+            f"模型引用：{ref or self._provider_config.model}\n"
+            f"新对话默认：{getattr(config, 'default_model', None) or '当前配置'}\n"
+            f"{self._format_usage_text(usage)} · {banner._context_usage_status}\n"
+            f"{banner._mcp_status}"
+        )
+        self.query_one("#status-details", Static).update(details)
+        for button_id in ("chat-model", "chat-policy"):
+            self.query_one(f"#{button_id}", Button).disabled = self._is_streaming
+        self.query_one("#chat-steer", Button).display = self._is_streaming
+        self.query_one("#chat-queue", Button).display = self._is_streaming
+        self.query_one("#composer-actions").set_class(self._is_streaming, "-working")
+        busy_help = {"follow_up": "Enter 排下一轮", "steer": "Enter 补充当前任务", "draft": "Enter 保留草稿"}[action]
+        self.query_one("#composer-help", Static).update(
+            busy_help + " · Ctrl+Enter 补充 · Ctrl+C 停止" if self._is_streaming else "Enter 发送 · Shift+Enter 换行"
+        )
 
     def _refresh_context_usage(self) -> None:
         banner = self.query_one(BannerWidget)
@@ -598,32 +535,38 @@ class LanCherTextualApp(App[int]):
                 visible_tools = self._tool_registry.list_definitions(
                     discovered_names=set(),
                     mode=self._session_controller.runtime_mode,
+                    work_phase=self._session_controller.work_phase,
                 )
                 deferred_tool_groups = self._tool_registry.list_deferred_index(
-                    mode=self._session_controller.runtime_mode
+                    mode=self._session_controller.runtime_mode,
+                    work_phase=self._session_controller.work_phase,
                 )
             request = self._session_controller.build_request(
                 visible_tools,
                 allow_tool_calls=True,
                 mode=self._session_controller.runtime_mode,
+                work_phase=self._session_controller.work_phase,
+                permission_policy=self._session_controller.permission_policy,
                 deferred_tool_groups=deferred_tool_groups,
             )
             used_tokens = self._session_controller.estimate_request_tokens(request)
         except Exception:
             logger.exception("event=tui_context_usage_estimate_failed")
             banner.update_context_usage(None, self._session_controller.context_window)
+            self._refresh_status_bar()
             return
         banner.update_context_usage(used_tokens, self._session_controller.context_window)
+        self._refresh_status_bar()
 
     def _status_left_text(self) -> str:
-        mode = self._session_controller.runtime_mode
-        if mode == "default":
-            config = getattr(self._turn_runner, "model_config", None)
-            if config is not None and self._turn_runner.model_ref:
-                return model_display_name(config, self._turn_runner.model_ref)
-            api_type = "OpenAI" if self._provider_config.protocol == "openai" else "Claude"
-            return f"{self._provider_config.model} ({api_type})"
-        return MODE_STATUS_LABELS[mode]
+        config = getattr(self._turn_runner, "model_config", None)
+        if config is not None and self._turn_runner.model_ref:
+            model = model_display_name(config, self._turn_runner.model_ref)
+        else:
+            model = self._provider_config.model
+        policy = {"default": "逐次确认", "acceptEdits": "自动编辑", "bypass": "跳过询问"}[self._session_controller.permission_policy]
+        phase = {"discuss": "讨论", "plan": "计划", "execute": "执行"}[self._session_controller.work_phase]
+        return f"{model} · {phase} · {policy}"
 
     @staticmethod
     def _format_usage_text(usage: MessageUsage) -> str:
@@ -643,65 +586,85 @@ class LanCherTextualApp(App[int]):
         widget.update_from_message(self._session_controller.get_message(message_id))
 
     async def _consume_turn_event(self, event: TurnEvent) -> None:
+        chat_view = self.query_one("#chat-view", VerticalScroll)
+        follow_bottom = chat_view.is_vertical_scroll_end
         self._apply_turn_event(event)
         if event.message is not None and event.kind in {"user_message_created", "assistant_message_started"}:
             await self._mount_message_widget(event.message)
         elif event.message is not None:
             self._sync_message_widget(event.message.id)
         if event.kind == "permission_request_created" and event.permission_request is not None:
-            resolution = await self._request_inline_permission(event.permission_request)
-            if resolution is not None:
-                self._turn_runner.resolve_permission_request(resolution)
-        self.query_one("#chat-view", VerticalScroll).scroll_end(animate=False)
+            await self._request_inline_permission(event.permission_request)
+        if event.kind in {"permission_request_closed", "permission_request_resolved"}:
+            request = event.permission_request
+            resolution = event.permission_resolution
+            request_id = request.request_id if request else resolution.request_id if resolution else None
+            if request_id:
+                await self._close_inline_permission(request_id)
+        if event.kind in {"pending_input_changed", "steering_applied", "turn_completed", "turn_cancelled", "turn_failed"}:
+            await self._refresh_pending_queue()
+        if follow_bottom:
+            self.call_after_refresh(chat_view.scroll_end, animate=False)
         self._refresh_status_bar()
+        self._refresh_plan_panel()
         if event.kind in CONTEXT_REFRESH_EVENTS:
             self._refresh_context_usage()
 
-    async def _request_inline_permission(self, request: PermissionRequest) -> PermissionResolution:
-        composer = self.query_one("#composer", Horizontal)
-        slash_menu = self.query_one(SlashCommandMenu)
-        hint_bar = self.query_one(CommandHintBar)
+    async def _request_inline_permission(self, request: PermissionRequest) -> None:
+        async with self._permission_ui_lock:
+            self._pending_permissions[request.request_id] = request
+            await self._show_next_permission()
+        self._fit_chat_panels()
+
+    async def _show_next_permission(self) -> None:
+        region = self.query_one("#approval-region", Vertical)
+        region.display = bool(self._pending_permissions)
+        if region.children or not self._pending_permissions:
+            return
+        request = next(iter(self._pending_permissions.values()))
         panel = InlinePermissionPanel(request)
-        composer.display = False
-        slash_menu.display = False
-        hint_bar.display = False
-        self._permission_resolution_future = asyncio.get_running_loop().create_future()
-        await self.query_one("#composer-region", Vertical).mount(panel)
+        await region.mount(panel)
         panel.focus()
-        try:
-            return await self._permission_resolution_future
-        finally:
-            self._permission_resolution_future = None
-            await panel.remove()
-            composer.display = True
-            await self._refresh_command_ui()
+
+    async def _close_inline_permission(self, request_id: str) -> None:
+        async with self._permission_ui_lock:
+            self._pending_permissions.pop(request_id, None)
+            for panel in list(self.query(InlinePermissionPanel)):
+                if panel.request.request_id == request_id:
+                    await panel.close_request_screen()
+                    await panel.remove()
+            await self._show_next_permission()
+        self._fit_chat_panels()
+        if not self._pending_permissions and len(self.screen_stack) == 1:
+            self.query_one(ComposerTextArea).focus()
 
     def _apply_turn_event(self, event: TurnEvent) -> None:
-        if event.kind == "mode_changed":
-            self._status_hint = event.progress_message or "Mode changed"
+        if event.kind in {"mode_changed", "phase_changed", "policy_changed"}:
+            self._status_hint = event.progress_message or "阶段已更新"
             self._refresh_mode_chrome()
             self._refresh_composer_placeholder()
             return
         if event.kind == "progress_updated":
-            self._status_hint = event.progress_message or ("Busy" if self._is_streaming else "Ready")
+            self._status_hint = event.progress_message or ("正在处理" if self._is_streaming else "就绪")
             return
         if event.kind == "turn_cancelled":
-            self._status_hint = event.progress_message or "Cancelled"
+            self._status_hint = event.progress_message or "已停止"
             return
         if event.kind == "turn_failed":
-            self._status_hint = event.error_text or "Failed"
+            self._status_hint = event.error_text or "未完成"
             return
-        if event.kind == "assistant_message_completed":
-            self._status_hint = "Ready"
+        if event.kind == "turn_completed":
+            self._turn_succeeded = True
+            self._status_hint = "已完成"
             return
         if event.kind == "permission_request_created":
-            self._status_hint = "Waiting for permission"
+            self._status_hint = "等待确认 · 可继续编辑草稿"
             return
         if event.kind == "permission_request_resolved":
-            self._status_hint = "Busy"
+            self._status_hint = "正在处理"
             return
         if event.kind in {"assistant_text_delta", "tool_call_started", "tool_result_received", "usage_updated"}:
-            self._status_hint = "Busy"
+            self._status_hint = "正在处理"
 
     def _refresh_mode_chrome(self) -> None:
         mode = self._session_controller.runtime_mode
@@ -715,16 +678,205 @@ class LanCherTextualApp(App[int]):
         if not self.mcp_initialization_complete:
             composer.placeholder = MCP_PLACEHOLDER
             return
-        if self._session_controller.runtime_mode == "plan":
+        if self._is_streaming:
+            composer.placeholder = "任务进行中，仍可输入下一条消息"
+            return
+        if self._session_controller.work_phase == "discuss":
+            composer.placeholder = "讨论想法或调查代码，此阶段不修改文件"
+            return
+        if self._session_controller.work_phase == "plan":
             composer.placeholder = PLAN_PLACEHOLDER
             return
         composer.placeholder = DEFAULT_PLACEHOLDER
+
+    def action_toggle_details(self) -> None:
+        if self.size.height < 24:
+            self.push_screen(ReadOnlyDetailsScreen(str(self.query_one("#status-details", Static).render())))
+            return
+        self._details_open = not self._details_open
+        self.query_one("#status-details", Static).display = self._details_open
+
+    async def _refresh_pending_queue(self) -> None:
+        await self.query_one(PendingQueue).update_items(
+            self._turn_runner.pending_inputs,
+            paused=self._turn_runner.queue_paused,
+            busy=self._is_streaming,
+        )
+        self._fit_chat_panels()
+
+    def _refresh_plan_panel(self) -> None:
+        self.query_one(PlanPanel).update_snapshot(
+            self._session_controller.plan_snapshot,
+            busy=self._is_streaming,
+            phase=self._session_controller.work_phase,
+        )
+        if self.size.height < 24 and self._pending_permissions:
+            self.query_one(PlanPanel).display = False
+        self._fit_chat_panels()
+
+    def _fit_chat_panels(self) -> None:
+        """小终端先给输入和 HUD 留出位置，其余区域在自己的视口内滚动。"""
+        if not self.is_mounted:
+            return
+        short = self.size.height < 24
+        approval = self.query_one("#approval-region", Vertical)
+        queue = self.query_one(PendingQueue)
+        plan = self.query_one(PlanPanel)
+        if not short:
+            self.query_one(BannerWidget).styles.height = "auto"
+            self.query_one(BannerWidget).styles.margin = (0 if self._chat_started else 1, 2, 0, 2)
+            self.query_one("#chat-view").styles.margin = (0 if self._chat_started else 1, 1, 0, 1)
+            approval.styles.max_height = 12
+            approval.styles.height = "auto"
+            queue.styles.max_height = 8
+            plan.styles.max_height = 6
+            self.query_one("#plan-preview", Static).styles.max_height = 4
+            for panel in self.query(InlinePermissionPanel):
+                panel.set_compact(False)
+                panel.styles.height = "auto"
+                panel.styles.max_height = 12
+            return
+        self._details_open = False
+        self.query_one("#status-details", Static).display = False
+        self.query_one(BannerWidget).styles.height = 1
+        self.query_one(BannerWidget).styles.margin = (0, 2, 0, 2)
+        self.query_one("#chat-view").styles.margin = (0, 1, 0, 1)
+        self.query_one(CommandHintBar).styles.max_height = 1
+        composer = self.query_one(ComposerTextArea)
+        line_limit = 1 if self._pending_permissions else 3
+        lines = max(1, min(line_limit, composer.wrapped_document.height))
+        composer.styles.height = lines
+        self.query_one("#composer").styles.height = lines + 1
+        # 预留横幅、阶段、聊天、完整 HUD、输入边框与操作行。
+        hud_extra = 1 if self.size.width < 48 else 0
+        budget = max(3, self.size.height - 8 - lines - hud_extra)
+        queue_height = min(3, budget) if queue.display else 0
+        queue.styles.max_height = max(1, queue_height)
+        budget -= queue_height
+        plan.styles.max_height = 2
+        self.query_one("#plan-preview", Static).styles.max_height = 1
+        if plan.display:
+            budget -= 2
+        permission_height = 3
+        approval.styles.height = permission_height if self._pending_permissions else "auto"
+        approval.styles.max_height = permission_height
+        for panel in self.query(InlinePermissionPanel):
+            panel.set_compact(True)
+            panel.styles.height = permission_height
+            panel.styles.max_height = permission_height
+
+    @on(Button.Pressed, "#composer-actions Button")
+    async def handle_composer_button(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id
+        if button_id == "chat-model":
+            await self._execute_slash_command("model", "")
+        elif button_id == "chat-policy":
+            self.push_screen(PermissionPolicyScreen(), self._handle_policy_selected)
+        elif button_id == "chat-details":
+            self.action_toggle_details()
+        elif button_id in {"chat-steer", "chat-queue"}:
+            composer = self.query_one(ComposerTextArea)
+            await self.handle_input_submitted(ComposerSubmitted(composer, composer.text, "steer" if button_id == "chat-steer" else "follow_up"))
+
+    @on(ChatAction)
+    async def handle_chat_action(self, event: ChatAction) -> None:
+        event.stop()
+        try:
+            if event.action == "phase":
+                if not self._is_streaming:
+                    self._apply_turn_event(self._turn_runner.set_phase(event.value))
+                    self._refresh_status_bar()
+                    self._refresh_plan_panel()
+                    await self._refresh_command_ui()
+            elif event.action == "focus-composer":
+                self.query_one(ComposerTextArea).focus()
+            elif event.action == "queue-toggle":
+                if self._turn_runner.queue_paused:
+                    self._turn_runner.resume_queue()
+                    self._start_next_queued()
+                else:
+                    self._turn_runner.pause_queue()
+            elif event.action == "queue-delete":
+                self._turn_runner.remove_pending_input(event.value)
+            elif event.action == "queue-convert":
+                item = next((item for item in self._turn_runner.pending_inputs if item.id == event.value), None)
+                if item is not None:
+                    self._turn_runner.convert_pending_input(item.id, "follow_up" if item.delivery == "steer" else "steer")
+            elif event.action == "queue-edit":
+                item = next((item for item in self._turn_runner.pending_inputs if item.id == event.value), None)
+                if item is not None:
+                    self._turn_runner.pause_queue()
+                    self.push_screen(PendingInputEditor(item.text), lambda text: self._save_pending_edit(item.id, text))
+            elif event.action in {"plan-review", "plan-execute"}:
+                snapshot = self._session_controller.plan_snapshot
+                if snapshot is not None:
+                    session_id = self._session_controller.session_id
+                    if event.action == "plan-review":
+                        self.push_screen(PlanReviewScreen(session_id, snapshot, can_execute=snapshot.ready and not self._is_streaming), self._handle_plan_accepted)
+                    else:
+                        self._handle_plan_accepted((session_id, snapshot.digest))
+        except (LanCherError, ValueError, RuntimeError) as exc:
+            self.notify(str(exc), title="未能完成操作", severity="warning")
+        await self._refresh_pending_queue()
+
+    def _save_pending_edit(self, item_id: str, text: str | None) -> None:
+        if text is not None:
+            try:
+                self._turn_runner.update_pending_input(item_id, text)
+            except (LanCherError, ValueError, RuntimeError) as exc:
+                self.notify(str(exc), severity="warning")
+            else:
+                self.notify("已保存，队列保持暂停；准备好后点击继续队列。", title="待发送内容")
+        self.call_later(self._refresh_pending_queue)
+
+    def _handle_plan_accepted(self, value: tuple[str, str] | None) -> None:
+        if value is None:
+            return
+        try:
+            text = self._turn_runner.prepare_plan_execution(*value)
+        except (LanCherError, ValueError, RuntimeError) as exc:
+            self.notify(str(exc), title="计划需要重新确认", severity="warning")
+            return
+        self._refresh_mode_chrome()
+        self._begin_turn(text)
+
+    def _handle_policy_selected(self, policy: str | None) -> None:
+        if policy is not None:
+            try:
+                self._apply_turn_event(self._turn_runner.set_permission_policy(policy))
+            except (LanCherError, ValueError, RuntimeError) as exc:
+                self.notify(str(exc), severity="warning")
+        self._refresh_status_bar()
+        self.query_one(ComposerTextArea).focus()
+
+    def _apply_ui_settings(self, ui_config: UIConfig) -> None:
+        self._ui_config = ui_config
+        apply_theme(self, getattr(ui_config, "theme", "dark"))
+        for widget in self._message_widgets.values():
+            widget._show_thinking = ui_config.show_thinking_status
+            widget._sync_view()
+        self.query_one(BannerWidget).refresh()
+        self._refresh_status_bar()
+
+    def _apply_models_settings(self, config) -> str | None:
+        self._turn_runner.reload_models(config)
+        self._refresh_status_bar()
+        self._refresh_context_usage()
+        return self._turn_runner.model_ref
 
     async def _refresh_command_ui(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
         menu = self.query_one(SlashCommandMenu)
         hint_bar = self.query_one(CommandHintBar)
         composer.clear_accepted_slash_command_if_needed()
+        if self._is_streaming:
+            self._slash_menu_matches = []
+            self._slash_menu_index = 0
+            composer.slash_menu_active = False
+            await menu.set_candidates([], None)
+            hint_bar.set_hint("")
+            return
 
         cursor_at_end = composer.cursor_location == composer.document.end
         sessions = self._session_controller.list_saved_sessions() if cursor_at_end else []
@@ -832,24 +984,34 @@ class LanCherTextualApp(App[int]):
             return None
 
         if command_name == "do":
-            self._apply_turn_event(self._turn_runner.restore_mode_after_plan())
+            self._apply_turn_event(self._turn_runner.set_phase("execute"))
             self._refresh_status_bar()
             self._refresh_context_usage()
-            return None
+            self._refresh_plan_panel()
+            return arguments_text.strip() or None
 
-        if command_name == "plan":
-            self._apply_turn_event(self._turn_runner.set_mode("plan"))
+        if command_name in {"plan", "discuss"}:
+            self._apply_turn_event(self._turn_runner.set_phase(command_name))
             self._refresh_status_bar()
             self._refresh_context_usage()
+            self._refresh_plan_panel()
             payload = arguments_text.strip()
             if not payload:
                 return None
             return payload
 
+        if command_name == "status":
+            self.action_toggle_details()
+            return None
+
+        if command_name == "permissions":
+            self.push_screen(PermissionPolicyScreen(), self._handle_policy_selected)
+            return None
+
         if command_name == "mode":
             requested_mode = arguments_text.strip()
             if requested_mode not in set(MODE_SEQUENCE):
-                self._status_hint = "Unknown mode"
+                self._status_hint = "未知模式"
                 self._refresh_status_bar()
                 return None
             self._apply_turn_event(self._turn_runner.set_mode(requested_mode))  # type: ignore[arg-type]
@@ -874,10 +1036,16 @@ class LanCherTextualApp(App[int]):
 
         if command_name == "settings":
             if self._settings_service is None:
-                self._status_hint = "Settings unavailable"
+                self._status_hint = "设置暂不可用"
                 self._refresh_status_bar()
                 return None
-            self.push_screen(SettingsScreen(self._settings_service), self._handle_settings_result)
+            self.push_screen(SettingsScreen(
+                self._settings_service,
+                current_model_ref=getattr(self._turn_runner, "model_ref", None),
+                on_models_saved=self._apply_models_settings,
+                on_model_selected=self._handle_model_selected,
+                on_ui_saved=self._apply_ui_settings,
+            ), self._handle_settings_result)
             return None
 
         if command_name == "compact":
@@ -902,7 +1070,7 @@ class LanCherTextualApp(App[int]):
                 )
             finally:
                 self._is_streaming = False
-                self._status_hint = "Ready"
+                self._status_hint = "就绪"
                 composer.disabled = False
                 composer.focus()
                 self._refresh_status_bar()
@@ -992,22 +1160,26 @@ class LanCherTextualApp(App[int]):
         self._refresh_composer_placeholder()
         self._refresh_status_bar()
         self._refresh_context_usage()
+        self._refresh_plan_panel()
+        await self._refresh_pending_queue()
         chat_view.scroll_end(animate=False)
 
     def _handle_settings_result(self, result: SettingsResult | None) -> None:
         if result is not None and result.saved:
             try:
-                if result.config is not None:
+                if result.config is not None and not getattr(result, "runtime_applied", False):
                     fallback = self._turn_runner.reload_models(result.config)
                     if fallback:
                         self.notify(self._turn_runner.model_notice, title="模型")
+                if result.config is not None:
+                    self._apply_ui_settings(result.config.ui)
             except (LanCherError, ValueError, RuntimeError, OSError) as exc:
                 self.notify(f"设置已保存，当前模型更新失败：{exc}", title="模型", severity="error", timeout=10)
                 self._status_hint = "模型更新失败"
             else:
                 self._status_hint = "设置已保存 · MCP 重启后生效" if result.restart_required else "设置已保存"
         else:
-            self._status_hint = "Ready"
+            self._status_hint = "就绪"
         self._refresh_status_bar()
         self._refresh_context_usage()
         self.call_later(self._refresh_command_ui)
@@ -1019,7 +1191,7 @@ class LanCherTextualApp(App[int]):
             return ()
         return tuple((ref, model_display_name(config, ref)) for ref in iter_model_refs(config))
 
-    def _handle_model_selected(self, model_ref: str | None) -> None:
+    def _handle_model_selected(self, model_ref: str | None) -> str | None:
         if model_ref is not None:
             try:
                 self._turn_runner.switch_model(model_ref)
@@ -1028,12 +1200,14 @@ class LanCherTextualApp(App[int]):
             else:
                 config = self._turn_runner.model_config
                 label = model_display_name(config, model_ref)
-                self._status_hint = "Ready"
+                self._status_hint = "就绪"
                 self.notify(f"已切换为 {label}", title="模型")
                 self._refresh_status_bar()
                 self._refresh_context_usage()
-        self.query_one("#composer-input", ComposerTextArea).focus()
+        if len(self.screen_stack) == 1:
+            self.query_one("#composer-input", ComposerTextArea).focus()
         self.call_later(self._refresh_command_ui)
+        return getattr(self._turn_runner, "model_ref", None)
 
     def _update_composer_height(self) -> None:
         composer_input = self.query_one("#composer-input", ComposerTextArea)
@@ -1045,11 +1219,7 @@ class LanCherTextualApp(App[int]):
         )
         composer_input.styles.height = str(visible_lines)
         composer.styles.height = str(visible_lines + COMPOSER_FRAME_HEIGHT)
-
-
-def _next_runtime_mode(current_mode: RuntimeMode) -> RuntimeMode:
-    current_index = MODE_SEQUENCE.index(current_mode)
-    return MODE_SEQUENCE[(current_index + 1) % len(MODE_SEQUENCE)]
+        self._fit_chat_panels()
 
 
 class ChatTUI:

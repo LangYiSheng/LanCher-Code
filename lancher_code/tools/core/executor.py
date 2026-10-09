@@ -11,9 +11,12 @@ from lancher_code.models import (
     PermissionRequest,
     PermissionResolution,
     RuntimeMode,
+    WorkPhase,
+    PermissionPolicy,
     ToolCall,
     ToolContext,
     ToolExecutionResult,
+    tool_available_in_phase,
 )
 from lancher_code.permission_engine import PermissionCheck, PermissionEngine
 from lancher_code.tools.core.file_state_cache import FileStateCache
@@ -44,15 +47,20 @@ class ToolExecutor:
         calls: list[ToolCall],
         *,
         mode: RuntimeMode = "default",
+        work_phase: WorkPhase | None = None,
+        permission_policy: PermissionPolicy | None = None,
         plan_file_path: Path | None = None,
         cancellation_token: CancellationToken | None = None,
         permission_resolver: PermissionResolver | None = None,
         available_tool_names: set[str] | None = None,
+        should_interrupt: Callable[[], bool] | None = None,
     ) -> list[ToolExecutionResult]:
         context = ToolContext(
             cwd=self._cwd,
             timeout_seconds=self._timeout_seconds,
             mode=mode,
+            work_phase=work_phase,
+            permission_policy=permission_policy,
             project_root=self._cwd,
             plan_file_path=plan_file_path,
             cancellation_token=cancellation_token,
@@ -61,40 +69,23 @@ class ToolExecutor:
         results: list[ToolExecutionResult] = []
         safe_batch: list[ToolCall] = []
 
-        for call in calls:
+        for index, call in enumerate(calls):
             self._raise_if_cancelled(context)
-            if available_tool_names is not None and call.tool_name not in available_tool_names:
-                if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver))
-                    safe_batch = []
-                results.append(
-                    ToolExecutionResult(
-                        call_id=call.call_id,
-                        tool_name=call.tool_name,
-                        content=(
-                            f"{call.tool_name} 尚未加载。"
-                            "请先调用 tool_search，再在下一次模型请求中调用该工具。"
-                        ),
-                        is_error=True,
-                        metadata={"requires_tool_search": True},
-                        summary=f"{call.tool_name} 尚未加载",
-                        error_code="tool_not_found",
-                        error_message=f"{call.tool_name} 尚未加载。",
-                    )
-                )
-                continue
+            if should_interrupt is not None and should_interrupt():
+                results.extend(self._superseded(item) for item in [*safe_batch, *calls[index:]])
+                return results
             try:
                 tool = self._registry.get(call.tool_name)
             except ToolNotFoundError:
                 if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver))
+                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
                     safe_batch = []
-                results.append(await self._execute_one(call, context, permission_resolver))
+                results.append(await self._execute_one(call, context, permission_resolver, should_interrupt))
                 continue
 
-            if mode not in tool.definition.allowed_modes:
+            if not tool_available_in_phase(tool.definition, context.work_phase):
                 if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver))
+                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
                     safe_batch = []
                 results.append(
                     ToolExecutionResult(
@@ -102,10 +93,28 @@ class ToolExecutor:
                         tool_name=call.tool_name,
                         content=f"{call.tool_name} 在当前模式下不可用。",
                         is_error=True,
-                        metadata={"mode": mode},
+                        metadata={"work_phase": context.work_phase, "permission_policy": context.permission_policy},
                         summary=f"{call.tool_name} 在当前模式下不可用",
-                        error_code="mode_disallowed",
+                        error_code="phase_disallowed",
                         error_message=f"{call.tool_name} 在当前模式下不可用。",
+                    )
+                )
+                continue
+
+            if available_tool_names is not None and call.tool_name not in available_tool_names:
+                if safe_batch:
+                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
+                    safe_batch = []
+                if should_interrupt is not None and should_interrupt():
+                    results.extend(self._superseded(item) for item in calls[index:])
+                    return results
+                results.append(
+                    ToolExecutionResult(
+                        call_id=call.call_id, tool_name=call.tool_name,
+                        content=f"{call.tool_name} 尚未加载。请先调用 tool_search，再在下一次模型请求中调用该工具。",
+                        is_error=True, metadata={"requires_tool_search": True},
+                        summary=f"{call.tool_name} 尚未加载", error_code="tool_not_found",
+                        error_message=f"{call.tool_name} 尚未加载。",
                     )
                 )
                 continue
@@ -115,12 +124,12 @@ class ToolExecutor:
                 continue
 
             if safe_batch:
-                results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver))
+                results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
                 safe_batch = []
-            results.append(await self._execute_one(call, context, permission_resolver))
+            results.append(await self._execute_one(call, context, permission_resolver, should_interrupt))
 
         if safe_batch:
-            results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver))
+            results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt))
 
         return results
 
@@ -129,8 +138,11 @@ class ToolExecutor:
         calls: list[ToolCall],
         context: ToolContext,
         permission_resolver: PermissionResolver | None,
+        should_interrupt: Callable[[], bool] | None = None,
     ) -> list[ToolExecutionResult]:
-        tasks = [asyncio.create_task(self._execute_one(call, context, permission_resolver)) for call in calls]
+        if should_interrupt is not None and should_interrupt():
+            return [self._superseded(call) for call in calls]
+        tasks = [asyncio.create_task(self._execute_one(call, context, permission_resolver, should_interrupt)) for call in calls]
         try:
             return list(await asyncio.gather(*tasks))
         except asyncio.CancelledError:
@@ -144,8 +156,11 @@ class ToolExecutor:
         call: ToolCall,
         context: ToolContext,
         permission_resolver: PermissionResolver | None,
+        should_interrupt: Callable[[], bool] | None = None,
     ) -> ToolExecutionResult:
         self._raise_if_cancelled(context)
+        if should_interrupt is not None and should_interrupt():
+            return self._superseded(call)
         try:
             tool = self._registry.get(call.tool_name)
         except ToolNotFoundError as exc:
@@ -166,6 +181,8 @@ class ToolExecutor:
             tool_name=tool.definition.name,
             permission_check=permission_check,
             permission_resolver=permission_resolver,
+            should_interrupt=should_interrupt,
+            context=context,
         )
         if maybe_denied is not None:
             return maybe_denied
@@ -215,6 +232,8 @@ class ToolExecutor:
         tool_name: str,
         permission_check: PermissionCheck,
         permission_resolver: PermissionResolver | None,
+        should_interrupt: Callable[[], bool] | None = None,
+        context: ToolContext | None = None,
     ) -> ToolExecutionResult | None:
         if permission_check.decision == "allow":
             return None
@@ -246,6 +265,12 @@ class ToolExecutor:
             )
 
         resolution = await permission_resolver(request)
+        if resolution.outcome == "superseded":
+            return self._superseded(call)
+        if context is not None:
+            self._raise_if_cancelled(context)
+        if should_interrupt is not None and should_interrupt():
+            return self._superseded(call)
         self._permission_engine.apply_resolution(request, resolution)
         if resolution.outcome in {"allow_once", "allow_session", "allow_project"}:
             return None
@@ -258,6 +283,14 @@ class ToolExecutor:
             summary="用户拒绝授权",
             error_code="permission_user_denied",
             error_message="用户拒绝了本次工具调用。",
+        )
+
+    @staticmethod
+    def _superseded(call: ToolCall) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            call_id=call.call_id, tool_name=call.tool_name, is_error=True,
+            content="用户已调整当前任务，此工具尚未执行。", summary="已跳过待执行工具",
+            error_code="steering_superseded", error_message="用户已调整当前任务，此工具尚未执行。",
         )
 
     @staticmethod

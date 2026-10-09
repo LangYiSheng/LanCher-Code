@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from lancher_code.tui_views.message import ToolActivityWidget
+
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 from rich.console import Console
-from rich.table import Table
 from rich.text import Text
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
@@ -199,7 +200,7 @@ async def test_tui_composer_placeholder_is_minimal_in_normal_mode(
         composer = app.query_one("#composer-input", ComposerTextArea)
         status_left = app.query_one("#status-left", Static)
         assert composer.placeholder == "发送一条消息"
-        assert str(status_left.render()) == "gpt-test (OpenAI)"
+        assert str(status_left.render()) == "gpt-test · 执行 · 逐次确认"
         hint_bar = app.query_one(CommandHintBar)
         assert not hint_bar.display
 
@@ -220,50 +221,20 @@ async def test_chat_view_keeps_balanced_horizontal_gutters(
 
 
 @pytest.mark.asyncio
-async def test_shift_tab_cycles_permission_mode_and_updates_status_left(
-    openai_provider_config,
-    ui_config,
-    tmp_path: Path,
+async def test_shift_tab_cycles_work_phase_without_changing_permission(
+    openai_provider_config, ui_config, tmp_path: Path,
 ) -> None:
     app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
-
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
-        status_left = app.query_one("#status-left", Static)
-        prompt_glyph = app.query_one("#prompt-glyph", Static)
-
         composer.focus()
-        await pilot.press("shift+tab")
-        await pilot.pause(0.05)
-        assert session.runtime_mode == "plan"
-        assert composer.placeholder == "Plan Mode: 继续补充或修改计划"
-        assert str(status_left.render()) == "计划模式"
-        assert status_left.has_class("-plan")
-        assert str(prompt_glyph.render()) == "#"
-
-        await pilot.press("shift+tab")
-        await pilot.pause(0.05)
-        assert session.runtime_mode == "acceptEdits"
-        assert str(status_left.render()) == "允许编辑"
-        assert status_left.has_class("-acceptEdits")
-        assert str(prompt_glyph.render()) == "+"
-
-        await pilot.press("shift+tab")
-        await pilot.pause(0.05)
-        assert session.runtime_mode == "bypass"
-        assert str(status_left.render()) == "完全访问"
-        assert status_left.has_class("-bypass")
-        assert str(prompt_glyph.render()) == "!"
-
-        await pilot.press("shift+tab")
-        await pilot.pause(0.05)
-        assert session.runtime_mode == "default"
-        assert composer.placeholder == "发送一条消息"
-        assert str(status_left.render()) == "gpt-test (OpenAI)"
-        assert not status_left.has_class("-plan")
-        assert not status_left.has_class("-acceptEdits")
-        assert not status_left.has_class("-bypass")
-        assert str(prompt_glyph.render()) == ">"
+        for expected in ("discuss", "plan", "execute"):
+            await pilot.press("shift+tab")
+            await pilot.pause(0.05)
+            assert session.work_phase == expected
+            assert session.permission_policy == "default"
+            assert "gpt-test" in str(app.query_one("#status-left", Static).render())
+            assert app.query_one(f"#phase-{expected}").has_class("-selected")
 
 
 def _visible_slash_commands(app: LanCherTextualApp) -> list[str]:
@@ -359,24 +330,19 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
         menu = app.query_one(SlashCommandMenu)
         assert menu.display
         assert _visible_slash_commands(app) == [
-            "plan",
-            "mode",
-            "session",
-            "compact",
-            "settings",
-            "model",
-            "exit",
+            "discuss", "plan", "do", "mode", "session", "compact", "settings",
+            "permissions", "status", "model", "exit",
         ]
 
         composer.text = "/p"
         composer.cursor_location = composer.document.end
         await pilot.pause(0.05)
-        assert _visible_slash_commands(app) == ["plan"]
+        assert _visible_slash_commands(app) == ["plan", "permissions"]
 
         composer.text = "/d"
         composer.cursor_location = composer.document.end
         await pilot.pause(0.05)
-        assert not menu.display
+        assert _visible_slash_commands(app) == ["discuss", "do"]
 
 
 @pytest.mark.asyncio
@@ -446,7 +412,7 @@ async def test_slash_menu_accepts_selection_without_submitting(
         await pilot.press("enter")
         await pilot.pause(0.05)
 
-        assert composer.text == "/plan "
+        assert composer.text == "/discuss "
         assert len(provider.requests) == 0
         assert not app.query_one(SlashCommandMenu).display
 
@@ -469,7 +435,7 @@ async def test_slash_menu_accepts_selection_with_tab_without_submitting(
         await pilot.press("tab")
         await pilot.pause(0.05)
 
-        assert composer.text == "/plan "
+        assert composer.text == "/discuss "
         assert len(provider.requests) == 0
         assert not app.query_one(SlashCommandMenu).display
 
@@ -574,7 +540,7 @@ async def test_command_hint_updates_for_selected_command(
 
         hint_bar = app.query_one(CommandHintBar)
         assert hint_bar.display
-        assert "继续补充或修改计划" in str(hint_bar.render())
+        assert "制定计划" in str(hint_bar.render())
         assert "参数可选：任务描述" in str(hint_bar.render())
 
 
@@ -645,9 +611,9 @@ async def test_tui_streams_single_turn_by_message_id(
         assert len(provider.requests) == 1
         assert app.query_one("#composer-input", ComposerTextArea).text == ""
         status_left = app.query_one("#status-left", Static)
-        status_right = app.query_one("#status-right", Static)
-        assert str(status_left.render()) == "gpt-test (OpenAI)"
-        assert "gpt-test" not in str(status_right.render())
+        status_right = app.query_one("#status-details", Static)
+        assert str(status_left.render()) == "gpt-test · 执行 · 逐次确认"
+        assert "本次模型：gpt-test" in str(status_right.render())
         assert "Tokens In 3" in str(status_right.render())
         assert "cached" not in str(status_right.render())
         assert "Out 2" in str(status_right.render())
@@ -674,7 +640,7 @@ async def test_tui_shows_cached_input_tokens_when_present(
         await _submit_message(app, pilot, "浣犲ソ")
         await pilot.pause(0.1)
 
-        status_right = app.query_one("#status-right", Static)
+        status_right = app.query_one("#status-details", Static)
         assert "Tokens In 3 (cached 1)" in str(status_right.render())
         assert "Out 2" in str(status_right.render())
 
@@ -753,16 +719,16 @@ async def test_banner_collapses_after_first_submission(
         banner = app.query_one(BannerWidget)
         assert banner.compact is True
         renderable = banner.render()
-        assert isinstance(renderable, Table)
+        assert isinstance(renderable, Text)
         console = Console(width=120, color_system=None)
         with console.capture() as capture:
             console.print(renderable)
         header_text = capture.get()
         assert "LanCher Code" in header_text
-        assert "cwd:" in header_text
-        assert "MCP 0/0" in header_text
-        assert "上下文 " in header_text
-        assert "%" in header_text
+        assert banner._cwd.name in header_text
+        assert "MCP" not in header_text
+        assert "上下文" not in header_text
+        assert len(header_text.splitlines()) == 1
         assert app.query_one("#chat-view", VerticalScroll).has_class("-banner-collapsed")
 
 
@@ -807,11 +773,11 @@ async def test_thinking_trace_is_collapsed_by_default_and_can_expand(
             (formatted.plain[span.start : span.end], span.style)
             for span in formatted.spans
         }
-        assert ("先整理一下思路", "#a8b9cc") in segments
+        assert ("先整理一下思路", "#929aa7") in segments
 
 
 @pytest.mark.asyncio
-async def test_tui_renders_tool_flow_inside_thinking_trace(
+async def test_tui_separates_tool_flow_from_thinking_trace(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
@@ -853,8 +819,12 @@ async def test_tui_renders_tool_flow_inside_thinking_trace(
         await pilot.pause(0.05)
         rendered = trace_widget.query_one(".thinking-trace-body", Static).render()
         assert "先调用工具" in rendered.plain
-        assert "● echo_tool(value=hello)" in rendered.plain
-        assert "✓ 执行成功: hello" in rendered.plain
+        assert "echo_tool" not in rendered.plain
+        activity = list(app.query(ToolActivityWidget))[-1]
+        activity.toggle_collapsed()
+        tool_rendered = activity.query_one(".tool-trace-body", Static).render()
+        assert "● echo_tool(value=hello)" in tool_rendered.plain
+        assert "✓ 执行成功: hello" in tool_rendered.plain
 
         formatted = _format_trace_entries(assistant.trace.entries)
         assert isinstance(formatted, Text)
@@ -862,14 +832,14 @@ async def test_tui_renders_tool_flow_inside_thinking_trace(
             (formatted.plain[span.start : span.end], span.style)
             for span in formatted.spans
         }
-        assert ("先调用工具", "#a8b9cc") in segments
-        assert ("● echo_tool(value=hello)", "#73b6ff") in segments
-        assert ("✓ 执行成功: hello", "#78d98a") in segments
-        assert ("再整理一下", "#a8b9cc") in segments
+        assert ("先调用工具", "#929aa7") in segments
+        assert ("● echo_tool(value=hello)", "#83b6f6") in segments
+        assert ("✓ 执行成功: hello", "#93c7a0") in segments
+        assert ("再整理一下", "#929aa7") in segments
 
 
 @pytest.mark.asyncio
-async def test_thinking_trace_expands_while_streaming_and_auto_collapses_when_done(
+async def test_thinking_trace_preserves_user_expansion_across_updates(
     openai_provider_config,
     ui_config,
     tmp_path: Path,
@@ -891,13 +861,14 @@ async def test_thinking_trace_expands_while_streaming_and_auto_collapses_when_do
         await pilot.pause(0.05)
 
         trace_widget = list(app.query(ThinkingTraceWidget))[-1]
+        assert trace_widget.collapsed is True
+        trace_widget.toggle_collapsed()
         assert trace_widget.collapsed is False
-        assert session.state.messages[-1].trace.collapsed is False
 
         await pilot.pause(0.35)
 
         trace_widget = list(app.query(ThinkingTraceWidget))[-1]
-        assert trace_widget.collapsed is True
+        assert trace_widget.collapsed is False
         assert session.state.messages[-1].trace.collapsed is True
 
 

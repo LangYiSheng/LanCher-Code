@@ -26,12 +26,12 @@ def test_session_controller_filters_tools_for_plan_mode(openai_provider_config, 
     )
 
     tool_names = [tool.name for tool in request.tools]
-    assert tool_names == ["read_file", "bash", "glob", "grep", "write_plan_file", "tool_search"]
+    assert tool_names == ["read_file", "glob", "grep", "write_plan_file", "tool_search"]
     assert "write_file" not in tool_names
     assert "edit_file" not in tool_names
 
 
-def test_bash_tool_allows_readonly_command_in_plan_mode(tmp_path: Path) -> None:
+def test_bash_tool_rejects_even_readonly_command_in_plan_mode(tmp_path: Path) -> None:
     tool = BashTool()
 
     result = __import__("asyncio").run(
@@ -41,7 +41,8 @@ def test_bash_tool_allows_readonly_command_in_plan_mode(tmp_path: Path) -> None:
         )
     )
 
-    assert result.ok is True
+    assert result.ok is False
+    assert result.error_code == "plan_mode_command_rejected"
     assert result.payload["description"] == "查看当前目录"
 
 

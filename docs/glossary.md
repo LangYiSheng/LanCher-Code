@@ -10,23 +10,26 @@
 | Dynamic reminder | 随会话状态变化的 `<system-reminder>` 提醒（如 Plan Mode 状态） |
 | Tool Loop（工具循环） | 模型请求 → 调用工具 → 结果回传 → 再次请求的循环，上限 `tool_loop_limit` |
 
-## 模式与权限
+## 阶段与权限
 
 | 名称 | 含义 |
 |---|---|
-| `RuntimeMode` | 权限模式：`default` / `plan` / `acceptEdits` / `bypass` |
-| Plan Mode | 规划模式：只读探索 + 只允许写计划文件（`./.lancher/plan.md`） |
-| `PermissionRule` | 权限规则：`{match, result}`，match 形如 `Bash(git *)` |
+| `WorkPhase` | 工作阶段：`discuss`（讨论）/ `plan`（计划）/ `execute`（执行），限定工具范围 |
+| `PermissionPolicy` | 权限策略：`default`（逐次确认）/ `acceptEdits`（自动编辑）/ `bypass`（跳过询问），不能突破阶段边界 |
+| `RuntimeMode` | 旧接口兼容类型；新状态分别保存工作阶段和权限策略 |
+| Plan Mode | 计划阶段：只读探索 + 专用计划写入，权限策略保持不变 |
+| `PermissionRule` | 权限规则：`{match, result, match_kind}`，match 形如 `Bash(git *)` |
+| `match_kind` | `exact` 精确匹配、`glob` 显式通配、`legacy` 旧规则兼容；新授权默认精确匹配 |
 | Rule scope | 规则作用域：`session`（内存）/ `project`（`./.lancher/permissions.yaml`）/ `user`（`~/.lancher/permissions.yaml`） |
 | PermissionResolution | 用户对权限请求的决议：`allow_once` / `allow_session` / `allow_project` / `deny` |
-| Human-in-the-loop | 人在回路：规则与模式未放行时弹窗由用户决定 |
+| Human-in-the-loop | 人在回路：阶段允许且规则与权限策略未放行时，由界面中的权限提示请用户决定 |
 
 ## 工具
 
 | 名称 | 含义 |
 |---|---|
-| `ToolDefinition` | 暴露给模型的工具定义（名称/描述/JSON Schema/分类/模式） |
-| `ToolContext` | 工具执行上下文（cwd、模式、项目根、超时、取消令牌、文件状态缓存） |
+| `ToolDefinition` | 暴露给模型的工具定义（名称/描述/JSON Schema/分类/工具可用性） |
+| `ToolContext` | 工具执行上下文（cwd、阶段、权限策略、项目根、超时、取消令牌、文件状态缓存） |
 | `ToolExecutionResult` | 工具执行结果（content、is_error、error_code 等） |
 | `FileStateCache` | 文件读写状态缓存，用于"先读后写"守卫 |
 | 路径沙箱 | 文件类工具只能访问项目根内路径（解析符号链接后判定） |
@@ -38,7 +41,9 @@
 | 名称 | 含义 |
 |---|---|
 | JSONL | 每行一个 JSON 对象的文本格式，会话文件使用（`.lancher/session/*.jsonl`） |
-| 会话格式版本 | 当前 `SESSION_FORMAT_VERSION = 3`，兼容读取 v1/v2 |
+| 会话格式版本 | 当前 `SESSION_FORMAT_VERSION = 4`，兼容读取 v1/v2/v3 |
+| `PlanSnapshot` | 绑定当前会话的计划正文、内容摘要、来源消息与就绪标记；执行确认的来源 |
+| `PendingInput` | 工作中投递的输入：`follow_up` 排到下一轮或 `steer` 补充当前任务；恢复会话后均暂停 |
 | `ContextUsageAnchor` | 用量锚点：上次请求快照，用于增量 token 估算 |
 | Tool result offload（结果卸载） | 大工具结果从请求中移出、落盘到 `.lancher/context/<context_id>/tool-results/`，上下文里只留预览 |
 | Context compaction（压缩） | 把旧轮次交给模型生成 `<summary>` 摘要，替换原始消息 |
@@ -48,6 +53,9 @@
 
 | 名称 | 含义 |
 |---|---|
+| 模型引用 | 稳定的 `provider_id/model_id`；名称修改不改变引用 |
+| 本次对话模型 | 当前会话实际使用的模型，切换后用于下一次请求 |
+| 新对话默认模型 | 新建对话时选用的模型，修改它不会切换本次对话 |
 | `ChatProvider` | 模型供应商抽象接口（`stream_chat()` 返回 `StreamEvent` 流） |
 | `StreamEvent` | 统一流事件：`text_delta` / `thinking_delta` / `tool_call_delta` / `message_end` 等 |
 | `ToolCallAssembler` | 把流式工具调用分片（名称/参数 JSON）拼接成完整 `ToolCall` |
@@ -76,6 +84,6 @@
 | 名称 | 含义 |
 |---|---|
 | `app.py run_app()` | 应用装配入口 |
-| `ConfigBootstrapTUI` | 首次启动配置引导界面 |
+| `ConfigBootstrapTUI` | 连接供应商、添加模型、确认并开始的三步首次配置界面 |
 | `TurnEvent` | TurnRunner → TUI 的事件（`user_message_created`、`tool_result_received` 等） |
-| `SlashCommand` | 斜杠命令（`/plan`、`/do`、`/mode`、`/session`、`/compact`、`/settings`、`/exit`） |
+| `SlashCommand` | 斜杠命令（`/discuss`、`/plan`、`/do`、`/mode`、`/model`、`/session`、`/compact`、`/settings`、`/exit`） |

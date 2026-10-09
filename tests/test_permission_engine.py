@@ -4,10 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from lancher_code.models import PermissionResolution, PermissionRule, ToolCall, ToolContext
+from lancher_code.models import (
+    PermissionResolution, PermissionRule, ToolCall, ToolContext, ToolDefinition, ToolPermissionMetadata,
+)
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.tools.builtin.bash import BashTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
+from lancher_code.tools.builtin.write_plan_file import WritePlanFileTool
 
 
 def _call(tool_name: str, arguments: dict[str, object]) -> ToolCall:
@@ -126,6 +129,58 @@ def test_default_mode_asks_for_file_write(tmp_path: Path) -> None:
     assert check.request.kind == "file_edit"
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "phase", "policy", "arguments", "kind"),
+    [
+        ("bash", "execute", "acceptEdits", {"command": "git status"}, "command"),
+        ("write_file", "execute", "default", {"path": "demo.txt", "content": "hello"}, "file_edit"),
+        ("write_plan_file", "plan", "default", {"content": "1. 调查问题"}, "file_edit"),
+        ("mcp__github__create_issue", "execute", "acceptEdits", {"title": "问题"}, "external_tool"),
+    ],
+)
+def test_permission_request_metadata_uses_tool_context_not_process_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_name, phase, policy, arguments, kind,
+) -> None:
+    process_cwd = tmp_path / "launcher"
+    tool_cwd = tmp_path / "project"
+    process_cwd.mkdir()
+    tool_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    external_name = "mcp__github__create_issue"
+    definitions = {
+        "bash": BashTool().definition,
+        "write_file": WriteFileTool().definition,
+        "write_plan_file": WritePlanFileTool().definition,
+        external_name: ToolDefinition(
+            name=external_name, description="创建问题", category="command",
+            permission=ToolPermissionMetadata(
+                source="external", rule_key=external_name, display_name="GitHub 创建问题",
+                server_name="github", remote_tool_name="create_issue",
+            ),
+        ),
+    }
+    context = ToolContext(
+        cwd=tool_cwd, project_root=tool_cwd, timeout_seconds=1,
+        work_phase=phase, permission_policy=policy,
+        plan_file_path=tool_cwd / ".lancher" / "plan.md",
+    )
+
+    check = PermissionEngine().evaluate(
+        call=_call(tool_name, arguments), tool=definitions[tool_name], context=context,
+    )
+
+    assert check.decision == "ask" and check.request is not None
+    assert check.request.kind == kind
+    assert check.request.metadata["cwd"] == str(tool_cwd)
+    assert check.request.metadata["cwd"] != str(Path.cwd())
+    assert check.request.metadata["work_phase"] == check.request.work_phase == phase
+    assert check.request.metadata["permission_policy"] == check.request.permission_policy == policy
+    assert check.request.metadata["mode"] == context.mode
+    if kind == "external_tool":
+        assert check.request.metadata["server"] == "github"
+        assert check.request.metadata["remote_tool"] == "create_issue"
+
+
 def test_accept_edits_mode_allows_file_write(tmp_path: Path) -> None:
     engine = PermissionEngine(PermissionStorage())
 
@@ -159,7 +214,8 @@ def test_allow_project_resolution_persists_rule_to_project_file(tmp_path: Path) 
     )
 
     assert project_rules.exists()
-    assert "Bash(git *)" in project_rules.read_text(encoding="utf-8")
+    assert "Bash(git status)" in project_rules.read_text(encoding="utf-8")
+    assert "match_kind: exact" in project_rules.read_text(encoding="utf-8")
 
 
 def test_rule_glob_matches_command_prefix(tmp_path: Path) -> None:

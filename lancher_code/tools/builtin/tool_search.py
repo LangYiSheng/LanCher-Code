@@ -48,7 +48,7 @@ class ToolSearchTool:
 
         matches = self._registry.search_deferred(
             query,
-            mode=context.mode,
+            work_phase=context.work_phase,
             limit=TOOL_SEARCH_RESULT_LIMIT + 1,
         )
         if not matches:

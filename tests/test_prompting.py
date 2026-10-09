@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from lancher_code.models import PromptContext, ToolDefinition
+from lancher_code.models import PlanSnapshot, PromptContext, ToolDefinition
 from lancher_code import prompting as prompting_module
 
 
@@ -33,6 +33,7 @@ def _context(
         plan_mode_turn_count=plan_mode_turn_count,
         pending_plan_entry_kind=pending_plan_entry_kind,
         pending_plan_exit_notice=pending_plan_exit_notice,
+        plan_snapshot=PlanSnapshot.create("# plan", "assistant-plan") if plan_exists else None,
     )
 
 

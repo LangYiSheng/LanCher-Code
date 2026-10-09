@@ -18,9 +18,12 @@ from lancher_code.models import (
     PermissionRule,
     RuleScope,
     RuntimeMode,
+    PermissionPolicy,
+    PermissionMatchKind,
     ToolCall,
     ToolContext,
     ToolDefinition,
+    tool_available_in_phase,
 )
 from lancher_code.tools.core.common import ensure_path_in_root, relative_display_path, resolve_path_in_root
 
@@ -111,6 +114,7 @@ class _MatchTarget:
     tool_label: str
     value: str
     matcher: PermissionRuleMatcher
+    exact_value: str | None = None
 
 
 class PermissionStorage:
@@ -154,9 +158,11 @@ class PermissionStorage:
         if path is None:
             raise PermissionRuleFileError(f"{scope} 权限规则文件路径未配置。")
         normalized = [
-            PermissionRule(match=rule.match, result=rule.result, scope=scope)
+            PermissionRule(match=rule.match, result=rule.result, scope=scope, match_kind=rule.match_kind)
             for rule in rules
         ]
+        for rule in normalized:
+            _validate_match_kind(rule.match_kind)
         if persist:
             self._write_rules(path, normalized)
         if scope == "project":
@@ -164,11 +170,12 @@ class PermissionStorage:
         else:
             self._user_rules = normalized
 
-    def add_session_rule(self, match: str, result: Literal["allow", "deny"]) -> PermissionRule:
+    def add_session_rule(self, match: str, result: Literal["allow", "deny"], *, match_kind: PermissionMatchKind = "legacy") -> PermissionRule:
         normalized_match = match.strip()
         if not normalized_match:
             raise ValueError("session 权限规则的 match 不能为空。")
-        rule = PermissionRule(match=normalized_match, result=result, scope="session")
+        _validate_match_kind(match_kind)
+        rule = PermissionRule(match=normalized_match, result=result, scope="session", match_kind=match_kind)
         self._session_rules.append(rule)
         self._notify_session_rules_changed()
         return rule
@@ -186,7 +193,8 @@ class PermissionStorage:
                 raise ValueError("session 权限规则的 match 不能为空。")
             if rule.result not in {"allow", "deny"}:
                 raise ValueError("session 权限规则的 result 只能是 allow 或 deny。")
-            normalized.append(PermissionRule(match=match, result=rule.result, scope="session"))
+            _validate_match_kind(rule.match_kind)
+            normalized.append(PermissionRule(match=match, result=rule.result, scope="session", match_kind=rule.match_kind))
         self._session_rules = normalized
         if notify:
             self._notify_session_rules_changed()
@@ -199,12 +207,14 @@ class PermissionStorage:
         for callback in tuple(self._session_rule_callbacks):
             callback()
 
-    def add_project_rule(self, match: str, result: Literal["allow", "deny"]) -> PermissionRule:
+    def add_project_rule(self, match: str, result: Literal["allow", "deny"], *, match_kind: PermissionMatchKind = "legacy") -> PermissionRule:
         if self._project_rules_path is None:
             raise PermissionRuleFileError("当前会话没有配置项目级权限规则文件路径。")
-        rule = PermissionRule(match=match, result=result, scope="project")
-        self._project_rules.append(rule)
-        self._write_rules(self._project_rules_path, self._project_rules)
+        _validate_match_kind(match_kind)
+        rule = PermissionRule(match=match, result=result, scope="project", match_kind=match_kind)
+        updated = [*self._project_rules, rule]
+        self._write_rules(self._project_rules_path, updated)
+        self._project_rules = updated
         return rule
 
     @staticmethod
@@ -239,7 +249,10 @@ class PermissionStorage:
                 raise PermissionRuleFileError(f"权限规则第 {index} 项缺少合法的 match: {path}")
             if result not in {"allow", "deny"}:
                 raise PermissionRuleFileError(f"权限规则第 {index} 项的 result 只能是 allow 或 deny: {path}")
-            rules.append(PermissionRule(match=match.strip(), result=result, scope=scope))
+            match_kind = item.get("match_kind", "legacy")
+            if match_kind not in {"exact", "glob", "legacy"}:
+                raise PermissionRuleFileError(f"权限规则第 {index} 项的 match_kind 无效: {path}")
+            rules.append(PermissionRule(match=match.strip(), result=result, scope=scope, match_kind=match_kind))
         return rules
 
     @staticmethod
@@ -250,6 +263,7 @@ class PermissionStorage:
                 {
                     "match": rule.match,
                     "result": rule.result,
+                    "match_kind": rule.match_kind,
                 }
                 for rule in rules
             ]
@@ -273,6 +287,16 @@ class PermissionEngine:
         tool: ToolDefinition,
         context: ToolContext,
     ) -> PermissionCheck:
+        if not tool_available_in_phase(tool, context.work_phase):
+            return PermissionCheck(
+                decision="deny", reason_code="phase_disallowed",
+                reason_message=f"当前 {context.work_phase} 阶段不允许执行该工具。",
+                metadata={
+                    "mode": context.mode, "cwd": str(context.cwd),
+                    "work_phase": context.work_phase, "permission_policy": context.permission_policy,
+                    "tool_name": tool.name,
+                },
+            )
         try:
             target = self._build_match_target(call, tool, context)
         except ValueError as exc:
@@ -280,7 +304,11 @@ class PermissionEngine:
                 decision="deny",
                 reason_code="path_outside_project",
                 reason_message=str(exc),
-                metadata={"mode": context.mode, "tool_name": tool.name},
+                metadata={
+                    "mode": context.mode, "cwd": str(context.cwd),
+                    "work_phase": context.work_phase, "permission_policy": context.permission_policy,
+                    "tool_name": tool.name,
+                },
             )
         metadata = self._build_denied_metadata(call, tool, context, target)
 
@@ -293,16 +321,6 @@ class PermissionEngine:
                     reason_message=blacklist_message,
                     metadata=metadata,
                 )
-            if context.mode == "plan":
-                plan_rejection = validate_plan_command(target.value)
-                if plan_rejection is not None:
-                    return PermissionCheck(
-                        decision="deny",
-                        reason_code="plan_mode_command_rejected",
-                        reason_message=plan_rejection,
-                        metadata=metadata,
-                    )
-
         matched_rule = self._match_rules(target)
         if matched_rule is not None:
             return PermissionCheck(
@@ -312,7 +330,7 @@ class PermissionEngine:
                 metadata={**metadata, "rule_match": matched_rule.match, "rule_scope": matched_rule.scope},
             )
 
-        mode_decision = self._mode_decision(tool, context.mode)
+        mode_decision = self._policy_decision(tool, context.permission_policy)
         if mode_decision == "allow":
             return PermissionCheck(decision="allow", metadata=metadata)
         if mode_decision == "deny":
@@ -327,30 +345,30 @@ class PermissionEngine:
 
     def apply_resolution(self, request: PermissionRequest, resolution: PermissionResolution) -> None:
         if resolution.outcome == "allow_session" and request.session_rule:
-            self._storage.add_session_rule(request.session_rule, "allow")
+            self._storage.add_session_rule(request.session_rule, "allow", match_kind=request.match_kind)
         elif resolution.outcome == "allow_project" and request.project_rule:
-            self._storage.add_project_rule(request.project_rule, "allow")
+            self._storage.add_project_rule(request.project_rule, "allow", match_kind=request.match_kind)
 
     def _match_rules(self, target: _MatchTarget) -> PermissionRule | None:
         for scope in ("session", "project", "user"):
             matched: PermissionRule | None = None
             rules = self._storage.rules_for_scope(scope)  # type: ignore[arg-type]
             for rule in rules:
-                if _rule_matches(rule.match, target):
+                if _rule_matches(rule.match, target, rule.match_kind):
                     matched = rule
             if matched is not None:
                 return matched
         return None
 
     @staticmethod
-    def _mode_decision(tool: ToolDefinition, mode: RuntimeMode) -> PermissionDecision:
-        if mode == "bypass":
+    def _policy_decision(tool: ToolDefinition, policy: PermissionPolicy) -> PermissionDecision:
+        if policy == "bypass":
             return "allow"
         if tool.category == "read":
             return "allow"
         if tool.permission is not None and tool.permission.source == "external":
-            return "deny" if mode == "plan" else "ask"
-        if mode == "acceptEdits" and tool.category == "write" and tool.name != "bash":
+            return "ask"
+        if policy == "acceptEdits" and tool.category == "write" and tool.name != "bash":
             return "allow"
         return "ask"
 
@@ -365,7 +383,7 @@ class PermissionEngine:
         if tool.name == "bash":
             command = str(call.arguments.get("command", "")).strip()
             normalized = _normalize_command(command)
-            return _MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=normalized, matcher="glob")
+            return _MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=normalized, matcher="glob", exact_value=command)
         if tool.name == "write_plan_file":
             if context.plan_file_path is None:
                 relative_path = ".lancher/plan.md"
@@ -399,6 +417,12 @@ class PermissionEngine:
         target: _MatchTarget,
     ) -> PermissionRequest:
         request_id = f"perm-{uuid4().hex[:8]}"
+        metadata: dict[str, object] = {
+            "mode": context.mode,
+            "cwd": str(context.cwd),
+            "work_phase": context.work_phase,
+            "permission_policy": context.permission_policy,
+        }
         if tool.permission is not None and tool.permission.source == "external":
             arguments = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)
             if len(arguments) > 1000:
@@ -411,13 +435,15 @@ class PermissionEngine:
                 tool_label=tool.permission.display_name,
                 kind="external_tool",
                 mode=context.mode,
+                work_phase=context.work_phase,
+                permission_policy=context.permission_policy,
                 title="是否允许调用 MCP 工具",
                 prompt=f"{tool.permission.server_name}/{tool.permission.remote_tool_name} 可能产生远程副作用。",
                 details=f"参数: {arguments}",
                 session_rule=rule,
                 project_rule=rule,
                 metadata={
-                    "mode": context.mode,
+                    **metadata,
                     "server": tool.permission.server_name or "",
                     "remote_tool": tool.permission.remote_tool_name or "",
                 },
@@ -425,8 +451,7 @@ class PermissionEngine:
         if tool.name == "bash":
             command = str(call.arguments.get("command", "")).strip()
             description = str(call.arguments.get("description", "")).strip()
-            suggested_rule = f"{target.tool_label}({command})"
-            normalized_rule = f"{target.tool_label}({command})"
+            exact_rule = f"{target.tool_label}({command})"
             return PermissionRequest(
                 request_id=request_id,
                 call_id=call.call_id,
@@ -434,14 +459,16 @@ class PermissionEngine:
                 tool_label=target.tool_label,
                 kind="command",
                 mode=context.mode,
+                work_phase=context.work_phase,
+                permission_policy=context.permission_policy,
                 title="是否允许执行此命令",
                 prompt="命令执行需要授权。",
                 details=f"命令: {command}\n描述: {description or '(无描述)'}",
                 command=command,
                 description=description,
-                session_rule=_suggest_rule(target.tool_label, command),
-                project_rule=_suggest_rule(target.tool_label, command),
-                metadata={"mode": context.mode},
+                session_rule=exact_rule,
+                project_rule=exact_rule,
+                metadata=metadata,
             )
 
         file_paths = _request_file_paths(tool.name, call.arguments, context)
@@ -453,12 +480,16 @@ class PermissionEngine:
             tool_label=target.tool_label,
             kind="file_edit",
             mode=context.mode,
+            work_phase=context.work_phase,
+            permission_policy=context.permission_policy,
             title="是否允许编辑此文件",
             prompt="文件写入需要授权。",
             details="\n".join(file_paths),
             file_paths=file_paths,
             preview_lines=preview_lines,
-            metadata={"mode": context.mode},
+            session_rule=f"{target.tool_label}({target.value})",
+            project_rule=f"{target.tool_label}({target.value})",
+            metadata=metadata,
         )
 
     def _build_denied_metadata(
@@ -470,6 +501,9 @@ class PermissionEngine:
     ) -> dict[str, object]:
         metadata: dict[str, object] = {
             "mode": context.mode,
+            "cwd": str(context.cwd),
+            "work_phase": context.work_phase,
+            "permission_policy": context.permission_policy,
             "tool_name": tool.name,
             "tool_label": target.tool_label,
         }
@@ -488,13 +522,7 @@ class PermissionEngine:
 
 
 def validate_plan_command(command: str) -> str | None:
-    lowered = _normalize_command(command)
-    for pattern in PLAN_BLOCKED_PATTERNS:
-        if pattern in lowered:
-            return "Plan 模式下只允许只读命令，当前命令包含潜在副作用或旁路写入能力。"
-    if any(lowered.startswith(prefix) for prefix in PLAN_ALLOWED_PREFIXES):
-        return None
-    return "Plan 模式下仅允许目录查看、文本搜索、git 状态或差异、解释器版本查询等只读命令。"
+    return "讨论和计划阶段禁止通用 Shell，请使用 read_file、glob 或 grep 进行只读调查。"
 
 
 def _match_command_blacklist(command: str) -> str | None:
@@ -504,18 +532,29 @@ def _match_command_blacklist(command: str) -> str | None:
     return None
 
 
-def _rule_matches(rule_match: str, target: _MatchTarget) -> bool:
+def _validate_match_kind(match_kind: str) -> None:
+    if not isinstance(match_kind, str) or match_kind not in {"exact", "glob", "legacy"}:
+        raise ValueError("权限规则 match_kind 无效。")
+
+
+def _rule_matches(rule_match: str, target: _MatchTarget, match_kind: PermissionMatchKind = "legacy") -> bool:
     parsed = _parse_rule(rule_match)
     if parsed is None:
         if target.value:
             return False
+        if match_kind == "exact":
+            return target.tool_name == rule_match.strip()
         return fnmatch.fnmatchcase(target.tool_name, rule_match.strip())
     tool_name, rule_value = parsed
     if tool_name != target.tool_name:
         return False
+    if match_kind == "exact" and target.tool_name == "bash":
+        return (target.exact_value if target.exact_value is not None else target.value) == rule_value.strip()
     candidate = target.value
     normalized_rule = _normalize_rule_value(target.tool_name, rule_value)
-    if _has_glob(normalized_rule) or target.matcher == "glob":
+    if match_kind == "exact":
+        return candidate == normalized_rule
+    if match_kind == "glob" or _has_glob(normalized_rule) or target.matcher == "glob":
         return fnmatch.fnmatchcase(candidate, normalized_rule)
     return candidate == normalized_rule
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import TypeVar
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.permission_engine import validate_plan_command
@@ -9,6 +10,7 @@ from lancher_code.tools.core.base import build_tool_error, build_tool_success
 
 MAX_OUTPUT_CHARS = 12000
 POWERSHELL = "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+_T = TypeVar("_T")
 
 BASH_DESCRIPTION = (
     "执行 shell 命令，是唯一能直接与操作系统交互的工具。"
@@ -68,7 +70,7 @@ class BashTool:
 
         description = description.strip()
         command = command.strip()
-        if context.mode == "plan":
+        if context.work_phase in {"discuss", "plan"}:
             plan_rejection = validate_plan_command(command)
             if plan_rejection is not None:
                 return build_tool_error(
@@ -79,8 +81,8 @@ class BashTool:
                     tool_name=self.definition.name,
                 )
 
-        try:
-            process = await asyncio.create_subprocess_exec(
+        spawn_task = asyncio.create_task(
+            asyncio.create_subprocess_exec(
                 POWERSHELL,
                 "-NoProfile",
                 "-Command",
@@ -89,6 +91,20 @@ class BashTool:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+        )
+        try:
+            # 创建过程也有异步窗口；必须最终取得句柄，才能保证取消后回收进程。
+            process = await asyncio.shield(spawn_task)
+        except asyncio.CancelledError:
+            try:
+                process = await _await_uninterrupted(spawn_task)
+            except Exception:
+                # 创建已失败，无进程需要回收；仍向调用方报告原始取消。
+                pass
+            else:
+                communicate_task = asyncio.create_task(process.communicate())
+                await _await_uninterrupted(asyncio.create_task(_terminate_and_drain(process, communicate_task)))
+            raise
         except Exception as exc:
             return build_tool_error(
                 summary="执行命令失败",
@@ -100,45 +116,33 @@ class BashTool:
 
         communicate_task = asyncio.create_task(process.communicate())
         cancel_wait_task: asyncio.Task[None] | None = None
+        cleanup_task: asyncio.Task[None] | None = None
         try:
+            wait_tasks: set[asyncio.Task] = {communicate_task}
             if context.cancellation_token is not None:
                 cancel_wait_task = asyncio.create_task(context.cancellation_token.wait())
-                done, _pending = await asyncio.wait(
-                    {communicate_task, cancel_wait_task},
-                    timeout=context.timeout_seconds,
-                    return_when=asyncio.FIRST_COMPLETED,
+                wait_tasks.add(cancel_wait_task)
+            # wait 不会把超时或外层取消传播给管道读取任务。
+            done, _pending = await asyncio.wait(
+                wait_tasks, timeout=context.timeout_seconds, return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_wait_task is not None and cancel_wait_task in done:
+                raise asyncio.CancelledError
+            if communicate_task not in done:
+                cleanup_task = asyncio.create_task(_terminate_and_drain(process, communicate_task))
+                await asyncio.shield(cleanup_task)
+                return build_tool_error(
+                    summary="命令执行超时",
+                    error_code="command_timeout",
+                    error_message=f"命令在 {context.timeout_seconds} 秒内没有完成，已被终止。",
+                    metadata={"description": description, "command": command},
+                    tool_name=self.definition.name,
                 )
-                if cancel_wait_task in done and context.cancellation_token.is_cancelled:
-                    process.kill()
-                    await communicate_task
-                    raise asyncio.CancelledError
-                if communicate_task not in done:
-                    process.kill()
-                    await communicate_task
-                    return build_tool_error(
-                        summary="命令执行超时",
-                        error_code="command_timeout",
-                        error_message=f"命令在 {context.timeout_seconds} 秒内没有完成，已被终止。",
-                        metadata={"description": description, "command": command},
-                        tool_name=self.definition.name,
-                    )
-                stdout, stderr = communicate_task.result()
-            else:
-                try:
-                    stdout, stderr = await asyncio.wait_for(communicate_task, timeout=context.timeout_seconds)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await communicate_task
-                    return build_tool_error(
-                        summary="命令执行超时",
-                        error_code="command_timeout",
-                        error_message=f"命令在 {context.timeout_seconds} 秒内没有完成，已被终止。",
-                        metadata={"description": description, "command": command},
-                        tool_name=self.definition.name,
-                    )
+            stdout, stderr = communicate_task.result()
         except asyncio.CancelledError:
-            process.kill()
-            await asyncio.gather(communicate_task, return_exceptions=True)
+            if cleanup_task is None:
+                cleanup_task = asyncio.create_task(_terminate_and_drain(process, communicate_task))
+            await _await_uninterrupted(cleanup_task)
             raise
         finally:
             if cancel_wait_task is not None:
@@ -175,6 +179,31 @@ class BashTool:
             metadata=payload,
             tool_name=self.definition.name,
         )
+
+
+async def _terminate_and_drain(
+    process: asyncio.subprocess.Process,
+    communicate_task: asyncio.Task[tuple[bytes, bytes]],
+) -> None:
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            # 进程可能恰好在 returncode 检查之后退出。
+            pass
+    # 先排空 stdout/stderr，再等待退出，避免 Windows 管道遗留到事件循环关闭后。
+    await asyncio.shield(communicate_task)
+    await process.wait()
+
+
+async def _await_uninterrupted(task: asyncio.Task[_T]) -> _T:
+    """取消已确定时完成资源收尾，重复停止不得取消底层清理任务。"""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
 
 
 def _truncate_output(text: str) -> tuple[str, bool]:

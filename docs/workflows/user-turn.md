@@ -43,9 +43,10 @@ sequenceDiagram
         else 无工具调用（最终回答）
             TR->>S: complete_message(usage)
             TR-->>T: assistant_message_completed
+            TR-->>T: turn_completed（无待生效补充时）
         end
     end
-    T->>T: 恢复输入框、自动保存、刷新用量
+    T->>T: 完成任务、自动保存、刷新用量；按队列状态继续下一条
 ```
 
 ## 关键环节说明
@@ -57,7 +58,7 @@ sequenceDiagram
 
 ### 2. 请求组装（`SessionController.build_request`）
 
-- 可见工具 = 注册表中按当前模式过滤后的定义（含上一轮 `tool_search` 发现的 MCP 工具）
+- 可见工具 = 注册表中按工作阶段过滤后的定义（含上一轮 `tool_search` 发现且阶段允许的 MCP 工具）；审批策略独立传入
 - system = 系统提示 + 环境提示 + 动态提醒 + 延迟工具索引
 - messages = 协议无关 transcript（剥离旧 reminder、注入新 reminder）
 
@@ -71,7 +72,7 @@ sequenceDiagram
 
 ### 4. 工具执行（`ToolExecutor.execute_calls`）
 
-- 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、模式不可用（`mode_disallowed`）
+- 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、阶段不可用（`phase_disallowed`）。讨论／计划禁止普通写入与通用 Shell
 - 并发安全工具批量并行，非安全工具串行
 - 每个调用：`PermissionEngine.evaluate()` → deny 直接返回错误；ask 走弹窗
 - 统一 `asyncio.wait_for` 超时（默认 10 秒），异常归一化为 `ToolExecutionResult(is_error=True)`
@@ -80,7 +81,7 @@ sequenceDiagram
 
 | 条件 | 结果 |
 |---|---|
-| 模型不再调用工具 | 正常完成（`assistant_message_completed`） |
+| 模型不再调用工具且没有待生效补充 | 正常完成（`turn_completed`）；消息段另发 `assistant_message_completed` |
 | 循环次数 > `tool_loop_limit`（默认 50） | 失败，提示达到上限 |
 | 连续 `unknown_tool_streak_limit`（默认 3）次未知工具 | 失败，停止无效循环 |
 | 用户按 Ctrl+C | `turn_cancelled`，消息标记 CANCELLED |

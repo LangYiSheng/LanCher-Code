@@ -82,8 +82,8 @@ async def test_plan_command_switches_mode_and_updates_placeholder(
         composer = app.query_one("#composer-input", ComposerTextArea)
         status_left = app.query_one("#status-left")
         assert session.runtime_mode == "plan"
-        assert composer.placeholder == "Plan Mode: 继续补充或修改计划"
-        assert str(status_left.render()) == "计划模式"
+        assert composer.placeholder == "补充或修改计划，确认后再开始执行"
+        assert str(status_left.render()) == "gpt-test · 计划 · 逐次确认"
         assert status_left.has_class("-plan")
 
 
@@ -100,7 +100,7 @@ async def test_plan_mode_slash_menu_only_shows_do_and_exit(
         await pilot.pause(0.05)
 
         composer = app.query_one("#composer-input", ComposerTextArea)
-        composer.text = "/d"
+        composer.text = "/do"
         composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
@@ -110,7 +110,7 @@ async def test_plan_mode_slash_menu_only_shows_do_and_exit(
         assert visible == ["do"]
 
         hint_bar = app.query_one(CommandHintBar)
-        assert "回到进入 plan 前的模式" in str(hint_bar.render())
+        assert "切换到执行" in str(hint_bar.render())
 
 
 @pytest.mark.asyncio
@@ -158,7 +158,7 @@ async def test_do_command_restores_normal_mode(
         status_left = app.query_one("#status-left")
         assert session.runtime_mode == "default"
         assert composer.placeholder == "发送一条消息"
-        assert str(status_left.render()) == "gpt-test (OpenAI)"
+        assert str(status_left.render()) == "gpt-test · 执行 · 逐次确认"
         assert not status_left.has_class("-plan")
         assert not status_left.has_class("-acceptEdits")
         assert not status_left.has_class("-bypass")
@@ -235,21 +235,22 @@ async def test_ctrl_c_cancels_active_turn_instead_of_exiting(
     ui_config,
     tmp_path: Path,
 ) -> None:
-    provider = FakeProvider(
-        responses=[
-            [
-                StreamEvent(kind="message_start"),
-                (StreamEvent(kind="text_delta", text="先来一点"), 0.5),
-                StreamEvent(kind="text_delta", text="后面的内容"),
-                StreamEvent(kind="message_end"),
-            ]
-        ]
-    )
+    started = asyncio.Event()
+
+    class WaitingProvider(FakeProvider):
+        async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            yield StreamEvent(kind="message_start")
+            yield StreamEvent(kind="text_delta", text="先来一点")
+            started.set()
+            await asyncio.Event().wait()
+
+    provider = WaitingProvider([])
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "请取消我")
-        await pilot.pause(0.1)
+        await started.wait()
         await pilot.press("ctrl+c")
         await pilot.pause(0.1)
 

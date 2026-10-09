@@ -53,12 +53,12 @@ Test-Path $HOME\.lancher\lancher.yaml
 |---|---|
 | 规则总是命中不了 | 匹配格式是否正确：`Bash(git *)` / `WriteFile(.env)` / `mcp__server__tool`；路径是否为项目相对路径（正斜杠、小写）；glob 用 `* ? [` |
 | 项目规则不生效 | 检查文件在 `./.lancher/permissions.yaml`（不是 `~/.lancher/`）；注意**同一作用域内最后一条命中规则生效**，后面的规则会覆盖前面的 |
-| bypass 模式下仍被拒绝 | 正常：危险命令黑名单与显式 `deny` 规则在 bypass 下依然生效 |
-| 文件写入总被要求确认 | 模式是 `default` 或 `plan`；`write_file/edit_file` 属于 write 类，需要规则或 `acceptEdits`/`bypass` |
+| bypass 策略下仍被拒绝 | 正常：工作阶段、危险命令黑名单、路径限制与显式 `deny` 规则依然生效 |
+| 文件写入总被要求确认 | 执行阶段的 `default` 策略默认询问写入；可选择规则或 `acceptEdits`。讨论／计划禁止普通文件写入 |
 
 ### 修改配置后不生效
 
-- `runtime.permission_mode` 只在启动时读取，运行中修改需重启
+- `runtime.work_phase` / `runtime.permission_policy` 控制启动默认值；运行中可用 `/discuss`、`/plan`、`/do` 和 `/permissions` 分别修改。忙碌时先完成或停止任务
 - 模型目录与权限规则保存后立即生效，MCP 配置仍需重启。只修改默认模型不会替换当前会话所选模型；需要立即改用另一模型时执行 `/model`。
 
 ## 运行问题
@@ -78,7 +78,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 | error_code | 含义与处理 |
 |---|---|
 | `tool_not_found` | 工具未注册或 MCP 工具未加载。MCP 工具需先 `tool_search` |
-| `mode_disallowed` | 当前模式不允许该工具（如 plan 模式下 `write_file`） |
+| `phase_disallowed` / `mode_disallowed` | 当前阶段不允许该工具（如讨论／计划中的普通写入和 Shell）；规则与 bypass 无法放开 |
 | `path_outside_project` | 路径越出项目根（路径沙箱）。确认路径在 cwd 内 |
 | `stale_file_state` / `incomplete_file_read` / `file_changed_since_read` | 防盲写守卫：先 `read_file`（完整读取），文件被外部改过就重读 |
 | `large_file_requires_paging` | read_file 大文件需要 `offset` + `limit` |

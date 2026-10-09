@@ -7,7 +7,7 @@
 - 驱动模型多次请求（最多 `tool_loop_limit` 次）
 - 拼接流式工具调用、执行工具、把结果送回模型
 - 触发自动 / 紧急上下文压缩
-- 支持取消、未知工具熔断、权限请求挂起
+- 支持取消、未知工具熔断、非阻塞审批，以及忙时补充与待发送队列
 - 以 **异步生成器 + 事件队列** 的方式把进度暴露给 TUI
 
 实现位置：`lancher_code/turn_runner.py`。
@@ -31,13 +31,19 @@ tui_views/chat.py  ──run_user_turn()──▶  TurnRunner
 | `run_user_turn(text)` | 异步生成器：创建后台任务 `_run_turn` 与事件队列，逐个产出 `TurnEvent` |
 | `resolve_permission_request(resolution)` | TUI 回调：把用户决议写入挂起的 Future |
 | `cancel_active_turn()` | 取消当前回合（令牌 + 任务 + 挂起权限 Future） |
+| `stop_and_wait()` | 界面关闭时取消当前任务并等待工具、子进程和管道收尾 |
 | `has_active_turn` | 是否有回合在跑 |
 | `compact_context()` | 手动压缩（`/compact`），模型响应中禁止 |
-| `set_mode(mode)` / `restore_mode_after_plan()` | 模式切换（产生 `mode_changed` 事件） |
+| `set_phase(phase)` / `set_permission_policy(policy)` | 分别切换阶段和策略；运行、审批、压缩期间拒绝修改 |
+| `set_mode(mode)` | 旧入口：plan 切阶段，其他值只切策略 |
+| `enqueue_input(text, delivery)` | 接收下一轮或当前任务补充，返回 `PendingInput` 回执 |
+| `update_pending_input` / `remove_pending_input` / `convert_pending_input` | 编辑、移除、转换未消费消息；消费后不允许重复转换 |
+| `pause_queue()` / `resume_queue()` / `run_next_queued_turn()` | 暂停、明确继续，以及原子消费下一项 |
+| `prepare_plan_execution(session_id, digest)` | 校验并消费就绪快照，冻结正文，切执行阶段，保留策略 |
 
 ### `_ActiveTurn`
 
-内部数据结构：`task`（后台任务）、`queue`（事件队列）、`cancellation_token`、`pending_permissions`（请求 id → Future）。
+内部数据结构：`task_id`、`accepting_input`、`task`（后台任务）、`queue`（事件队列）、`cancellation_token`、`pending_permissions`（请求 id → Future）。补充绑定具体任务，目标结束后暂停保留，不能自动进入其他任务。
 
 ## 工作流程（一次完整回合）
 
@@ -67,7 +73,9 @@ run_user_turn(text)
           · 发 tool_result_received 事件
           · 未知工具熔断检查（连续 N 次 tool_not_found 停止）
           · continue 下一轮
-       g. 无工具调用：complete_message → 事件 assistant_message_completed → 结束
+       g. 当前响应或已启动工具组结束：
+          · 若有补充，结束当前 assistant 消息段，创建真实 user 消息及新 assistant 段
+          · 无补充且无工具调用，complete_message → assistant_message_completed → turn_completed
     4. 异常处理：
        · CancelledError → cancel_message → turn_cancelled
        · LanCherError → fail_message → turn_failed
@@ -79,12 +87,16 @@ run_user_turn(text)
 
 `TurnEvent`（定义在 `models.py`）是 TUI 与 TurnRunner 之间的唯一通信协议，`kind` 包括：
 
-`user_message_created`、`assistant_message_started`、`assistant_text_delta`、`tool_call_started`、`tool_result_received`、`usage_updated`、`progress_updated`、`mode_changed`、`permission_request_created`、`permission_request_resolved`、`turn_cancelled`、`assistant_message_completed`、`turn_failed`
+主要包括 `user_message_created`、`assistant_message_started`、`assistant_text_delta`、`tool_call_started`、`tool_result_received`、`usage_updated`、`progress_updated`、`phase_changed`、`policy_changed`、`permission_request_created`、`permission_request_resolved`、`permission_request_closed`、`pending_input_changed`、`steering_applied`、`assistant_message_completed`、`turn_completed`、`turn_cancelled`、`turn_failed`。
+
+`assistant_message_completed` 是段结束，可因补充而出现多次，用量按段结算；`turn_completed` 才表示整个任务成功，只发一次，UI 据此继续队列。
 
 ## 关键设计
 
-- **取消语义**：`CancellationToken`（`asyncio.Event`）贯穿请求与工具执行；bash 工具在等待子进程时同时监听该令牌，取消即 `kill` 子进程。
-- **权限挂起**：工具需要确认时，`_request_permission()` 创建 Future 并发送 `permission_request_created`；TUI 弹窗后调用 `resolve_permission_request()` 唤醒。无活动回合或无人处理时默认 `deny`。
+- **取消语义**：`CancellationToken`（`asyncio.Event`）贯穿请求与工具执行；bash 工具在等待子进程时同时监听该令牌，取消即 `kill` 子进程。取消或失败会暂停队列；消费方关闭事件流也回收后台任务与审批 Future。
+- **权限挂起**：工具需要确认时，`_request_permission()` 创建 Future 并发送 `permission_request_created`；UI 挂载面板后继续消费事件，用户决议按请求 ID 回传。面板通过 closed 事件移除，过期请求无效。
+- **补充边界**：当前响应结束或正在运行的并发工具组结束后生效；后续工具补齐 `steering_superseded` 结果而不执行。撤销旧审批使用独立 superseded 决议，不写规则，也不伪装为用户拒绝。
+- **计划快照**：只有本任务成功调用 `write_plan_file` 且计划回合成功结束才 ready；新计划开始即失效旧版本。执行用会话内冻结正文，磁盘中的旧计划文件不能成为已确认计划。
 - **自动压缩阈值**：`automatic_threshold(context_window) = context_window - 20000(摘要输出预留) - 13000(自动余量)`。
 - **紧急压缩**：模型报 `ProviderPromptTooLongError` 时，先卸载大结果再压缩，成功后重试一次；压缩后仍超过 `context_window - 3000` 则放弃。
 - **未知工具熔断**：连续 `unknown_tool_streak_limit`（默认 3）次 `tool_not_found` 即停止本轮，避免无效循环。

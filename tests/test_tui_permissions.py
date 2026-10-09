@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 import json
@@ -8,7 +9,7 @@ import pytest
 from lancher_code.models import ChatRequest, StreamEvent, ToolCallChunk
 from lancher_code.session import SessionController
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
-from lancher_code.tools.builtin.bash import BashTool
+from lancher_code.tools.builtin.bash import BashTool, POWERSHELL
 from lancher_code.tools.builtin.write_file import WriteFileTool
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
@@ -168,10 +169,14 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
         panel = app.query_one(InlinePermissionPanel)
         options = list(panel.query(PermissionOption))
         assert app.focused is panel
-        assert len(options) == 4
+        assert len(panel._options()) == 2
         assert options[0].has_class("-active")
-        assert "Bash(git *)" in options[1].render().plain
-        assert "Bash(git *)" in options[2].render().plain
+        assert not options[2].display
+        await pilot.press("m")
+        await pilot.pause(0.05)
+        assert len(panel._options()) == 4
+        assert "Bash(git status)" in options[2].render().plain
+        assert "Bash(git status)" in options[3].render().plain
 
         await pilot.press("tab")
         await pilot.pause(0.05)
@@ -185,7 +190,7 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
         await pilot.pause(0.05)
         assert options[3].has_class("-active")
 
-        await pilot.press("enter")
+        await pilot.press("escape")
         await pilot.pause(0.2)
 
         assert session.state.messages[-1].status == "complete"
@@ -197,8 +202,8 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
     ("key_presses", "expected_outcome"),
     [
         ([], "allow_once"),
-        (["down"], "allow_session"),
-        (["down", "down"], "allow_project"),
+        (["m", "down", "down"], "allow_session"),
+        (["m", "down", "down", "down"], "allow_project"),
         (["up"], "deny"),
     ],
 )
@@ -244,7 +249,7 @@ async def test_allow_session_resolution_is_auto_saved_with_bound_session(
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "查看仓库状态")
         await pilot.pause(0.1)
-        await pilot.press("down")
+        await pilot.press("m", "down", "down")
         await pilot.press("enter")
         await pilot.pause(1.5)
 
@@ -252,5 +257,43 @@ async def test_allow_session_resolution_is_auto_saved_with_bound_session(
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     permissions = next(record for record in records if record["type"] == "permissions")
     assert permissions["data"]["rules"] == [
-        {"match": "Bash(git *)", "result": "allow"}
+        {"match": "Bash(git status)", "result": "allow", "match_kind": "exact"}
     ]
+
+
+@pytest.mark.skipif(not Path(POWERSHELL).is_file(), reason="需要 Windows PowerShell 子进程")
+@pytest.mark.asyncio
+async def test_closing_ui_waits_for_running_command_cleanup(openai_provider_config, ui_config, tmp_path, monkeypatch):
+    responses = _permission_request_responses()
+    responses[0][2].tool_call_chunk.arguments_delta = json.dumps({
+        "description": "界面退出收尾测试", "command": "Start-Sleep -Seconds 30",
+    })
+    app, _ = _build_app(FakeProvider(responses), openai_provider_config, ui_config, tmp_path)
+    app._turn_runner.set_permission_policy("bypass")
+    original_spawn = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    processes = []
+
+    async def capture_spawn(*args, **kwargs):
+        process = await original_spawn(*args, **kwargs)
+        processes.append(process)
+        started.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
+    try:
+        async with app.run_test() as pilot:
+            await _submit_message(app, pilot, "启动命令")
+            await asyncio.wait_for(started.wait(), 5)
+            assert app._turn_runner.has_active_turn
+        assert not app._turn_runner.has_active_turn
+        assert all(process.returncode is not None for process in processes)
+        assert all(process.stdout.at_eof() and process.stderr.at_eof() for process in processes)
+    finally:
+        for process in processes:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+            await asyncio.wait_for(process.communicate(), 5)
