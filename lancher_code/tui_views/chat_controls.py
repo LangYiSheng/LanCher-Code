@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from rich.markdown import Markdown
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TextArea
+
+from lancher_code.tui_views.theme import TerminalMarkdown
 
 
 class ChatAction(Message):
@@ -99,10 +100,13 @@ class PendingInputEditor(ModalScreen[str | None]):
     CSS = """
     PendingInputEditor { align: center middle; background: $background 70%; }
     #queue-editor { width: 85%; max-width: 90; height: 70%; background: $surface; padding: 1 2; }
-    #queue-editor-title { height: 2; color: $primary; }
-    #queue-editor-text { height: 1fr; border: solid $primary; }
+    #queue-editor-title { height: 2; color: $text; text-style: bold; }
+    #queue-editor-text { height: 1fr; border: solid $panel; }
+    #queue-editor-text:focus { border: solid $primary; }
     #queue-editor-actions { height: 3; }
-    #queue-editor-actions Button { width: 1fr; min-width: 6; }
+    #queue-editor-actions Button { width: 1fr; min-width: 6; border: none; background: transparent; color: $text-muted; text-style: none; }
+    #queue-editor-save { color: $primary; text-style: bold; }
+    #queue-editor-actions Button:focus { background: $foreground; color: $background; text-style: bold; }
     #queue-editor-error { height: auto; color: $error; }
     """
 
@@ -155,6 +159,12 @@ class PlanPanel(Vertical):
         self.query_one("#plan-preview", Static).update("当前计划\n" + preview)
         self.query_one("#plan-execute", Button).disabled = busy or not snapshot.ready
 
+    def on_resize(self) -> None:
+        # 32 列也完整显示两个动作，详细语义保留在计划确认页。
+        narrow = self.size.width < 40
+        self.query_one("#plan-review", Button).label = "查看计划" if narrow else "查看完整计划"
+        self.query_one("#plan-execute", Button).label = "开始执行" if narrow else "按此计划开始执行"
+
     @on(Button.Pressed)
     def choose(self, event: Button.Pressed) -> None:
         event.stop()
@@ -165,10 +175,13 @@ class PlanReviewScreen(ModalScreen[tuple[str, str] | None]):
     BINDINGS = [("escape", "cancel", "返回")]
     CSS = """
     PlanReviewScreen { align: center middle; background: $background 70%; }
-    #plan-review-box { width: 92%; height: 90%; background: $surface; padding: 1 2; }
+    #plan-review-box { width: 92%; max-width: 100; height: 90%; background: $surface; padding: 1 2; }
+    #plan-review-box .section-title { color: $text; text-style: bold; height: auto; margin-bottom: 1; }
     #plan-review-body { height: 1fr; }
     #plan-review-actions { height: 3; }
-    #plan-review-actions Button { width: 1fr; min-width: 6; }
+    #plan-review-actions Button { width: 1fr; min-width: 6; border: none; background: transparent; color: $text-muted; text-style: none; }
+    #review-execute { color: $primary; text-style: bold; }
+    #plan-review-actions Button:focus { background: $foreground; color: $background; text-style: bold; }
     """
 
     def __init__(self, session_id: str, snapshot, *, can_execute: bool) -> None:
@@ -181,7 +194,7 @@ class PlanReviewScreen(ModalScreen[tuple[str, str] | None]):
         with Vertical(id="plan-review-box"):
             yield Static("确认要执行的计划", classes="section-title")
             with VerticalScroll(id="plan-review-body"):
-                yield Static(Markdown(self.snapshot.content))
+                yield Static(TerminalMarkdown(self.snapshot.content, self.app.theme))
             with Horizontal(id="plan-review-actions"):
                 yield Button("按此计划执行", id="review-execute", disabled=not self.can_execute, variant="primary")
                 yield Button("返回计划", id="review-cancel")
@@ -199,8 +212,10 @@ class PermissionPolicyScreen(ModalScreen[str | None]):
     CSS = """
     PermissionPolicyScreen { align: center middle; background: $background 70%; }
     #policy-box { width: 64; max-width: 96%; height: auto; max-height: 90%; overflow-y: auto; padding: 1 2; background: $surface; }
-    #policy-box Button { width: 1fr; height: 3; }
+    #policy-box Button { width: 1fr; height: 3; background: transparent; border: none; text-style: none; color: $text; }
+    #policy-box Button:focus { background: $foreground; color: $background; text-style: bold; }
     #policy-box Static { height: auto; margin-bottom: 1; }
+    #policy-box .section-title { text-style: bold; }
     """
 
     def compose(self) -> ComposeResult:
@@ -226,7 +241,8 @@ class ReadOnlyDetailsScreen(ModalScreen[None]):
     #read-only-details { width: 92%; max-width: 96; height: 90%; padding: 1; background: $surface; }
     #read-only-scroll { height: 1fr; }
     #read-only-scroll Static { height: auto; }
-    #read-only-close { height: 3; }
+    #read-only-close { height: 3; border: none; background: transparent; color: $text-muted; text-style: none; }
+    #read-only-close:focus { background: $foreground; color: $background; text-style: bold; }
     """
 
     def __init__(self, text: str) -> None:

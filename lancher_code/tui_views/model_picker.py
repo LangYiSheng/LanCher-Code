@@ -24,13 +24,21 @@ class ModelPickerScreen(ModalScreen[str | None]):
     ]
     CSS = """
     ModelPickerScreen { align: center middle; background: $background 85%; }
-    #model-picker { width: 90%; max-width: 88; height: 90%; max-height: 32; padding: 1 2;
-        background: $surface; border: solid $panel; color: $text; }
-    #model-picker-title { height: 1; text-style: bold; }
+    #model-picker { width: 90%; max-width: 76; height: 90%; max-height: 32; padding: 1 2;
+        background: $background; border: solid $panel; color: $text; }
+    #model-picker-title { height: 1; color: $text; text-style: bold; }
     #model-picker-scope { height: auto; margin-bottom: 1; color: $text-muted; }
-    #model-search { height: 3; border: none; border-bottom: solid $panel; background: $surface; }
-    #model-search:focus { border-bottom: solid $primary; }
-    #model-options { height: 1fr; background: transparent; border: none; }
+    #model-search { height: 3; padding: 0 1; color: $text; border: none; border-bottom: solid $panel; background: $background; }
+    #model-search > .input--placeholder { color: $text-muted; }
+    #model-search:focus { color: $background; background: $foreground; background-tint: transparent; border-bottom: solid $foreground; }
+    #model-search:focus > .input--placeholder { color: $background 70%; }
+    #model-search:focus > .input--cursor { color: $text; background: $background; }
+    #model-options { height: 1fr; color: $text; background: transparent; border: none; padding: 0; }
+    #model-options:focus { background-tint: transparent; border: none; }
+    #model-options > .option-list--option { padding: 0 1; }
+    #model-options > .option-list--option-highlighted { color: $text; background: $surface; text-style: bold; }
+    #model-options > .option-list--option-hover { background: $surface; }
+    #model-options:focus > .option-list--option-highlighted { color: $background; background: $foreground; text-style: none; }
     #model-picker-empty { height: auto; color: $text-muted; display: none; }
     #model-picker-help { height: auto; color: $text-muted; }
     ModelPickerScreen.-narrow #model-picker { width: 100%; height: 100%; padding: 0 1; }
@@ -83,7 +91,8 @@ class ModelPickerScreen(ModalScreen[str | None]):
             if ref == self.config.default_model:
                 flags.append("新对话默认")
             suffix = "  · " + " / ".join(flags) if flags else ""
-            prompt = Text(label + suffix, style="bold" if ref == self.current_ref else "")
+            prompt = Text(label, style="bold" if ref == self.current_ref else "")
+            prompt.append(suffix, style="dim")
             prompt.append(f"\n{provider.name} · {model.model_name} · {ref}", style="dim")
             options.append(Option(prompt, id=ref))
             refs.append(ref)

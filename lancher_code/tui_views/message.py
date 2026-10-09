@@ -5,7 +5,6 @@ from pathlib import Path
 
 from rich.console import Group, RenderableType
 from rich.text import Text
-from rich.markdown import Markdown
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -14,7 +13,7 @@ from textual.widgets import Static
 
 from lancher_code.models import SessionMessage, TraceEntry
 from lancher_code.mcp.manager import MCPInitializationProgress, MCPServerInitialization
-from lancher_code.tui_views.theme import theme_palette
+from lancher_code.tui_views.theme import TerminalMarkdown, theme_palette
 
 BANNER_TEXT = r"""
     __                ________                 ______          __
@@ -110,7 +109,7 @@ class BannerWidget(Static):
     def _header(self) -> Text:
         colors = theme_palette(self.app.theme)
         left = Text(no_wrap=True, overflow="ellipsis")
-        left.append("LanCher Code", style="bold " + colors["primary"])
+        left.append("LanCher Code", style=colors["muted"])
         left.append("  ·  ", style=colors["muted"])
         left.append(self._cwd.name, style=colors["muted"])
         return left
@@ -216,7 +215,8 @@ class TraceSection(Vertical):
             summary = f"工具 {len(results)}/{calls}" if calls else "工作记录"
             if errors:
                 summary += f" · {errors} 项未完成"
-        header.update(Text(f"{marker} {summary}", style=colors["muted"]))
+        failed = self._kind == "tool" and any(entry.kind == "tool_result" and entry.ok is False for entry in self._entries)
+        header.update(Text(f"{marker} {summary}", style=colors["error"] if failed else colors["muted"]))
         body.display = bool(self._entries) and not self._collapsed
         if body.display:
             body.update(_format_trace_entries(self._entries, colors=colors))
@@ -300,9 +300,9 @@ class MessageWidget(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(classes="message-label")
+        yield Static(classes="message-body")
         yield ToolActivityWidget([])
         yield ThinkingTraceWidget([], collapsed=True)
-        yield Static(classes="message-body")
 
     def on_mount(self) -> None:
         self._sync_view()
@@ -320,7 +320,7 @@ class MessageWidget(Vertical):
         label_widget = self.query_one(".message-label", Static)
         label_widget.update(self._label_text())
         label_widget.styles.color = self._label_color()
-        label_widget.styles.text_style = "bold"
+        label_widget.styles.text_style = "bold" if self.status == "error" else "none"
 
         trace_widget = self.query_one(ThinkingTraceWidget)
         thinking = [entry for entry in self.trace_entries if entry.kind == "thinking"]
@@ -339,7 +339,7 @@ class MessageWidget(Vertical):
         body_widget.display = bool(body_text)
         if body_text:
             body_widget.styles.color = self._body_color()
-            body_widget.update(Markdown(body_text) if self.role == "assistant" and self.status != "error" else Text(body_text))
+            body_widget.update(TerminalMarkdown(body_text, self.app.theme) if self.role == "assistant" and self.status != "error" else Text(body_text))
 
     def _show_trace(self) -> bool:
         return self._show_thinking and self.role == "assistant" and bool(self.trace_entries)
@@ -351,7 +351,7 @@ class MessageWidget(Vertical):
 
     def _label_color(self) -> str:
         colors = theme_palette(self.app.theme)
-        return colors["error"] if self.status == "error" else colors["primary"] if self.role == "user" else colors["muted"]
+        return colors["error"] if self.status == "error" else colors["muted"]
 
     def _body_text(self) -> str:
         if self.status == "error":

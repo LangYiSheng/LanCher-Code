@@ -29,29 +29,52 @@ MODEL_PLACEHOLDERS = {
 
 class ConfigBootstrapApp(App[int]):
     CSS = """
-    Screen { layout: vertical; color: $text; background: $background; }
+    Screen { layout: vertical; align-horizontal: center; color: $text; background: $background; }
     #bootstrap-scroll { width: 100%; height: 1fr; align-horizontal: center; }
     #bootstrap-root { width: 100%; max-width: 76; height: auto; padding: 1 2; }
     #bootstrap-header { height: auto; margin-bottom: 1; }
-    #bootstrap-title { text-style: bold; }
+    #bootstrap-title { color: $text; text-style: bold; height: auto; }
     #bootstrap-copy { color: $text-muted; height: auto; }
-    #bootstrap-step { color: $primary; height: auto; margin: 1 0; }
+    #bootstrap-step { color: $text; text-style: bold; height: auto; margin: 1 0; }
     #bootstrap-error { color: $error; height: auto; display: none; margin-bottom: 1; }
     .setup-page { height: auto; display: none; }
     .setup-page.-active { display: block; }
     .field { width: 1fr; height: auto; margin-bottom: 1; }
     .field-label { color: $text; height: auto; }
-    .field-input { width: 1fr; height: 3; background: $surface; border: none; border-bottom: solid $panel; }
-    .field-input:focus { border-bottom: solid $primary; }
+    .field-input { width: 1fr; height: 3; color: $text; background: $background; border: none; }
+    Input.field-input { padding: 0 1; border-bottom: solid $panel; }
+    Input.field-input > .input--placeholder { color: $text-muted; }
+    Input.field-input:focus { color: $background; background: $foreground; background-tint: transparent; border-bottom: solid $foreground; }
+    Input.field-input:focus > .input--placeholder { color: $background 70%; }
+    Input.field-input:focus > .input--cursor { color: $text; background: $background; }
+    Select.field-input > SelectCurrent { color: $text; background: $background; border: none; border-bottom: solid $panel; padding: 0 1; }
+    Select.field-input > SelectCurrent #label, Select.field-input > SelectCurrent .arrow { color: $text; }
+    Select.field-input:focus > SelectCurrent { color: $background; background: $foreground; background-tint: transparent; border-bottom: solid $foreground; }
+    Select.field-input:focus > SelectCurrent #label, Select.field-input:focus > SelectCurrent .arrow { color: $background; }
+    Select.field-input > SelectOverlay { background: $surface; border: solid $panel; }
+    Select.field-input > SelectOverlay > .option-list--option-highlighted { color: $background; background: $foreground; text-style: none; }
     .setup-hint { color: $text-muted; height: auto; margin-bottom: 1; }
+    Collapsible { background: transparent; border: none; padding: 0; }
+    Collapsible:focus-within { background-tint: transparent; }
+    Collapsible > Contents { padding: 1 0 0 1; }
+    CollapsibleTitle { color: $text-muted; text-style: none; padding: 0; }
+    CollapsibleTitle:hover { color: $text; background: $surface; }
+    CollapsibleTitle:focus { color: $background; background: $foreground; text-style: none; }
+    Checkbox { height: 1; border: none; padding: 0; color: $text; background: transparent; }
+    Checkbox:focus { border: none; color: $background; background: $foreground; background-tint: transparent; }
+    Checkbox:focus > .toggle--label { color: $background; background: $foreground; text-style: none; }
     #claude-thinking { height: auto; }
     #bootstrap-summary, #bootstrap-path { height: auto; margin-bottom: 1; }
     #bootstrap-path { color: $text-muted; }
-    #actions { height: auto; padding: 0 2; }
-    #actions Button { min-width: 10; margin-right: 1; }
-    #actions.-narrow { padding: 0; }
+    #bootstrap-footer { width: 100%; height: auto; align-horizontal: center; }
+    #actions { width: 100%; max-width: 76; height: auto; padding: 0 2; }
+    #actions Button { min-width: 10; height: 3; margin-right: 1; color: $text; background: transparent; border: none; text-style: none; }
+    #actions #save-button { color: $text; background: $surface; text-style: bold; }
+    #actions Button:hover { color: $text; background: $surface; border: none; }
+    #actions Button:focus, #actions #save-button:focus { color: $background; background: $foreground; background-tint: transparent; border: none; text-style: none; }
+    #actions.-narrow { padding: 0 2; }
     #actions.-narrow Button { min-width: 8; margin-right: 0; }
-    #bootstrap-help { height: 1; color: $text-muted; padding: 0 2; }
+    #bootstrap-help { width: 100%; max-width: 76; height: 1; color: $text-muted; padding: 0 2; }
     """
     BINDINGS = [("escape", "back", "返回"), ("ctrl+s", "continue", "继续")]
 
@@ -100,11 +123,12 @@ class ConfigBootstrapApp(App[int]):
                     yield Static("首次对话和新对话默认都会使用这个模型。以后可以分别更改。", classes="setup-hint")
                     yield Static(f"配置保存位置：{self._config_path}", id="bootstrap-path", markup=False)
                     yield Static("保存连接参数，不会在此步骤发起模型请求。", classes="setup-hint")
-        with Horizontal(id="actions"):
-            yield Button("取消", id="cancel-button")
-            yield Button("上一步", id="back-button")
-            yield Button("下一步", variant="primary", id="save-button")
-        yield Static("Esc 返回 · Ctrl+S 继续", id="bootstrap-help")
+        with Vertical(id="bootstrap-footer"):
+            with Horizontal(id="actions"):
+                yield Button("取消", id="cancel-button")
+                yield Button("上一步", id="back-button")
+                yield Button("下一步", variant="primary", id="save-button")
+            yield Static("Esc 返回 · Ctrl+S 继续", id="bootstrap-help")
 
     def on_mount(self) -> None:
         apply_theme(self, "dark")

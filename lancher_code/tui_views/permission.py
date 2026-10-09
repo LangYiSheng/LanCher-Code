@@ -43,13 +43,14 @@ class PermissionOption(Static):
 
     def render(self) -> RenderableType:
         colors = theme_palette(self.app.theme)
+        foreground = colors["background"] if self._active else colors["text"]
         text = Text(no_wrap=self.has_class("-compact"), overflow="ellipsis")
-        text.append("› " if self._active else "  ", style="bold " + colors["primary"] if self._active else "")
+        text.append("› " if self._active else "  ", style="bold " + foreground if self._active else "")
         label = ("允许本次" if self.outcome == "allow_once" else "拒绝") if self.has_class("-compact") else f"{self.index}. {self.label}"
-        text.append(label, style="bold " + colors["text"] if self._active else colors["text"])
+        text.append(label, style="bold " + foreground if self._active else foreground)
         if self.rule:
             text.append("    ")
-            text.append(self.rule, style=colors["muted"])
+            text.append(self.rule, style=foreground if self._active else colors["muted"])
         return text
 
     def on_click(self, event: Click) -> None:
@@ -279,7 +280,8 @@ class PermissionScopesScreen(ModalScreen[PermissionResolutionOutcome | None]):
     PermissionScopesScreen { align: center middle; background: $background 70%; }
     #permission-scopes-dialog { width: 72; max-width: 96%; height: auto; max-height: 90%; background: $surface; padding: 1; }
     #permission-scopes-dialog Static { height: auto; margin-bottom: 1; }
-    #permission-scopes-dialog Button { width: 1fr; min-width: 8; height: 3; }
+    #permission-scopes-dialog Button { width: 1fr; min-width: 8; height: 3; background: transparent; border: none; color: $text; text-style: none; }
+    #permission-scopes-dialog Button:focus { background: $foreground; color: $background; text-style: bold; }
     """
     BINDINGS = [
         Binding("escape", "close", "返回"),

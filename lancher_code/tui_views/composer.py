@@ -122,11 +122,12 @@ class SlashCompletionMenuItem(Static):
 
     def render(self) -> RenderableType:
         colors = theme_palette(self.app.theme)
+        foreground = colors["background"] if self._active else colors["text"]
         text = Text()
-        text.append("› " if self._active else "  ", style=colors["primary"])
-        text.append(self.candidate.description, style="bold " + colors["text"] if self._active else colors["text"])
+        text.append("› " if self._active else "  ", style=foreground)
+        text.append(self.candidate.description, style="bold " + foreground if self._active else foreground)
         text.append("  ")
-        text.append(self.candidate.display, style=colors["muted"])
+        text.append(self.candidate.display, style=foreground if self._active else colors["muted"])
         return text
 
     def on_click(self, event: Click) -> None:

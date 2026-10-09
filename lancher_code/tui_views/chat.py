@@ -4,6 +4,8 @@ import asyncio
 from contextlib import aclosing
 from pathlib import Path
 
+from rich.cells import cell_len
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -47,7 +49,7 @@ from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.tui_views.settings import SettingsResult, SettingsScreen
 from lancher_code.tui_views.model_picker import ModelPickerScreen
-from lancher_code.tui_views.theme import apply_theme
+from lancher_code.tui_views.theme import apply_theme, theme_palette
 from lancher_code.tui_views.chat_controls import (
     ChatAction, StageBar, PendingQueue, PendingInputEditor, PlanPanel,
     PlanReviewScreen, PermissionPolicyScreen, ReadOnlyDetailsScreen,
@@ -87,7 +89,7 @@ CONTEXT_REFRESH_EVENTS: frozenset[str] = frozenset(
 
 class LanCherTextualApp(App[int]):
     CSS = """
-    #root { height: 100%; width: 100%; layout: vertical; }
+    #root { height: 100%; width: 100%; max-width: 112; layout: vertical; }
     #chat-view { height: 1fr; width: 100%; }
     .message { width: 100%; height: auto; layout: vertical; }
     .message-label, .message-body { height: auto; width: 1fr; }
@@ -108,25 +110,27 @@ class LanCherTextualApp(App[int]):
     .permission-option { width: 1fr; padding: 0 1; }
     #status-bar { width: 1fr; }
     #status-center, #status-right { text-align: right; }
-    Screen { background: $background; color: $text; }
+    Screen { background: $background; color: $text; align-horizontal: center; }
     #banner { margin: 1 2 0 2; height: auto; color: $text-muted; }
     #banner.-compact { margin: 0 2; }
     #stage-bar { margin: 0 2; height: 1; width: 1fr; }
     .stage-arrow { width: 2; height: 1; color: $text-muted; content-align: center middle; }
     #phase-explanation { width: 1fr; height: 1; color: $text-muted; padding-left: 2; }
-    .quiet-action { border: none; height: 1; min-height: 1; min-width: 4; width: auto; padding: 0 1; background: transparent; color: $text-muted; }
-    .quiet-action:hover, .quiet-action:focus { background: $surface; color: $primary; }
+    .quiet-action { border: none; height: 1; min-height: 1; min-width: 4; width: auto; padding: 0 1; background: transparent; color: $text-muted; text-style: none; }
+    .quiet-action:hover { background: $surface; color: $text; }
     .quiet-action.-selected { color: $primary; text-style: bold; }
+    .quiet-action:focus { background: $foreground; color: $background; text-style: bold; }
     #chat-view { margin: 1 1 0 1; padding: 0 1; }
     .message { padding: 0; margin: 0 0 1 0; border: none; }
     .message--user, .message--assistant, .message--system, .message.-error { border: none; }
+    .message--user { border-left: solid $panel; padding-left: 1; }
     .message-label { color: $text-muted; }
     .trace-section { height: auto; width: 1fr; margin: 0; }
     .trace-header, .trace-body { height: auto; width: 1fr; }
     .trace-section:focus .trace-header { color: $primary; text-style: underline; }
     .trace-body { margin: 0 0 1 2; color: $text-muted; }
     #composer-region { margin: 0 2; max-height: 75%; }
-    #composer { border-top: solid $primary-muted; padding: 0; }
+    #composer { border-top: solid $panel; padding: 0; }
     #composer:focus-within { border-top: solid $primary; }
     #composer-input { color: $text; }
     #composer-input .text-area--placeholder { color: $text-muted; }
@@ -136,15 +140,16 @@ class LanCherTextualApp(App[int]):
     #composer-help { width: 1fr; height: 1; color: $text-muted; }
     #command-hint { margin: 0; color: $text-muted; height: auto; }
     #slash-command-menu { border: none; background: $surface; max-height: 7; margin: 0; }
-    .slash-command-item.-active { background: $primary 15%; }
+    .slash-command-item.-active { background: $foreground; color: $background; }
     #approval-region { height: auto; max-height: 12; display: none; }
     #inline-permission-panel { height: auto; max-height: 12; background: $surface; border-left: solid $warning; padding: 0 1; }
     #inline-permission-panel:focus { border-left: solid $warning; }
     #permission-title { color: $warning; margin: 0; }
     #permission-command, #permission-details, #permission-description, #permission-prompt, .permission-preview { color: $text; margin: 0; }
+    #permission-cwd, #permission-description { color: $text-muted; height: auto; }
     .permission-preview.-error { color: $error; }
     .permission-preview.-success { color: $success; }
-    .permission-option.-active { background: $primary 15%; }
+    .permission-option.-active { background: $foreground; color: $background; }
     #permission-help { color: $text-muted; margin: 0; }
     #pending-queue { display: none; height: auto; max-height: 8; overflow-y: auto; background: $surface; }
     .queue-heading, .queue-actions { height: 1; }
@@ -154,8 +159,9 @@ class LanCherTextualApp(App[int]):
     #plan-panel { display: none; height: auto; max-height: 6; color: $text-muted; }
     #plan-preview { height: auto; max-height: 4; }
     .plan-actions { height: 1; }
-    #plan-execute { color: $primary; }
-    #status-bar { margin: 0 2 1 2; height: 1; color: $text-muted; }
+    #plan-execute { color: $primary; text-style: bold; }
+    #plan-execute:focus { color: $background; }
+    #status-bar { margin: 0 2 1 2; height: 1; color: $text-muted; background: $surface; }
     #status-left, #status-left.-plan, #status-left.-acceptEdits, #status-left.-bypass { color: $text-muted; width: 1fr; }
     #status-center { width: auto; max-width: 35%; }
     #status-right { width: auto; margin-left: 1; color: $text-muted; }
@@ -488,17 +494,33 @@ class LanCherTextualApp(App[int]):
             compact_state = "正在停止" if "停止" in compact_state else "处理中"
         compact_state = compact_state[:6]
         label = self._status_left_text()
+        model, phase, policy = label.rsplit(" · ", 2)
         if self.size.width < 64:
-            model, phase, policy = label.rsplit(" · ", 2)
             available = max(8, self.size.width - 4)
             model_limit = max(5, available - (10 if self.size.width < 48 else 28))
-            if len(model) > model_limit:
-                model = model[:model_limit - 1] + "…"
+            model_text = Text(model)
+            model_text.truncate(model_limit, overflow="ellipsis")
+            model = model_text.plain
             if self.size.width < 48:
                 label = f"{model} · {phase}\n{policy} · {estimate}\n{compact_state} · Enter {enter_action}"
             else:
                 label = f"{model} · {phase} · {policy}\n{estimate} · {compact_state} · Enter {enter_action}"
-        status_left.update(label)
+        else:
+            # 模型名按终端格宽截断，给阶段与权限保留位置。
+            # 使用本轮状态的宽度，不能沿用状态变化前上一帧的布局。
+            hud_width = max(1, min(self.size.width, 112) - 4)
+            center_width = min(cell_len(f"{estimate} · {center_text}"), (hud_width * 35 + 99) // 100)
+            available = hud_width - center_width - cell_len("Ctrl+D 详情") - 1
+            model_text = Text(model)
+            model_text.truncate(max(1, available - cell_len(f" · {phase} · {policy}")), overflow="ellipsis")
+            model = model_text.plain
+            label = f"{model} · {phase} · {policy}"
+        colors = theme_palette(self.theme)
+        summary = Text(label, style=colors["muted"])
+        summary.stylize("bold " + colors["text"], 0, len(model))
+        phase_start = len(model) + 3
+        summary.stylize(colors["primary"], phase_start, phase_start + len(phase))
+        status_left.update(summary)
         for candidate in MODE_SEQUENCE:
             status_left.set_class(candidate != "default" and candidate == self._session_controller.runtime_mode, f"-{candidate}")
 

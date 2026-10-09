@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from textual.widgets import Button, Static
 
 from lancher_code.models import MessageUsage, StreamEvent, TraceEntry, TurnEvent, UIConfig
@@ -344,3 +345,37 @@ async def test_discussion_context_estimate_preserves_phase(openai_provider_confi
     async with app.run_test():
         assert estimates
         assert set(estimates) == {"discuss"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 40), (160, 40)])
+async def test_long_model_hud_keeps_phase_and_policy_when_status_width_changes(openai_provider_config, tmp_path, size):
+    openai_provider_config.model = "用于复杂代码任务的长中文模型名称" * 4
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    session.set_work_phase("plan")
+    async with app.run_test(size=size) as pilot:
+        for hint in ("就绪", "等待确认 · 可继续编辑草稿", "就绪"):
+            app._status_hint = hint
+            app._refresh_status_bar()
+            await pilot.pause()
+            label = app.query_one("#status-left", Static)
+            text = label.render().plain
+            assert "计划 · 逐次确认" in text
+            assert cell_len(text) <= label.region.width
+
+
+@pytest.mark.asyncio
+async def test_narrow_inline_plan_keeps_both_actions_inside_view(openai_provider_config, tmp_path):
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    session.set_work_phase("plan")
+    session.set_plan_snapshot("1. 调整保存行为\n2. 验证取消", source_message_id="plan-source", ready=True)
+    async with app.run_test(size=(32, 16)) as pilot:
+        await pilot.pause()
+        for target in ("#plan-review", "#plan-execute"):
+            button = app.query_one(target, Button)
+            assert button.region.right <= 32
+            assert button.region.bottom <= 16
+        app.query_one("#plan-review", Button).focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, PlanReviewScreen)

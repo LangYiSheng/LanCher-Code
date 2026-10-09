@@ -15,6 +15,7 @@ from textual.widgets import Button, Checkbox, Collapsible, Input, Select, Static
 
 from lancher_code.model_catalog import iter_model_refs, model_display_name, new_entry_id
 from lancher_code.models import AppConfig, ModelDefinition, ProviderDefinition, ThinkingConfig
+from lancher_code.tui_views.theme import theme_palette
 
 PROTOCOLS = (("OpenAI 兼容", "openai"), ("Anthropic", "claude"))
 
@@ -23,10 +24,11 @@ class DeleteProviderScreen(ModalScreen[bool]):
     BINDINGS = [("escape", "cancel", "取消")]
     CSS = """
     DeleteProviderScreen { align: center middle; background: $background 80%; }
-    #delete-provider-box { width: 64; max-width: 95%; height: auto; max-height: 90%; padding: 1 2; background: $surface; border: solid $primary; overflow-y: auto; }
+    #delete-provider-box { width: 64; max-width: 95%; height: auto; max-height: 90%; padding: 1 2; background: $surface; border: solid $panel; overflow-y: auto; }
     #delete-provider-box Static { height: auto; }
     #delete-provider-actions { height: auto; margin-top: 1; }
-    #delete-provider-actions Button { min-width: 8; margin-right: 1; }
+    #delete-provider-actions Button { min-width: 8; margin-right: 1; background: transparent; color: $text; text-style: none; border: none; }
+    #delete-provider-actions Button:focus { background: $foreground; color: $background; text-style: bold; }
     DeleteProviderScreen.-narrow #delete-provider-actions { layout: vertical; }
     DeleteProviderScreen.-narrow #delete-provider-actions Button { width: 1fr; margin-right: 0; }
     """
@@ -67,8 +69,8 @@ class ModelSettingsEditor(Vertical):
     DEFAULT_CSS = """
     ModelSettingsEditor { height: auto; }
     ModelSettingsEditor .model-section { height: auto; }
-    ModelSettingsEditor .connection-summary { height: auto; color: $text-muted; border-left: solid $primary; padding-left: 1; margin: 1 0; }
-    ModelSettingsEditor .catalog-help { height: auto; color: $text-muted; margin: 1 0; }
+    ModelSettingsEditor .connection-summary { height: auto; color: $text; border-left: solid $panel; padding-left: 1; margin: 1 0; }
+    ModelSettingsEditor .catalog-help { height: auto; color: $text-muted; margin: 1 0 0 0; }
     ModelSettingsEditor Tree { height: auto; min-height: 2; max-height: 24; background: transparent; padding: 0; }
     ModelSettingsEditor .inherit-note { color: $text-muted; height: auto; }
     ModelSettingsEditor .entry-id { color: $text-muted; height: auto; }
@@ -106,13 +108,16 @@ class ModelSettingsEditor(Vertical):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="model-catalog", classes="model-section"):
-            yield Static("", id="current-model-summary", markup=False)
-            yield Button("切换本次对话模型 →", id="pick-current", classes="link-button")
-            yield Static("", id="default-model-summary", markup=False)
-            yield Button("更改新对话默认 →", id="pick-default", classes="link-button")
-            yield Static("供应商保存地址与密钥；其下模型指定 API 模型名。\n选择供应商编辑连接，选择模型编辑参数。", classes="catalog-help", id="catalog-help")
+            with Horizontal(classes="model-usage-row"):
+                yield Static("", id="current-model-summary", markup=False)
+                yield Button("切换", id="pick-current", classes="link-button")
+            with Horizontal(classes="model-usage-row"):
+                yield Static("", id="default-model-summary", markup=False)
+                yield Button("更改", id="pick-default", classes="link-button")
+            yield Static("供应商与模型", id="catalog-heading")
             yield Tree("供应商与模型", id="model-tree")
             yield Button("＋ 添加供应商", id="provider-new", classes="link-button")
+            yield Static("供应商保存连接，模型继承参数；Enter 编辑选中项。", classes="catalog-help", id="catalog-help")
         with Vertical(id="provider-fields", classes="model-section"):
             yield Static("", id="provider-title", classes="editor-title", markup=False)
             yield Static("", id="provider-impact", classes="connection-summary", markup=False)
@@ -157,7 +162,16 @@ class ModelSettingsEditor(Vertical):
 
     def set_compact(self, compact: bool) -> None:
         self.set_class(compact, "-compact")
-        self.query_one("#catalog-help", Static).update("供应商 → 模型 · Enter 编辑" if compact else "供应商保存地址与密钥；其下模型指定 API 模型名。\n选择供应商编辑连接，选择模型编辑参数。")
+        self.query_one("#catalog-help", Static).update("Enter 编辑 · ←/→ 展开收起" if compact else "供应商保存连接，模型继承参数；Enter 编辑选中项。")
+        # 尺寸变化只更新标签，不重建节点，以保留键盘焦点和展开状态。
+        if self.config is not None:
+            for node in self.query_one("#model-tree", Tree).root.children:
+                _, provider_id, _ = node.data
+                provider = self.config.providers[provider_id]
+                node.set_label(self._provider_label(provider))
+                for child in node.children:
+                    _, _, model_id = child.data
+                    child.set_label(self._model_label(f"{provider_id}/{model_id}", provider.models[model_id]))
 
     def load_config(self, config: AppConfig, current_ref: str | None = None) -> None:
         self.config = deepcopy(config)
@@ -180,24 +194,44 @@ class ModelSettingsEditor(Vertical):
         if self.config is None:
             return
         refs = iter_model_refs(self.config)
+        colors = theme_palette(self.app.theme)
         current = model_display_name(self.config, self.current_ref) if self.current_ref in refs else "未选择"
-        self.query_one("#current-model-summary", Static).update(Text(f"本次对话使用　{current}", no_wrap=True, overflow="ellipsis"))
-        self.query_one("#default-model-summary", Static).update(Text(f"新对话默认　{model_display_name(self.config, self.config.default_model)}", no_wrap=True, overflow="ellipsis"))
+        for widget_id, label, value in (
+            ("current-model-summary", "本次对话使用  ", current),
+            ("default-model-summary", "新对话默认    ", model_display_name(self.config, self.config.default_model)),
+        ):
+            summary = Text(label, style=colors["muted"], no_wrap=True, overflow="ellipsis")
+            summary.append(value, style=colors["text"])
+            self.query_one(f"#{widget_id}", Static).update(summary)
         tree = self.query_one("#model-tree", Tree)
         tree.show_root = False
         tree.root.remove_children()
         for provider_id, provider in self.config.providers.items():
-            node = tree.root.add(Text(f"{provider.name} · {len(provider.models)} 个模型  编辑连接 ›", style="bold"), ("provider", provider_id, None), expand=True)
+            node = tree.root.add(self._provider_label(provider), ("provider", provider_id, None), expand=True)
             for model_id, model in provider.models.items():
                 ref = f"{provider_id}/{model_id}"
-                flags = []
-                if ref == self.current_ref:
-                    flags.append("本次使用")
-                if ref == self.config.default_model:
-                    flags.append("新对话默认")
-                suffix = f"  [{' · '.join(flags)}]" if flags else ""
-                node.add_leaf(Text(f"{model.display_name or model.model_name} · {model.model_name}{suffix}"), ("model", provider_id, model_id))
+                node.add_leaf(self._model_label(ref, model), ("model", provider_id, model_id))
         tree.root.expand()
+
+    def _provider_label(self, provider: ProviderDefinition) -> Text:
+        label = Text(provider.name, style="bold")
+        label.append(f"  {len(provider.models)} 个模型", style="not bold " + theme_palette(self.app.theme)["muted"])
+        return label
+
+    def _model_label(self, reference: str, model: ModelDefinition) -> Text:
+        compact = self.has_class("-compact")
+        secondary = "not bold " + theme_palette(self.app.theme)["muted"]
+        label = Text(model.display_name or model.model_name, style="bold")
+        if model.display_name and not compact:
+            label.append(f"  {model.model_name}", style=secondary)
+        flags = []
+        if reference == self.current_ref:
+            flags.append("本次" if compact else "本次使用")
+        if reference == self.config.default_model:
+            flags.append("默认" if compact else "新对话默认")
+        if flags:
+            label.append(f"  [{' · '.join(flags)}]", style=secondary)
+        return label
 
     @on(Tree.NodeSelected, "#model-tree")
     def select_entry(self, event: Tree.NodeSelected) -> None:
