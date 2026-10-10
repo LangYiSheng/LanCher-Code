@@ -19,6 +19,7 @@ from lancher_code.models import (
     ConversationMessage,
     DeferredToolGroup,
     MessageUsage,
+    add_usage,
     ProviderConfig,
     PromptContext,
     RuntimeMode,
@@ -41,11 +42,16 @@ from lancher_code.context_management import (
     compact_transcript,
     estimate_request_tokens,
     offload_tool_results,
+    project_tool_results,
     record_file_snapshot,
     update_usage_anchor,
 )
 from lancher_code.logging_system import get_logger
 from lancher_code.providers.base import ChatProvider
+from lancher_code.context_budget import context_budget
+from lancher_code.context_tokens import estimate_request
+from lancher_code.request_tracking import tracked_stream
+from lancher_code.run_usage import RequestUsageRecord, RunUsageTracker, summarize_records
 
 from lancher_code.permission_engine import PermissionStorage
 from lancher_code.prompting import (
@@ -90,6 +96,7 @@ class SessionController:
         initial_permission_policy: PermissionPolicy | None = None,
         permission_storage: PermissionStorage | None = None,
         selected_model_ref: str | None = None,
+        usage_tracker: RunUsageTracker | None = None,
     ) -> None:
         self._provider_config = provider_config
         self._selected_model_ref = selected_model_ref
@@ -98,6 +105,7 @@ class SessionController:
         self._current_date = current_date or datetime.now().astimezone().date()
         self._transcript: list[ConversationMessage] = []
         self._sessions = SessionService(self._cwd)
+        self._usage_tracker = usage_tracker or RunUsageTracker()
         self._visited_session_ids: list[str] = []
         self._execution_runtime = None
         self._last_flush = monotonic()
@@ -326,9 +334,7 @@ class SessionController:
     @persist_change()
     def add_message_usage(self, message_id: str, usage: MessageUsage) -> SessionMessage:
         message = self.get_message(message_id)
-        message.usage.input_tokens += usage.input_tokens
-        message.usage.cached_input_tokens += usage.cached_input_tokens
-        message.usage.output_tokens += usage.output_tokens
+        message.usage = add_usage(message.usage, usage) if message.usage.known_fields else copy.deepcopy(usage)
         return message
 
     @persist_change(streaming=True)
@@ -475,7 +481,8 @@ class SessionController:
         message = self.finish_trace_segment(message_id)
         message.status = "complete"
         message.trace.collapsed = True
-        message.usage = usage or MessageUsage()
+        if usage is not None:
+            message.usage = copy.deepcopy(usage)
         if message.content.strip():
             self._transcript.append(ConversationMessage.text_message("assistant", message.content))
         self._active_dynamic_context = None
@@ -536,6 +543,9 @@ class SessionController:
             permission_policy if permission_policy is not None else (None if mode is not None else self.permission_policy),
         )
         thinking = self._request_thinking()
+        output_tokens = context_budget(self.context_window).output_tokens
+        if thinking is not None and thinking.enabled:
+            output_tokens = max(output_tokens, thinking.effective_budget_tokens + min(4096, max(256, self.context_window // 32)))
         if not allow_tool_calls:
             filtered_tools = []
         else:
@@ -557,17 +567,60 @@ class SessionController:
             mode=legacy_runtime_mode(active_phase, active_policy),
             work_phase=active_phase,
             permission_policy=active_policy,
+            session_id=self.session_id,
+            max_output_tokens=output_tokens,
         )
 
     def estimate_request_tokens(self, request: ChatRequest) -> int:
         return estimate_request_tokens(request, self.context_state)
 
+    def context_estimate(self, request: ChatRequest):
+        # 界面查看不同工具集合时，不能清空下一次真实请求仍可用的锚点。
+        return estimate_request(request, copy.deepcopy(self.context_state))
+
+    def bind_usage_request(self, request: ChatRequest, *, turn_id=None, message_id=None, purpose=None) -> ChatRequest:
+        """回调捕获请求所属会话，不能借当前界面状态把并发请求记到别处。"""
+        request.session_id = self.session_id
+        request.run_id = self._usage_tracker.run_id
+        request.request_id = request.request_id or uuid4().hex
+        request.turn_id = turn_id
+        request.message_id = message_id
+        if purpose is not None:
+            request.purpose = purpose
+        state, service = self._state, self._sessions
+
+        def record_usage(data):
+            record = RequestUsageRecord.from_dict(data)
+            if record.session_id != state.session_id:
+                raise ValueError("请求用量的 Session 归属不一致。")
+            encoded = record.to_dict()
+            if state.request_usage.get(record.request_id) == encoded:
+                return
+            # 先验证运行归属与请求身份，拒绝坏回调污染会话日志。即使随后
+            # 磁盘保存失败，本次启动仍保留已经观察到的实际用量。
+            self._usage_tracker.accept_record(record)
+            service.record_usage(encoded, turn_id=record.turn_id)
+            state.request_usage[record.request_id] = encoded
+            if record.message_id is not None:
+                related = [RequestUsageRecord.from_dict(item) for item in state.request_usage.values()
+                           if item.get("message_id") == record.message_id]
+                target = next((item for item in state.messages if item.id == record.message_id), None)
+                if target is not None:
+                    target.usage = summarize_records(related).usage
+            if state is self._state:
+                self._mark_dirty()
+                self.flush(force=record.status != "running")
+
+        request.usage_callback = record_usage
+        return request
+
+    def stream_request(self, provider: ChatProvider, request: ChatRequest):
+        return tracked_stream(provider, request, protocol=self._provider_config.protocol,
+                              run_id=self._usage_tracker.run_id)
+
     @persist_change()
     def update_context_usage(self, request: ChatRequest, usage: MessageUsage) -> None:
-        if usage.input_tokens + usage.output_tokens > 0:
-            update_usage_anchor(self.context_state, request, usage)
-        else:
-            self.context_state.usage_anchor = None
+        update_usage_anchor(self.context_state, request, usage)
         self._mark_dirty()
 
     @persist_change()
@@ -598,9 +651,9 @@ class SessionController:
                 return 0
             self.paths.validate()
             result = await offload_tool_results(self.transcript, working_state, self._cwd,
-                                               result_directory=self.paths.blobs / 'tool-results')
-            if result.transcript != self._transcript or working_state != self.context_state:
-                self._transcript = result.transcript
+                                               result_directory=self.paths.blobs / 'tool-results',
+                                               context_window=self.context_window)
+            if working_state != self.context_state:
                 self._state.context_management = working_state
                 self._mark_dirty()
             self.flush()
@@ -614,6 +667,7 @@ class SessionController:
         deferred_tool_groups: list[DeferredToolGroup] | None = None,
         persist: bool = False,
         cancellation_token: "CancellationToken | None" = None,
+        turn_id: str | None = None,
     ) -> ContextCompactionResult:
         async with self._context_lock:
             previous_transcript = copy.deepcopy(self._transcript)
@@ -624,26 +678,51 @@ class SessionController:
                 allow_tool_calls=True,
                 deferred_tool_groups=deferred_tool_groups,
             )
-            before_tokens = self.estimate_request_tokens(before_request)
+            before_tokens = self.context_estimate(before_request).tokens
+            controller = self
+
+            class SummaryProvider:
+                def stream_chat(self, request):
+                    return controller.stream_request(provider, request)
+
             compacted = await compact_transcript(
-                provider=provider,
+                provider=SummaryProvider(),
                 model=self._provider_config.model,
-                transcript=self.transcript,
+                transcript=project_tool_results(self.transcript, self.context_state, context_window=self.context_window),
                 visible_tools=visible_tools,
                 state=self.context_state,
                 context_window=self.context_window,
                 cancellation_token=cancellation_token,
+                request_factory=lambda request: self.bind_usage_request(request, turn_id=turn_id, purpose="compaction"),
             )
+            # 摘要读取的是模型预览视图，但保留的近期结果仍要保存原文。
+            # 否则下次构建请求会把预览再次当原文包装，大小与内容都失真。
+            original_results: dict[str, list[str]] = {}
+            for message in previous_transcript:
+                for block in message.blocks:
+                    if block.kind == "tool_result" and block.call_id:
+                        original_results.setdefault(block.call_id, []).append(block.text)
+            # 不同轮次的供应商可能复用同一 call_id。近期历史是完整组的
+            # 后缀，因此从后向前逐次匹配，不能用单值字典覆盖较早结果。
+            for message in reversed(compacted.transcript):
+                for block in reversed(message.blocks):
+                    originals = original_results.get(block.call_id)
+                    if block.kind == "tool_result" and originals:
+                        block.text = originals.pop()
             self._transcript = compacted.transcript
             self.context_state.usage_anchor = None
-            after_request = self.build_request(
-                visible_tools,
-                allow_tool_calls=True,
-                deferred_tool_groups=deferred_tool_groups,
-            )
-            after_tokens = self.estimate_request_tokens(after_request)
-            self._mark_dirty()
             try:
+                after_request = self.build_request(
+                    visible_tools,
+                    allow_tool_calls=True,
+                    deferred_tool_groups=deferred_tool_groups,
+                )
+                after_tokens = self.estimate_request_tokens(after_request)
+                budget = context_budget(self.context_window, after_request.max_output_tokens)
+                if after_tokens >= before_tokens or after_tokens > budget.input_limit:
+                    from lancher_code.errors import ContextCompactionError
+                    raise ContextCompactionError("摘要没有缩小完整请求或仍超出输入预算，已保留原上下文。")
+                self._mark_dirty()
                 self.flush(context_event='context.compacted')
             except Exception:
                 self._transcript = previous_transcript
@@ -656,13 +735,13 @@ class SessionController:
                 dropped_groups=compacted.dropped_groups,
             )
 
-    def total_usage(self) -> MessageUsage:
-        total = MessageUsage()
-        for message in self._state.messages:
-            total.input_tokens += message.usage.input_tokens
-            total.cached_input_tokens += message.usage.cached_input_tokens
-            total.output_tokens += message.usage.output_tokens
-        return total
+    def usage_summary(self, message_id: str | None = None):
+        records = [RequestUsageRecord.from_dict(item) for item in self._state.request_usage.values()
+                   if message_id is None or item.get("message_id") == message_id]
+        return summarize_records(records)
+
+    def total_usage(self):
+        return self.usage_summary()
 
     def _snapshot(self):
         return SessionCodec.encode(self._state, self._transcript,
@@ -849,6 +928,17 @@ class SessionController:
         state: SessionState, transcript: list[ConversationMessage]
     ) -> list[ConversationMessage]:
         """恢复自动保存的活动任务；补齐未知结果，绝不重放工具操作。"""
+        for record in state.request_usage.values():
+            if record['status'] == 'running':
+                record['status'] = 'incomplete'
+                record['usage']['is_final'] = False
+        # 消息用量是账本的派生视图。崩溃可能发生在 usage 事件已落盘、
+        # 聊天气泡尚未保存之间，恢复时不能沿用那个过期的显示快照。
+        for message in state.messages:
+            related = [RequestUsageRecord.from_dict(record) for record in state.request_usage.values()
+                       if record.get('message_id') == message.id]
+            if related:
+                message.usage = summarize_records(related).usage
         interrupted_ids: set[str] = set()
         for message in state.messages:
             if message.role == "assistant" and message.status == "streaming":
@@ -947,7 +1037,7 @@ class SessionController:
 
     def _request_transcript(self) -> list[ConversationMessage]:
         messages: list[ConversationMessage] = []
-        for message in self.transcript:
+        for message in project_tool_results(self.transcript, self.context_state, context_window=self.context_window):
             blocks = list(message.blocks)
             if (
                 message.role == "user"

@@ -32,9 +32,9 @@ def reported_usage(*, fields=frozenset({"input", "output", "cache"}), status="co
     request_id = tracker.start_request(protocol="openai", model="test-model")
     tracker.update_request(
         request_id,
-        MessageUsage(input_tokens=12_340 if "input" in fields else 0,
-                     output_tokens=2_156 if "output" in fields else 0,
-                     cached_input_tokens=8_000 if "cache" in fields else 0),
+        MessageUsage(input_tokens=12_340 if "input" in fields else None,
+                     output_tokens=2_156 if "output" in fields else None,
+                     cached_input_tokens=8_000 if "cache" in fields else None),
         provided_fields=fields,
     )
     tracker.finish_request(request_id, status=status)
@@ -151,6 +151,7 @@ def test_complete_usage_prints_input_output_cache_total_and_weighted_ratio():
     assert "缓存命中：8,000 tokens" in text
     assert "总计：14,496 tokens" in text
     assert "缓存比：64.8%" in text
+    assert "本次启动已上报用量" in text
     assert "已上报统计" not in text
 
 
@@ -171,7 +172,7 @@ def test_missing_usage_fields_are_unknown_instead_of_measured_zero():
     assert "输入：12,340 tokens" in text
     assert "输出：--" in text
     assert "缓存命中：--" in text
-    assert "总计：--" in text
+    assert "总计：12,340 tokens（部分上报）" in text
     assert "输出：0 tokens" not in text
     assert "缓存命中：0 tokens" not in text
     assert "已上报统计" in text
@@ -184,7 +185,7 @@ def test_known_output_is_retained_when_input_is_not_reported():
 
     assert "输入：--" in text
     assert "输出：2,156 tokens" in text
-    assert "总计：--" in text
+    assert "总计：2,156 tokens（部分上报）" in text
     assert "缓存比：--" in text
     assert "已上报统计" in text
 
@@ -219,3 +220,50 @@ def test_successful_process_cleanup_reminds_user_to_restart_services():
 
     assert "已收尾 2 个托管进程" in text
     assert "服务需要重新启动" in text
+
+
+def test_summary_keeps_cache_creation_and_reasoning_as_subitems():
+    tracker = RunUsageTracker()
+    request_id = tracker.start_request(protocol="claude", model="test-model")
+    tracker.update_request(request_id, MessageUsage(
+        input_tokens=100, output_tokens=20, cached_input_tokens=60,
+        cache_creation_input_tokens=10, reasoning_output_tokens=5,
+    ), provided_fields=frozenset({"input", "output", "cache", "cache_creation", "reasoning"}))
+    tracker.finish_request(request_id, status="completed")
+
+    text = render_summary(usage=tracker.snapshot())
+
+    assert "缓存创建（输入子项）：10 tokens" in text
+    assert "推理（输出子项）：5 tokens" in text
+    assert "总计：120 tokens" in text
+
+
+def test_summary_hides_invalid_cache_ratio_and_reports_the_bad_snapshot():
+    tracker = RunUsageTracker()
+    request_id = tracker.start_request(protocol="openai", model="test-model")
+    tracker.update_request(request_id, MessageUsage(
+        input_tokens=100, output_tokens=20, cached_input_tokens=120,
+    ), provided_fields=frozenset({"input", "output", "cache"}))
+    tracker.finish_request(request_id, status="completed")
+
+    text = render_summary(usage=tracker.snapshot())
+
+    assert "缓存比：--（上报数据异常）" in text
+    assert "120.0%" not in text
+    assert "有 1 次请求上报数据异常" in text
+
+
+def test_summary_marks_partial_totals_when_only_one_request_reported_input():
+    tracker = RunUsageTracker()
+    for usage in (MessageUsage(input_tokens=100, output_tokens=20, cached_input_tokens=0),
+                  MessageUsage(output_tokens=30, cached_input_tokens=0)):
+        request_id = tracker.start_request(protocol="openai", model="test-model")
+        tracker.update_request(request_id, usage, provided_fields=usage.known_fields)
+        tracker.finish_request(request_id, status="completed")
+
+    text = render_summary(usage=tracker.snapshot())
+
+    assert "输入：100 tokens（部分上报）" in text
+    assert "输出：50 tokens" in text
+    assert "总计：150 tokens（部分上报）" in text
+    assert "缓存比：--" in text

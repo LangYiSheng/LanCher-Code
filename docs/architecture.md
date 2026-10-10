@@ -39,7 +39,8 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 | 应用装配 | `app.run_app()` | 只做组装，不做业务逻辑 |
 | 会话控制器 | `SessionController`（`session.py`）与 `sessions/` | 会话状态、transcript、阶段、权限、计划与队列；独立 UUID 和事件日志持久化 |
 | 工具循环 | `TurnRunner`（`turn_runner.py`） | 回合调度、忙时输入投递、取消、压缩与计划确认 |
-| 上下文治理 | `context_management.py` | Token 估算、结果卸载、摘要压缩（纯函数 + 少量 IO） |
+| 上下文治理 | `context_tokens.py`、`context_budget.py`、`context_management.py` | 可靠输入校准、动态额度、结果卸载及摘要候选验证 |
+| 请求用量 | `run_usage.py`、`usage_display.py` | 按请求事实保存消耗，生成会话/本次启动统计并一致显示未知与部分字段 |
 | 权限引擎 | `PermissionEngine` / `PermissionStorage`（`permission_engine.py`） | 权限判定与规则存储，不执行工具 |
 | 工具系统 | `ToolRegistry` / `ToolExecutor` / `Tool`（`tools/`） | 工具注册、调度、执行 |
 | 模型供应商 | `ChatProvider` 协议 + `BaseChatProvider`（`providers/`） | 统一流式事件输出 |

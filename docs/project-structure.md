@@ -28,7 +28,11 @@ lancher-code/
 │   ├── sessions/                  # 路径、事件仓库、状态编解码与服务
 │   ├── execution/                 # 资源调度、调用与进程状态、输出和平台后端
 │   ├── turn_runner.py             # TurnRunner：ReAct 工具循环与事件流
-│   ├── context_management.py      # 上下文治理：Token 估算、结果卸载、摘要压缩
+│   ├── context_tokens.py          # 模型可见内容粗估、可靠输入 usage 校准
+│   ├── context_budget.py          # 窗口、实际输出、工具结果及近期历史的动态额度
+│   ├── context_management.py      # 工具结果卸载、摘要验证与候选上下文
+│   ├── run_usage.py               # 实际请求尝试的统一用量账本
+│   ├── usage_display.py           # 已上报、未知、部分统计和缓存比的统一显示
 │   ├── prompting.py               # 提示词构建（system prompt / Plan Mode / 动态提醒）
 │   ├── permission_engine.py       # PermissionEngine + PermissionStorage：五层权限
 │   ├── settings_service.py        # SettingsService：设置页数据读写与校验
@@ -119,7 +123,7 @@ lancher-code/
 | 入口层 | `main.py`、`lancher_code/cli.py`、`__main__.py` | 解析参数、初始化日志、启动事件循环 |
 | 装配层 | `lancher_code/app.py` | 组装所有核心对象，编排启动顺序 |
 | 界面层 | `lancher_code/tui_views/`、`tui.py` | Textual 界面，只消费事件、不直接接触网络 |
-| 会话/流程层 | `session.py`、`turn_runner.py`、`context_management.py`、`prompting.py` | 对话状态、工具循环、上下文治理、提示词 |
+| 会话/流程层 | `session.py`、`turn_runner.py`、`context_tokens.py`、`context_budget.py`、`context_management.py`、`run_usage.py`、`prompting.py` | 对话状态、工具循环、上下文治理、请求消耗、提示词 |
 | 能力层 | `tools/`、`providers/`、`mcp/` | 工具执行、模型请求、MCP 扩展 |
 | 基础层 | `models.py`、`errors.py`、`logging_system.py`、`config_system/` | 数据模型、异常、日志、配置 |
 

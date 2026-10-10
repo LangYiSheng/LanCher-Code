@@ -17,7 +17,6 @@ from textual.widgets import Button, Static, TextArea
 from lancher_code.errors import LanCherError
 from lancher_code.model_catalog import iter_model_refs, model_display_name
 from lancher_code.models import (
-    MessageUsage,
     PermissionRequest,
     ProviderConfig,
     RuntimeMode,
@@ -29,6 +28,8 @@ from lancher_code.mcp.manager import MCPClientManager, MCPInitializationProgress
 from lancher_code.settings_service import SettingsService
 from lancher_code.logging_system import get_logger
 from lancher_code.session import SessionController
+from lancher_code.run_usage import RunUsageSummary
+from lancher_code.usage_display import usage_lines
 from lancher_code.sessions.paths import SessionPaths
 from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.slash_commands import (
@@ -180,7 +181,8 @@ class LanCherTextualApp(App[int]):
     #status-left, #status-left.-plan, #status-left.-acceptEdits, #status-left.-bypass { color: $text-muted; width: 1fr; }
     #status-center { width: auto; max-width: 35%; }
     #status-right { width: auto; margin-left: 1; color: $text-muted; }
-    #status-details { display: none; height: auto; max-height: 8; margin: 0 2; color: $text-muted; }
+    #status-details-scroll { display: none; height: auto; max-height: 8; margin: 0 2; overflow-x: hidden; }
+    #status-details { height: auto; color: $text-muted; }
     Screen.-narrow #phase-explanation { display: none; }
     Screen.-narrow #status-center { display: none; }
     Screen.-narrow #status-bar { height: 2; }
@@ -272,7 +274,8 @@ class LanCherTextualApp(App[int]):
                 yield Static(id="status-left", markup=False)
                 yield Static(id="status-center")
                 yield Static(id="status-right")
-            yield Static(id="status-details", markup=False)
+            with VerticalScroll(id="status-details-scroll"):
+                yield Static(id="status-details", markup=False)
 
     async def on_mount(self) -> None:
         self.screen.set_class(self.size.width < 64, "-narrow")
@@ -734,7 +737,8 @@ class LanCherTextualApp(App[int]):
             f"会话工作目录：{self._session_controller.paths.workspace if self._session_controller.paths else '尚未创建'}\n"
             f"模型引用：{ref or self._provider_config.model}\n"
             f"新对话默认：{getattr(config, 'default_model', None) or '当前配置'}\n"
-            f"{self._format_usage_text(usage)} · {banner._context_usage_status}\n"
+            f"会话累计已上报用量：\n{self._format_usage_text(usage)}\n"
+            f"当前{banner._context_usage_status} · {getattr(self, '_context_estimate_label', '未校准估算')}\n"
             f"托管进程：运行 {execution['running']} · 会话后台 {execution['background']} · 排队 {execution['waiting']}\n"
             f"未读完成通知：{execution['notifications']}{notification_hint}\n"
             f"{banner._mcp_status}"
@@ -774,9 +778,12 @@ class LanCherTextualApp(App[int]):
                 permission_policy=self._session_controller.permission_policy,
                 deferred_tool_groups=deferred_tool_groups,
             )
-            used_tokens = self._session_controller.estimate_request_tokens(request)
+            estimate = self._session_controller.context_estimate(request)
+            used_tokens = estimate.tokens
+            self._context_estimate_label = "已校准估算" if estimate.source == "usage_calibrated" else "未校准估算"
         except Exception:
             logger.exception("event=tui_context_usage_estimate_failed")
+            self._context_estimate_label = "估算暂不可用"
             banner.update_context_usage(None, self._session_controller.context_window)
             self._refresh_status_bar()
             return
@@ -794,11 +801,8 @@ class LanCherTextualApp(App[int]):
         return f"{model} · {phase} · {policy}"
 
     @staticmethod
-    def _format_usage_text(usage: MessageUsage) -> str:
-        input_text = f"Tokens In {usage.input_tokens}"
-        if usage.cached_input_tokens > 0:
-            input_text += f" (cached {usage.cached_input_tokens})"
-        return f"{input_text} | Out {usage.output_tokens}"
+    def _format_usage_text(usage: RunUsageSummary) -> str:
+        return "\n".join(usage_lines(usage))
 
     async def _mount_message_widget(self, message: SessionMessage) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)
@@ -928,11 +932,16 @@ class LanCherTextualApp(App[int]):
             self.push_screen(ReadOnlyDetailsScreen(str(self.query_one("#status-details", Static).render())))
             return
         self._details_open = not self._details_open
-        self.query_one("#status-details", Static).display = self._details_open
+        viewport = self.query_one("#status-details-scroll", VerticalScroll)
+        viewport.display = self._details_open
+        if self._details_open:
+            viewport.focus()
+        else:
+            self.query_one(ComposerTextArea).focus()
 
     def _close_hud_details(self) -> None:
         self._details_open = False
-        self.query_one("#status-details", Static).display = False
+        self.query_one("#status-details-scroll", VerticalScroll).display = False
 
     async def _refresh_pending_queue(self) -> None:
         await self.query_one(PendingQueue).update_items(
@@ -981,7 +990,7 @@ class LanCherTextualApp(App[int]):
                 panel.styles.max_height = 12
             return
         self._details_open = False
-        self.query_one("#status-details", Static).display = False
+        self.query_one("#status-details-scroll", VerticalScroll).display = False
         self.query_one(BannerWidget).styles.height = 1
         self.query_one(BannerWidget).styles.margin = (0, 2, 0, 2)
         self.query_one("#chat-view").styles.margin = (0, 1, 0, 1)

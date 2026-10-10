@@ -167,9 +167,9 @@ async def test_real_context_compaction_appends_boundary_and_preserves_original_l
     provider = Provider([reply(summary)])
     try:
         for index in range(4):
-            controller.create_user_message(f"原始用户消息 {index}")
+            controller.create_user_message(f"原始用户消息 {index}\n" + "完整讨论内容" * 1200)
             message = controller.create_assistant_message()
-            controller.append_message_content(message.id, f"原始助手回复 {index}")
+            controller.append_message_content(message.id, f"原始助手回复 {index}\n" + "完整分析过程" * 200)
             controller.complete_message(message.id)
         original = controller.paths.events.read_bytes()
         session_id = controller.session_id
@@ -180,7 +180,7 @@ async def test_real_context_compaction_appends_boundary_and_preserves_original_l
         assert sum(event["type"] == "context.compacted" for event in records) == 1
         raw_users = [event["data"]["content"] for event in records
                      if event["type"] == "message.created" and event["data"]["role"] == "user"]
-        assert raw_users == [f"原始用户消息 {index}" for index in range(4)]
+        assert raw_users == [f"原始用户消息 {index}\n" + "完整讨论内容" * 1200 for index in range(4)]
         assert len(controller.state.messages) == 8
         assert "历史已归纳" in str(SessionCodec.project(records)["transcript"])
     finally:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -26,6 +27,7 @@ class OpenAIProvider(BaseChatProvider):
         super().__init__(config=config, client_factory=client_factory, usage_observer=usage_observer)
 
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
+        request = self._prepare_usage_attempt(request)
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -33,7 +35,8 @@ class OpenAIProvider(BaseChatProvider):
         }
         payload = self._build_payload(request)
 
-        usage = MessageUsage()
+        usage = MessageUsage(is_final=False)
+        stop_reason: str | None = None
         usage_request_id: str | None = None
         usage_status: RequestUsageStatus = "failed"
         try:
@@ -46,7 +49,9 @@ class OpenAIProvider(BaseChatProvider):
                     async for _event_name, data in self.iter_sse_events(response):
                         if data == "[DONE]":
                             usage_status = "completed"
-                            yield StreamEvent(kind="message_end", usage=usage)
+                            usage.is_final = True
+                            self._report_usage(usage_request_id, usage, usage.known_fields)
+                            yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason)
                             return
 
                         chunk = self.parse_json_payload(data)
@@ -63,7 +68,10 @@ class OpenAIProvider(BaseChatProvider):
                             usage_keys = dict(
                                 input_keys=("prompt_tokens", "input_tokens"),
                                 output_keys=("completion_tokens", "output_tokens"),
-                                cached_input_keys=("prompt_tokens_details.cached_tokens",),
+                                cached_input_keys=("prompt_tokens_details.cached_tokens", "prompt_cache_hit_tokens",
+                                                   "cached_input_tokens"),
+                                cache_creation_keys=("cache_creation_input_tokens",),
+                                reasoning_keys=("completion_tokens_details.reasoning_tokens", "reasoning_tokens"),
                             )
                             fields = self.usage_fields(chunk["usage"], **usage_keys)
                             incoming = self.build_usage(
@@ -74,6 +82,9 @@ class OpenAIProvider(BaseChatProvider):
                             self._report_usage(usage_request_id, usage, fields)
 
                         for choice in chunk.get("choices", []):
+                            reason = choice.get("finish_reason")
+                            if isinstance(reason, str):
+                                stop_reason = reason
                             delta = choice.get("delta", {})
                             content = delta.get("content")
                             if isinstance(content, str) and content:
@@ -112,7 +123,7 @@ class OpenAIProvider(BaseChatProvider):
                                     )
 
                     usage_status = "incomplete"
-                    yield StreamEvent(kind="message_end", usage=usage)
+                    yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason)
         except (asyncio.CancelledError, GeneratorExit):
             if usage_status != "completed":
                 usage_status = "cancelled"
@@ -145,6 +156,13 @@ class OpenAIProvider(BaseChatProvider):
         }
         if request.allow_tool_calls and request.tools:
             payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
+        if request.max_output_tokens is not None:
+            if type(request.max_output_tokens) is not int or request.max_output_tokens <= 0:
+                raise ProviderRequestError("输出 token 上限必须为正整数。")
+            # 官方接口的新参数包含推理输出；兼容端点继续使用其通用旧字段。
+            limit_field = ("max_completion_tokens" if urlsplit(self.config.base_url).hostname == "api.openai.com"
+                           else "max_tokens")
+            payload[limit_field] = request.max_output_tokens
         return payload
 
     @staticmethod

@@ -335,13 +335,13 @@ async def test_discussion_context_estimate_preserves_phase(openai_provider_confi
     app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
     session.set_work_phase("discuss")
     estimates = []
-    original = session.estimate_request_tokens
+    original = session.context_estimate
 
     def record(request):
         estimates.append(request.work_phase)
         return original(request)
 
-    monkeypatch.setattr(session, "estimate_request_tokens", record)
+    monkeypatch.setattr(session, "context_estimate", record)
     async with app.run_test():
         assert estimates
         assert set(estimates) == {"discuss"}

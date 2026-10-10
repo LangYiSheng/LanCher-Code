@@ -11,6 +11,7 @@ from lancher_code.models import (
     ToolResultReplacement, resolve_runtime_axes,
 )
 from lancher_code.sessions.repository import SessionRepositoryError
+from lancher_code.run_usage import RequestUsageRecord
 
 
 class SessionCodec:
@@ -28,10 +29,12 @@ class SessionCodec:
             'pending_inputs': [asdict(item) for item in state.pending_inputs],
             'context_management': cls._encode_context_management(state.context_management),
             'execution': copy.deepcopy(state.execution),
+            'request_usage': copy.deepcopy(state.request_usage),
         }
         messages = []
         for message in state.messages:
             data = asdict(message)
+            data['usage'] = message.usage.to_dict()
             data['timestamp'] = message.timestamp.isoformat()
             messages.append(data)
         return {'state': state_data, 'messages': messages,
@@ -42,6 +45,8 @@ class SessionCodec:
     def decode(cls, data, session_id):
         try:
             raw = data['state']
+            if 'request_usage' not in raw:
+                raise ValueError('会话缺少请求用量账本，旧计量格式不兼容，请创建新会话。')
             phase, policy = resolve_runtime_axes(work_phase=raw['work_phase'], permission_policy=raw['permission_policy'])
             if raw['previous_runtime_mode'] not in {None, 'default', 'plan', 'acceptEdits', 'bypass'}:
                 raise ValueError('上一阶段状态无效。')
@@ -60,6 +65,7 @@ class SessionCodec:
                 pending_plan_entry_kind=raw['pending_plan_entry_kind'],
                 context_management=cls._decode_context_management(raw['context_management']),
                 execution=cls._decode_execution(raw.get('execution', {'processes': {}, 'invocations': {}, 'inbox': []})),
+                request_usage=cls._decode_request_usage(raw['request_usage'], session_id),
             )
             if len({item.id for item in state.messages}) != len(state.messages):
                 raise ValueError("消息 id 重复。")
@@ -107,7 +113,12 @@ class SessionCodec:
             elif kind in {'context.compacted', 'context.replaced'}:
                 result['transcript'] = copy.deepcopy(data['messages'])
             elif kind == 'state.changed':
+                # 其它状态变更不会携带累计账本，账本仅由请求增量事件更新。
+                if 'request_usage' not in result['state']:
+                    raise SessionRepositoryError('会话缺少请求用量账本，不能恢复未知的历史消耗。')
+                request_usage = result['state']['request_usage']
                 result['state'] = copy.deepcopy(data)
+                result['state']['request_usage'] = request_usage
             elif kind == 'permissions.changed':
                 result['rules'] = copy.deepcopy(data['rules'])
             elif kind == 'model.changed':
@@ -115,11 +126,27 @@ class SessionCodec:
             elif kind.startswith('process.') or kind.startswith('invocation.') or kind == 'execution.inbox_acknowledged':
                 execution = result['state'].setdefault('execution', {'processes': {}, 'invocations': {}, 'inbox': []})
                 SessionCodec.apply_execution_event(execution, kind, data)
+            elif kind == 'usage.request_updated':
+                if 'request_usage' not in result['state']:
+                    raise SessionRepositoryError('会话缺少请求用量账本，不能恢复未知的历史消耗。')
+                result['state']['request_usage'][data['request_id']] = copy.deepcopy(data)
             elif kind in {'session.renamed', 'session.archived', 'turn.started', 'turn.completed', 'turn.failed', 'turn.interrupted', 'tool.started', 'tool.finished'}:
                 pass
             else:
                 raise SessionRepositoryError(f'未知的会话事件：{kind}')
         return result
+
+    @staticmethod
+    def _decode_request_usage(raw, session_id):
+        if not isinstance(raw, dict):
+            raise ValueError('请求用量必须为对象。')
+        records = {}
+        for request_id, data in raw.items():
+            record = RequestUsageRecord.from_dict(data)
+            if record.request_id != request_id or record.session_id != session_id:
+                raise ValueError('请求用量 ID 或 Session 归属不一致。')
+            records[request_id] = record.to_dict()
+        return records
 
     @staticmethod
     def _decode_execution(raw):
@@ -198,7 +225,7 @@ class SessionCodec:
     @staticmethod
     def _encode_context_management(context: ContextManagementState) -> dict[str, object]:
         return {
-            "version": 1,
+            "version": 2,
             "context_id": context.context_id,
             "usage_anchor": asdict(context.usage_anchor) if context.usage_anchor else None,
             "seen_call_ids": sorted(context.seen_call_ids),
@@ -210,8 +237,8 @@ class SessionCodec:
 
     @staticmethod
     def _decode_context_management(value: object) -> ContextManagementState:
-        if not isinstance(value, dict) or value.get("version") != 1:
-            raise TypeError("context_management metadata")
+        if not isinstance(value, dict) or type(value.get("version")) is not int or value.get("version") != 2:
+            raise ValueError("上下文计量格式无效或不兼容，请创建新会话。")
         context_id = value.get("context_id")
         if not isinstance(context_id, str) or not context_id.strip():
             raise ValueError("context_id 无效。")
@@ -221,6 +248,22 @@ class SessionCodec:
             if not isinstance(anchor_data, dict):
                 raise TypeError("usage_anchor")
             anchor = ContextUsageAnchor(**anchor_data)
+            for name in ("token_count", "request_estimated_tokens", "message_count"):
+                count = getattr(anchor, name)
+                # bool 是 int 的子类，但 true 不能充当服务端输入计数。
+                if type(count) is not int or count < 0:
+                    raise ValueError(f"usage_anchor.{name} 必须为非负整数。")
+            for name in ("system_tools_digest", "messages_digest"):
+                digest = getattr(anchor, name)
+                if (not isinstance(digest, str) or len(digest) != 64
+                        or any(character not in "0123456789abcdef" for character in digest)):
+                    raise ValueError(f"usage_anchor.{name} 必须为 SHA-256 摘要。")
+        failure_count = value.get("automatic_failure_count", 0)
+        disabled = value.get("automatic_compaction_disabled", False)
+        if type(failure_count) is not int or failure_count < 0:
+            raise ValueError("automatic_failure_count 必须为非负整数。")
+        if type(disabled) is not bool:
+            raise ValueError("automatic_compaction_disabled 必须为布尔值。")
         raw_seen = value.get("seen_call_ids", [])
         raw_replacements = value.get("replacements", {})
         raw_files = value.get("recent_files", [])
@@ -240,8 +283,8 @@ class SessionCodec:
             seen_call_ids=set(raw_seen),
             replacements=replacements,
             recent_files=files,
-            automatic_failure_count=int(value.get("automatic_failure_count", 0)),
-            automatic_compaction_disabled=bool(value.get("automatic_compaction_disabled", False)),
+            automatic_failure_count=failure_count,
+            automatic_compaction_disabled=disabled,
         )
 
     @staticmethod
@@ -282,8 +325,7 @@ class SessionCodec:
         usage, trace = value['usage'], value['trace']
         if not isinstance(usage, dict) or not isinstance(trace, dict) or not isinstance(trace['entries'], list):
             raise ValueError('消息用量或轨迹无效。')
-        if any(type(number) is not int or number < 0 for number in usage.values()):
-            raise ValueError('消息用量必须是非负整数。')
+        decoded_usage = MessageUsage.from_dict(usage)
         if type(trace['collapsed']) is not bool or type(value['timeline_version']) is not int:
             raise ValueError('消息轨迹状态无效。')
         entries = []
@@ -296,7 +338,7 @@ class SessionCodec:
                 raise ValueError('消息轨迹文本无效。')
             entries.append(TraceEntry(**entry))
         return SessionMessage(id=value['id'], role=value['role'], content=value['content'],
-                              status=value['status'], timestamp=timestamp, usage=MessageUsage(**usage),
+                              status=value['status'], timestamp=timestamp, usage=decoded_usage,
                               timeline_version=value['timeline_version'],
                               trace=ThinkingTrace(entries=entries, collapsed=trace['collapsed']))
 

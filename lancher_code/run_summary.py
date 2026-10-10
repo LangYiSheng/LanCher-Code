@@ -9,6 +9,7 @@ from rich.text import Text
 
 from lancher_code.run_usage import RunUsageSummary
 from lancher_code.session import SessionController
+from lancher_code.usage_display import usage_lines
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,33 +60,6 @@ def print_exit_summary(
     if stopped_processes and not cleanup_errors:
         console.print(f"已收尾 {stopped_processes} 个托管进程；恢复对话后，服务需要重新启动。", markup=False)
     console.print()
-    suffix = "（已上报统计）" if usage.incomplete_request_count else ""
-    console.print(Text("本次启动用量" + suffix, style="bold"))
-    for label, value, count in (
-        ("输入", usage.input_tokens, usage.input_reported_request_count),
-        ("输出", usage.output_tokens, usage.output_reported_request_count),
-        ("缓存命中", usage.cached_input_tokens, usage.cache_reported_request_count),
-    ):
-        if usage.request_count and not count:
-            text = "--（未提供）"
-        else:
-            text = f"{value:,} tokens"
-            if count < usage.request_count:
-                text += "（部分上报）"
-        console.print(f"{label}：{text}", markup=False)
-    total = ("--（未提供）" if usage.request_count and not (
-        usage.input_reported_request_count and usage.output_reported_request_count
-    ) else f"{usage.total_tokens:,} tokens")
-    console.print("总计：" + total, markup=False)
-    if usage.cache_hit_ratio is not None:
-        ratio = f"{usage.cache_hit_ratio:.1%}"
-    else:
-        if not usage.request_count:
-            ratio = "--（无请求）"
-        elif not usage.incomplete_request_count and not usage.input_tokens:
-            ratio = "--（输入为 0）"
-        else:
-            ratio = "--（未完整提供）"
-    console.print("缓存比：" + ratio, markup=False)
-    if usage.incomplete_request_count:
-        console.print(f"有 {usage.incomplete_request_count} 次请求未返回完整用量，以上为已上报统计。", markup=False)
+    console.print(Text("本次启动已上报用量", style="bold"))
+    for line in usage_lines(usage):
+        console.print(line, markup=False)

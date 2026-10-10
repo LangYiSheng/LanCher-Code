@@ -13,6 +13,7 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Static
 
 from lancher_code.errors import ProviderRequestError
+from lancher_code.context_tokens import TokenEstimate
 from lancher_code.models import (
     ChatRequest,
     MessageUsage,
@@ -150,16 +151,17 @@ async def test_context_usage_is_not_reestimated_for_streaming_text_delta(
     )
     estimate_calls = 0
 
-    def estimate_request_tokens(_request: ChatRequest) -> int:
+    def context_estimate(_request: ChatRequest) -> TokenEstimate:
         nonlocal estimate_calls
         estimate_calls += 1
-        return 37_000
+        return TokenEstimate(37_000, "usage_calibrated", {"reported_input": 37_000})
 
-    monkeypatch.setattr(session, "estimate_request_tokens", estimate_request_tokens)
+    monkeypatch.setattr(session, "context_estimate", context_estimate)
 
     async with app.run_test():
         initial_calls = estimate_calls
         assert app.query_one(BannerWidget)._context_usage_status == "上下文 29%"
+        assert "已校准估算" in str(app.query_one("#status-details", Static).render())
 
         await app._consume_turn_event(TurnEvent(kind="assistant_text_delta"))
         assert estimate_calls == initial_calls
@@ -372,6 +374,11 @@ async def test_compact_command_uses_summary_request_without_creating_user_messag
     )
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
     session.create_user_message("已有历史")
+    # 摘要必须真正缩小请求；保留一个可被压缩的已完成旧轮次。
+    completed = session.create_assistant_message()
+    session.append_message_content(completed.id, "旧轮次的文件分析与修复已经完成。\n" * 1_500)
+    session.complete_message(completed.id)
+    session.create_user_message("继续检查下一项。")
     message_count = len(session.state.messages)
     context_refresh_count = 0
     original_refresh = app._refresh_context_usage
@@ -391,6 +398,7 @@ async def test_compact_command_uses_summary_request_without_creating_user_messag
         assert len(provider.requests) == 1
         assert provider.requests[0].allow_tool_calls is False
         assert len(session.state.messages) == message_count
+        assert session.transcript[-1].blocks[-1].text == "继续检查下一项。"
         assert app.query_one("#composer-input", ComposerTextArea).disabled is False
         assert context_refresh_count == refresh_count_before_compact + 1
 
@@ -618,9 +626,11 @@ async def test_tui_streams_single_turn_by_message_id(
         status_right = app.query_one("#status-details", Static)
         assert str(status_left.render()) == "gpt-test · 执行 · 逐次确认"
         assert "本次模型：gpt-test" in str(status_right.render())
-        assert "Tokens In 3" in str(status_right.render())
-        assert "cached" not in str(status_right.render())
-        assert "Out 2" in str(status_right.render())
+        assert "会话累计已上报用量" in str(status_right.render())
+        assert "输入：3 tokens" in str(status_right.render())
+        assert "缓存命中：--（未提供）" in str(status_right.render())
+        assert "输出：2 tokens" in str(status_right.render())
+        assert "当前上下文" in str(status_right.render())
 
 
 @pytest.mark.asyncio
@@ -645,8 +655,9 @@ async def test_tui_shows_cached_input_tokens_when_present(
         await pilot.pause(0.1)
 
         status_right = app.query_one("#status-details", Static)
-        assert "Tokens In 3 (cached 1)" in str(status_right.render())
-        assert "Out 2" in str(status_right.render())
+        assert "输入：3 tokens" in str(status_right.render())
+        assert "缓存命中：1 tokens" in str(status_right.render())
+        assert "输出：2 tokens" in str(status_right.render())
 
 
 @pytest.mark.asyncio

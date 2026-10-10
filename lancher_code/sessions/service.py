@@ -61,6 +61,15 @@ class SessionService:
         if self.writer is None:
             return
         previous = self._saved
+        # 请求账本只写单条增量。恢复中把 running 改为 incomplete 时，也
+        # 必须经过同一个事件出口；正常回调已同步 _saved，不会重复追加。
+        previous_requests = previous['state'].setdefault('request_usage', {})
+        current_requests = snapshot['state'].get('request_usage', {})
+        if previous_requests.keys() - current_requests.keys():
+            raise SessionRepositoryError('请求账本不能删除已保存的历史记录。')
+        for request_id, record in current_requests.items():
+            if previous_requests.get(request_id) != record:
+                self.record_usage(record, turn_id=record.get('turn_id'))
         known = {message['id']: message for message in previous['messages']}
         for message in snapshot['messages']:
             old = known.get(message['id'])
@@ -97,9 +106,14 @@ class SessionService:
                 before.extend(copy.deepcopy(after[len(before):]))
 
         for key, kind in (('state', 'state.changed'), ('rules', 'permissions.changed'), ('model_ref', 'model.changed')):
-            if previous[key] == snapshot[key]:
+            if key == 'state':
+                before = {name: value for name, value in previous[key].items() if name != 'request_usage'}
+                after = {name: value for name, value in snapshot[key].items() if name != 'request_usage'}
+            else:
+                before, after = previous[key], snapshot[key]
+            if before == after:
                 continue
-            data = snapshot[key] if key == 'state' else {key: snapshot[key]}
+            data = after if key == 'state' else {key: snapshot[key]}
             self.writer.append(kind, data)
             previous[key] = copy.deepcopy(snapshot[key])
 
@@ -112,6 +126,15 @@ class SessionService:
         """保持日志与 checkpoint 投影同步，供后台运行时绑定的唯一写入者使用。"""
         self.record(kind, data, turn_id=turn_id)
         SessionCodec.apply_execution_event(self._saved['state']['execution'], kind, data)
+
+    def record_usage(self, data, *, turn_id=None):
+        """用量帧单独追加，checkpoint 与事件重放得到同一请求快照。"""
+        if self.writer is None:
+            return
+        if self._saved['state'].get('request_usage', {}).get(data['request_id']) == data:
+            return
+        self.record('usage.request_updated', data, turn_id=turn_id)
+        self._saved['state'].setdefault('request_usage', {})[data['request_id']] = copy.deepcopy(data)
 
     def rename(self, session_id, title):
         if self.paths is not None and self.paths.session_id == session_id and self.writer is not None:

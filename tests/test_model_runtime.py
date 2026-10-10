@@ -124,7 +124,7 @@ async def test_switch_preserves_history_and_uses_new_model_for_next_request(tmp_
     _history(session)
     previous = deepcopy(session.transcript)
     context_id = session.context_state.context_id
-    session.context_state.usage_anchor = ContextUsageAnchor(10, 10, "shape", 1, "messages")
+    session.context_state.usage_anchor = ContextUsageAnchor(10, 10, "a" * 64, 1, "b" * 64)
     session.context_state.automatic_failure_count = 3
     session.context_state.automatic_compaction_disabled = True
 
@@ -204,6 +204,11 @@ async def test_switch_is_rejected_during_active_turn(tmp_path: Path) -> None:
 async def test_manual_compaction_uses_new_model_and_prevents_switch(tmp_path: Path) -> None:
     runner, session, _, created, _ = _runner(tmp_path)
     _history(session)
+    # 已结束的长旧轮次可交给摘要，最新短请求仍须保留。
+    completed = session.create_assistant_message()
+    session.append_message_content(completed.id, "旧轮次的文件分析与修复已经完成。\n" * 1_500)
+    session.complete_message(completed.id)
+    session.create_user_message("继续检查下一项。")
     runner.switch_model("anthropic/sonnet")
     provider = created[0]
     headings = ("主要请求和意图", "关键技术概念", "文件和代码段", "错误与修复", "问题解决过程", "用户消息与明确反馈", "待办任务", "当前工作", "可能的下一步")
@@ -216,9 +221,11 @@ async def test_manual_compaction_uses_new_model_and_prevents_switch(tmp_path: Pa
             runner.switch_model("deepseek/chat")
     finally:
         provider.release.set()
-        await task
+        result = await task
     assert provider.requests[0].model == "claude-sonnet"
     assert not runner._manual_compaction
+    assert result.after_tokens < result.before_tokens
+    assert session.transcript[-1].blocks[-1].text == "继续检查下一项。"
 
 
 def test_reload_keeps_active_selection_when_default_changes(tmp_path: Path) -> None:
@@ -270,7 +277,7 @@ def test_switch_autosaves_reference_without_credentials(tmp_path: Path) -> None:
 def test_switch_rolls_back_when_session_autosave_fails(tmp_path: Path, monkeypatch) -> None:
     runner, session, initial, _, _ = _runner(tmp_path)
     session.create_user_message("持久化会话")
-    session.context_state.usage_anchor = ContextUsageAnchor(10, 10, "shape", 0, "messages")
+    session.context_state.usage_anchor = ContextUsageAnchor(10, 10, "a" * 64, 0, "b" * 64)
     session.flush()
 
     def fail_save(*args):
@@ -289,7 +296,7 @@ def test_resume_resolves_saved_model_or_default_and_discards_usage_anchor(tmp_pa
     runner, session, _, _, _ = _runner(tmp_path)
     original = SessionController(resolve_model(runner.model_config), cwd=tmp_path, selected_model_ref=saved_ref)
     original.create_user_message("历史消息")
-    original.context_state.usage_anchor = ContextUsageAnchor(99, 99, "shape", 1, "messages")
+    original.context_state.usage_anchor = ContextUsageAnchor(99, 99, "a" * 64, 1, "b" * 64)
     saved_id = original.session_id
     original.close()
     runner.switch_model("deepseek/reasoner")

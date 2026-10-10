@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -60,7 +61,7 @@ async def test_openai_provider_streams_text_deltas_and_usage(openai_provider_con
     assert [event.kind for event in events] == ["message_start", "text_delta", "text_delta", "message_end"]
     assert "".join(event.text or "" for event in events if event.kind == "text_delta") == "你好"
     assert events[-1].usage.input_tokens == 3
-    assert events[-1].usage.cached_input_tokens == 0
+    assert events[-1].usage.cached_input_tokens is None
     assert events[-1].usage.output_tokens == 2
 
 
@@ -267,3 +268,38 @@ async def test_openai_provider_classifies_only_known_prompt_too_long_error(opena
     )
     with pytest.raises(ProviderResponseError):
         _ = [event async for event in provider.stream_chat(_request())]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["o3", "ordinary-model-without-name-inference"])
+@pytest.mark.parametrize("base_url, limit_field", [
+    ("https://api.openai.com/v1", "max_completion_tokens"),
+    ("https://API.OPENAI.COM/v1", "max_completion_tokens"),
+    ("https://api.openai.com:443/v1", "max_completion_tokens"),
+    ("https://api.deepseek.com", "max_tokens"),
+    ("https://api.deepseek.com/v1", "max_tokens"),
+    ("https://unknown.example/v1", "max_tokens"),
+    ("https://api.openai.com.example/v1", "max_tokens"),
+    ("https://unknown.example/api.openai.com/v1", "max_tokens"),
+])
+async def test_openai_output_limit_uses_exact_endpoint_host_without_model_name_inference(
+    openai_provider_config, base_url, limit_field, model,
+) -> None:
+    config = replace(openai_provider_config, base_url=base_url)
+    model_request = _request()
+    model_request.model = model
+    model_request.max_output_tokens = 1536
+    calls = []
+
+    def handler(raw_request):
+        payload = json.loads(raw_request.content)
+        calls.append(payload)
+        assert payload["model"] == model
+        assert payload[limit_field] == 1536
+        assert {field for field in ("max_tokens", "max_completion_tokens") if field in payload} == {limit_field}
+        return httpx.Response(200, content=b"data: [DONE]\n\n")
+
+    provider = OpenAIProvider(config, client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    _ = [event async for event in provider.stream_chat(model_request)]
+    assert model_request.max_output_tokens == 1536
+    assert len(calls) == 1

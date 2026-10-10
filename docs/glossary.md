@@ -51,10 +51,15 @@
 | 会话格式版本 | 新 `EVENT_FORMAT_VERSION = 1`，使用 UUID 事件日志；不读取、不迁移旧命名会话 v1–v4 |
 | `PlanSnapshot` | 绑定当前会话的计划正文、内容摘要、来源消息与就绪标记；执行确认的来源 |
 | `PendingInput` | 工作中投递的输入：`follow_up` 排到下一轮或 `steer` 补充当前任务；恢复会话后均暂停 |
-| `ContextUsageAnchor` | 用量锚点：上次请求快照，用于增量 token 估算 |
-| Tool result offload（结果卸载） | 大工具结果从请求中移出、落盘到 `.lancher/context/<context_id>/tool-results/`，上下文里只留预览 |
-| Context compaction（压缩） | 把旧轮次交给模型生成 `<summary>` 摘要，替换原始消息 |
-| `automatic_threshold` | 自动压缩触发阈值 = `context_window - 20000 - 13000` |
+| `ContextUsageAnchor` | 可靠输入 usage 与请求发出前的匹配快照边界，用于只估新增内容 |
+| `MessageUsage` | 提供方用量快照，`None` 未知、`0` 真实零，保存部分字段与最终确认状态 |
+| `RequestUsageRecord` | 一次实际模型请求的身份、归属、用途、用量快照和结束状态 |
+| `RunUsageSummary` | 同一聚合口径的已上报用量小计，附请求完整度与异常数量 |
+| `TokenEstimate` | 当前请求的估算数字、来源与内容分类，不用于填补消耗账本 |
+| `ContextBudget` | 模型窗口内的实际输出、输入和工具结果等动态额度 |
+| Tool result offload（结果卸载） | 大工具原文落盘到 Session `blobs/`，请求投影只留有预算的预览与读取路径 |
+| Context compaction（压缩） | 把旧轮次摘要为候选，验证有效且变小后替换模型上下文，原始事件仍保留 |
+| `automatic_threshold` | 从实际输入额度继续预留整理余量得到的动态阈值 |
 
 ## 模型与协议
 

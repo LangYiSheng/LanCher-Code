@@ -103,8 +103,9 @@ run_user_turn(text)
 - **权限挂起**：工具需要确认时，`_request_permission()` 创建 Future 并发送 `permission_request_created`；UI 挂载面板后继续消费事件，用户决议按请求 ID 回传。面板通过 closed 事件移除，过期请求无效。
 - **补充边界**：当前响应结束或正在运行的并发工具组结束后生效；后续工具补齐 `steering_superseded` 结果而不执行。撤销旧审批使用独立 superseded 决议，不写规则，也不伪装为用户拒绝。
 - **计划快照**：只有本任务成功调用 `write_plan_file` 且计划回合成功结束才 ready；新计划开始即失效旧版本。执行用会话内冻结正文，磁盘中的旧计划文件不能成为已确认计划。
-- **自动压缩阈值**：`automatic_threshold(context_window) = context_window - 20000(摘要输出预留) - 13000(自动余量)`。
-- **紧急压缩**：模型报 `ProviderPromptTooLongError` 时，先卸载大结果再压缩，成功后重试一次；压缩后仍超过 `context_window - 3000` 则放弃。
+- **自动整理阈值**：`ContextBudget` 按模型窗口、实际输出额度和安全余量分配，先治理长工具结果，再按需要摘要；发送前用硬输入额度检查。
+- **紧急压缩**：模型报 `ProviderPromptTooLongError` 时，先卸载大结果再摘要，验证成功后在限制次数内重试；候选仍无法装入实际请求预算时明确失败。
+- **请求记账**：每个实际模型请求独立记录，摘要、重试和中断都保留已上报消耗；界面消息用量从该请求记录派生，不替代请求事实。
 - **未知工具熔断**：连续 `unknown_tool_streak_limit`（默认 3）次 `tool_not_found` 即停止本轮，避免无效循环。
 
 ## 输入与输出
@@ -121,7 +122,7 @@ run_user_turn(text)
 - → `ToolExecutor`：执行工具
 - → `ToolRegistry`：列出可见工具 / 延迟工具索引
 - → `ToolCallAssembler`：拼接工具调用
-- → `context_management`：阈值常量与压缩入口
+- → `context_tokens` / `context_budget` / `context_management`：usage 校准、动态额度与压缩入口
 - ← `tui_views/chat.py`：唯一消费者
 
 ## 注意事项

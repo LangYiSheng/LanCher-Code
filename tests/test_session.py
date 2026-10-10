@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from lancher_code.models import (
+    ChatRequest,
     ContextFileSnapshot,
     MessageUsage,
     PermissionRule,
@@ -16,7 +17,21 @@ from lancher_code.models import (
 )
 from lancher_code.permission_engine import PermissionStorage
 from lancher_code.session import SessionController
+from lancher_code.run_usage import RequestUsageRecord
 from lancher_code.sessions.repository import SessionRepositoryError
+
+
+def _record_model_request(controller, message_id, usage, *, status="completed"):
+    request = controller.bind_usage_request(
+        ChatRequest(model=controller._provider_config.model), message_id=message_id,
+    )
+    record = RequestUsageRecord(
+        request_id=request.request_id, run_id=request.run_id,
+        protocol=controller._provider_config.protocol, model=request.model,
+        session_id=request.session_id, message_id=message_id, status=status, usage=usage,
+    )
+    request.usage_callback(record.to_dict())
+    return record
 
 
 def test_session_controller_creates_messages_with_metadata(openai_provider_config) -> None:
@@ -35,7 +50,7 @@ def test_session_controller_creates_messages_with_metadata(openai_provider_confi
     assert assistant_message.status == "complete"
     assert assistant_message.content == "你好呀"
     assert assistant_message.usage.input_tokens == 3
-    assert assistant_message.usage.cached_input_tokens == 0
+    assert assistant_message.usage.cached_input_tokens is None
     assert assistant_message.usage.output_tokens == 2
     assert user_message.timestamp.tzinfo == timezone.utc
     assert [message.role for message in controller.transcript] == ["user", "assistant"]
@@ -317,6 +332,7 @@ def test_session_save_and_resume_restores_ui_and_protocol_state(openai_provider_
         [ToolExecutionResult("call-1", "read", content="内容", is_error=False)]
     )
     controller.append_message_content(assistant.id, "完成")
+    _record_model_request(controller, assistant.id, MessageUsage(input_tokens=3, output_tokens=2))
     controller.complete_message(assistant.id, MessageUsage(input_tokens=3, output_tokens=2))
     controller.set_runtime_mode("acceptEdits")
     saved_id = controller.session_id
@@ -409,12 +425,14 @@ def test_session_controller_totals_usage(openai_provider_config) -> None:
     controller = SessionController(openai_provider_config)
     controller.create_user_message("你好")
     assistant_message = controller.create_assistant_message()
+    _record_model_request(controller, assistant_message.id, MessageUsage(input_tokens=5, output_tokens=7))
     controller.complete_message(assistant_message.id, MessageUsage(input_tokens=5, output_tokens=7))
 
     usage = controller.total_usage()
 
     assert usage.input_tokens == 5
-    assert usage.cached_input_tokens == 0
+    assert usage.usage.cached_input_tokens is None
+    assert usage.cache_reported_request_count == 0
     assert usage.output_tokens == 7
 
 
@@ -422,20 +440,25 @@ def test_session_controller_can_accumulate_usage_before_completion(openai_provid
     controller = SessionController(openai_provider_config)
     assistant_message = controller.create_assistant_message()
 
-    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=3, cached_input_tokens=1, output_tokens=4))
-    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=2, cached_input_tokens=2, output_tokens=1))
+    _record_model_request(controller, assistant_message.id, MessageUsage(input_tokens=3, cached_input_tokens=1, output_tokens=4))
+    _record_model_request(controller, assistant_message.id, MessageUsage(input_tokens=2, cached_input_tokens=2, output_tokens=1))
 
     usage = controller.total_usage()
 
     assert usage.input_tokens == 5
     assert usage.cached_input_tokens == 3
     assert usage.output_tokens == 5
+    assert usage.request_count == 2
+    assert assistant_message.usage.input_tokens == 5
+    assert assistant_message.usage.is_complete
 
 
 def test_session_controller_keeps_usage_when_message_fails(openai_provider_config) -> None:
     controller = SessionController(openai_provider_config)
     assistant_message = controller.create_assistant_message()
-    controller.add_message_usage(assistant_message.id, MessageUsage(input_tokens=8, cached_input_tokens=5, output_tokens=13))
+    _record_model_request(controller, assistant_message.id,
+                          MessageUsage(input_tokens=8, cached_input_tokens=5, output_tokens=13, is_final=False),
+                          status="failed")
 
     controller.fail_message(assistant_message.id, "网络失败")
 
@@ -443,3 +466,45 @@ def test_session_controller_keeps_usage_when_message_fails(openai_provider_confi
     assert failed.usage.input_tokens == 8
     assert failed.usage.cached_input_tokens == 5
     assert failed.usage.output_tokens == 13
+    assert controller.total_usage().incomplete_request_count == 1
+
+
+def test_completing_message_keeps_usage_recorded_by_request_callback(openai_provider_config) -> None:
+    controller = SessionController(openai_provider_config)
+    assistant = controller.create_assistant_message()
+    _record_model_request(controller, assistant.id, MessageUsage(input_tokens=10, output_tokens=3, cached_input_tokens=0))
+    controller.complete_message(assistant.id)
+    assert assistant.usage.input_tokens == 10
+    assert assistant.usage.output_tokens == 3
+    assert assistant.usage.is_complete
+    assert controller.total_usage().total_tokens == 13
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_request_ledger_restores_partial_usage_without_importing_history_into_new_run(
+    openai_provider_config, tmp_path, status,
+) -> None:
+    controller = SessionController(openai_provider_config, cwd=tmp_path)
+    controller.create_user_message("保留已上报消耗")
+    assistant = controller.create_assistant_message()
+    _record_model_request(controller, assistant.id,
+                          MessageUsage(input_tokens=12, cached_input_tokens=4, is_final=False), status=status)
+    if status == "failed":
+        controller.fail_message(assistant.id, "连接中断")
+    else:
+        controller.cancel_message(assistant.id)
+    session_id = controller.session_id
+    controller.close()
+    restored = SessionController(openai_provider_config, cwd=tmp_path)
+    try:
+        restored.resume_session(session_id)
+        summary = restored.total_usage()
+        assert summary.request_count == 1
+        assert summary.input_tokens == 12
+        assert summary.usage.output_tokens is None
+        assert summary.cache_hit_ratio is None
+        assert summary.incomplete_request_count == 1
+        assert restored.state.messages[-1].usage.output_tokens is None
+        assert restored._usage_tracker.snapshot().request_count == 0
+    finally:
+        restored.close()

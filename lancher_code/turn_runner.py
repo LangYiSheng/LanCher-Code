@@ -8,7 +8,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from lancher_code.context_management import AUTOMATIC_FAILURE_LIMIT, EMERGENCY_MARGIN, automatic_threshold
+from lancher_code.context_management import AUTOMATIC_FAILURE_LIMIT
+from lancher_code.context_budget import context_budget
 from lancher_code.execution.contracts import InvocationInfo
 from lancher_code.errors import (
     ConfigError,
@@ -642,9 +643,10 @@ class TurnRunner:
                 request.cancellation_token = cancellation_token
                 context_state = self._session.context_state
                 estimated_tokens = self._session.estimate_request_tokens(request)
+                budget = context_budget(self._session.context_window, request.max_output_tokens)
                 if (
                     not context_state.automatic_compaction_disabled
-                    and estimated_tokens >= automatic_threshold(self._session.context_window)
+                    and estimated_tokens >= budget.automatic_threshold
                 ):
                     await self._emit(
                         queue,
@@ -660,10 +662,14 @@ class TurnRunner:
                             visible_tools=visible_tools,
                             deferred_tool_groups=deferred_tool_groups,
                             cancellation_token=cancellation_token,
+                            turn_id=turn_id,
                         )
                     except SessionRepositoryError:
                         raise
                     except Exception as exc:
+                        # 完整候选验证失败时 Session 会恢复上下文副本；必须
+                        # 更新当前状态，不能把失败计数写到已被替换的旧对象。
+                        context_state = self._session.context_state
                         context_state.automatic_failure_count += 1
                         if context_state.automatic_failure_count >= AUTOMATIC_FAILURE_LIMIT:
                             context_state.automatic_compaction_disabled = True
@@ -672,7 +678,7 @@ class TurnRunner:
                             context_state.context_id,
                             context_state.automatic_failure_count,
                         )
-                        if estimated_tokens >= self._session.context_window - EMERGENCY_MARGIN:
+                        if estimated_tokens > budget.input_limit:
                             raise ContextCompactionError(f"自动压缩失败：{exc}") from exc
                         await self._emit(
                             queue,
@@ -683,6 +689,7 @@ class TurnRunner:
                             ),
                         )
                     else:
+                        context_state = self._session.context_state
                         context_state.automatic_failure_count = 0
                         context_state.automatic_compaction_disabled = False
                         logger.info(
@@ -712,6 +719,10 @@ class TurnRunner:
                             deferred_tool_groups=deferred_tool_groups,
                         )
                         request.cancellation_token = cancellation_token
+
+                budget = context_budget(self._session.context_window, request.max_output_tokens)
+                if self._session.estimate_request_tokens(request) > budget.input_limit:
+                    raise ContextCompactionError("当前请求仍超出可用输入预算，请缩减输入或压缩上下文。")
 
                 await self._emit(
                     queue,
@@ -755,10 +766,11 @@ class TurnRunner:
                                 visible_tools=visible_tools,
                                 deferred_tool_groups=deferred_tool_groups,
                                 cancellation_token=cancellation_token,
+                                turn_id=turn_id,
                             )
                         except Exception:
                             raise prompt_error
-                        if result.after_tokens >= self._session.context_window - EMERGENCY_MARGIN:
+                        if result.after_tokens > context_budget(self._session.context_window).input_limit:
                             raise
                         logger.info(
                             "event=emergency_context_compaction_succeeded context_id=%s before_tokens=%s after_tokens=%s dropped_groups=%s",
@@ -806,10 +818,7 @@ class TurnRunner:
                         )
                     ]
 
-                total_usage.input_tokens += loop_usage.input_tokens
-                total_usage.cached_input_tokens += loop_usage.cached_input_tokens
-                total_usage.output_tokens += loop_usage.output_tokens
-                self._session.add_message_usage(assistant_message.id, loop_usage)
+                total_usage = self._current_message_usage(assistant_message.id)
                 await self._emit(
                     queue,
                     TurnEvent(
@@ -1058,7 +1067,9 @@ class TurnRunner:
         queue: asyncio.Queue[TurnEvent | object],
     ) -> MessageUsage:
         usage = MessageUsage()
-        async for event in self._provider.stream_chat(request):
+        self._session.bind_usage_request(request, turn_id=self._active_turn.task_id if self._active_turn else None,
+                                         message_id=assistant_message_id)
+        async for event in self._session.stream_request(self._provider, request):
             if event.kind == "thinking_delta" and event.text:
                 self._session.append_trace_thinking(assistant_message_id, event.text)
                 await self._emit(
@@ -1153,11 +1164,7 @@ class TurnRunner:
 
     def _current_message_usage(self, message_id: str) -> MessageUsage:
         usage = self._session.get_message(message_id).usage
-        return MessageUsage(
-            input_tokens=usage.input_tokens,
-            cached_input_tokens=usage.cached_input_tokens,
-            output_tokens=usage.output_tokens,
-        )
+        return deepcopy(usage)
 
     @staticmethod
     def _raise_if_cancelled(cancellation_token: CancellationToken) -> None:

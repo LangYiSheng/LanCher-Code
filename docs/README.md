@@ -26,7 +26,8 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 | 工作阶段 | 讨论、计划、执行独立切换；`/plan` 可只读探索并生成会话计划，`/do` 切到执行；计划执行按钮验证快照后实际提交任务 |
 | 权限系统 | 阶段边界、路径沙箱、危险命令黑名单、三层规则、逐次确认/自动编辑/跳过询问；阶段切换不改变权限 |
 | 模型与设置 | 供应商下管理模型，本次使用与新对话默认分别选择；单条保存，支持深浅主题和忙时 Enter 偏好 |
-| 上下文治理 | Token 估算、大工具结果落盘卸载、自动/紧急上下文压缩 |
+| 上下文治理 | 最近可信输入 usage 校准、分类保守估算、动态预算、大工具结果落盘及验证后压缩 |
+| 请求用量账本 | 按实际请求记录对话、压缩、重试及中断消耗；会话与本次启动使用相同口径，未知不冒充零 |
 | 会话持久化 | 首条消息自动创建 UUID，按项目保存 `.lancher/sessions/<UUID>/events.jsonl` 新事件格式 v1，独立 workspace，支持恢复、改标题、归档和删除；旧命名格式不读取、不迁移 |
 | 退出小结 | 工作中先停止本轮，空闲 3 秒内双按 Ctrl+C 退出；告别显示完整恢复命令及本次启动的输入、输出、缓存和缓存比 |
 | MCP 扩展 | 支持 stdio / Streamable HTTP 两种 MCP Server，工具延迟加载 |
@@ -70,7 +71,8 @@ TurnRunner（lancher_code/turn_runner.py）── 工具循环
 | 应用装配 | `lancher_code/app.py` | 启动流程：加载配置、创建 Provider、会话、工具、MCP、TUI |
 | 会话层 | `lancher_code/session.py` | `SessionController`：消息、transcript、阶段/权限、计划与队列状态 |
 | 工具循环 | `lancher_code/turn_runner.py` | `TurnRunner`：ReAct 循环、事件流、输入投递、取消、自动压缩 |
-| 上下文管理 | `lancher_code/context_management.py` | Token 估算、工具结果卸载、摘要压缩 |
+| 上下文管理 | `lancher_code/context_tokens.py`、`context_budget.py`、`context_management.py` | 输入校准、分类估算、动态预算、结果卸载及摘要验证 |
+| 用量与显示 | `lancher_code/run_usage.py`、`usage_display.py` | 请求账本及统一的未知、部分上报、缓存子项显示 |
 | 权限引擎 | `lancher_code/permission_engine.py` | 阶段边界、权限判定、精确/通配规则存储 |
 | 提示词构建 | `lancher_code/prompting.py` | system prompt、阶段/权限提示、动态提醒 |
 | 工具系统 | `lancher_code/tools/` | 工具注册表、资源执行器、14 个内置工具 |
@@ -107,11 +109,12 @@ python main.py
 6. [模块文档 modules/](modules/) — 各核心模块深入说明
 7. [工具执行 workflows/tool-execution.md](workflows/tool-execution.md) — 从开发服务器和测试的场景理解并行、后台、停止与恢复
 8. [结束工作与恢复对话 workflows/app-exit.md](workflows/app-exit.md) — 确认退出、先收尾再告别，以及本次启动的用量账本
-9. [运行流程 workflows/](workflows/) — 启动、一轮对话、会话生命周期等流程
-10. [开发指南 development.md](development.md) — 如何继续开发
-11. [故障排查 troubleshooting.md](troubleshooting.md) — 常见问题
-12. [术语表 glossary.md](glossary.md) — 专有名词
-13. [PyInstaller 打包 pyinstaller.md](pyinstaller.md) — Windows 可执行文件打包
+9. [Token 与上下文 workflows/token-accounting.md](workflows/token-accounting.md) — 用数字例子理解请求记账、usage 校准、动态预算与压缩验证
+10. [运行流程 workflows/](workflows/) — 启动、一轮对话、会话生命周期等流程
+11. [开发指南 development.md](development.md) — 如何继续开发
+12. [故障排查 troubleshooting.md](troubleshooting.md) — 常见问题
+13. [术语表 glossary.md](glossary.md) — 专有名词
+14. [PyInstaller 打包 pyinstaller.md](pyinstaller.md) — Windows 可执行文件打包
 
 ## 相关文件速查
 

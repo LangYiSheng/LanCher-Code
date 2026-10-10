@@ -1,95 +1,80 @@
-# 模块：上下文管理（Context Management）
+# 模块：上下文管理
 
-## 作用
+上下文管理负责估算下一次请求的输入大小、控制预算、卸载大工具结果和生成历史摘要。实际消耗来自 Provider 的 usage，由请求账本独立累计。完整的设计解释与数字示例见 [把消耗、上下文和预算分别算清楚](../workflows/token-accounting.md)。
 
-解决长会话的两个核心问题：
+## 模块分工
 
-1. **估算**：请求到底占了多少 token，避免盲目撞上模型上下文窗口
-2. **瘦身**：把大工具结果从内存/请求中"卸载"到磁盘，以及把旧轮次压缩成摘要
+| 模块 | 职责 |
+|---|---|
+| `context_tokens.py` | 将请求投影成模型可见内容，保守粗估，使用最近可靠输入 usage 做增量校准 |
+| `context_budget.py` | 根据模型窗口、输出上限和安全余量分配输入、近期历史与工具结果额度 |
+| `context_management.py` | 工具原文落盘、摘要生成与验证、完整轮次组选择、恢复提示 |
+| `run_usage.py` | 记录每次实际请求的已上报消耗，包含压缩、取消、失败和重试 |
+| `session.py` | 保存上下文投影及校准状态；只在候选验证成功后替换投影 |
 
-实现位置：`lancher_code/context_management.py`。该模块大部分是**纯函数**（可独立测试），只有卸载与摘要请求涉及 IO / 网络。
+## 估算与输入快照
 
-## 关键常量
+`TokenEstimate` 返回 `tokens`、`source` 和内容类别 `breakdown`。`source` 为 `estimated` 或 `usage_calibrated`，界面显示“未校准估算”或“已校准估算”。分类包括 system、消息正文、工具定义、工具参数、工具结果和包装开销；校准后显示已上报输入基准及新增内容。
 
-| 常量 | 值 | 含义 |
-|---|---|---|
-| `SINGLE_TOOL_RESULT_BYTES` | 50_000 | 单条工具结果超过该字节数即候选卸载 |
-| `TOOL_BATCH_BYTES` | 200_000 | 同一批（assistant 轮次）工具结果合计上限 |
-| `TOOL_PREVIEW_LINES` / `TOOL_PREVIEW_BYTES` | 20 / 2048 | 卸载后留在上下文里的预览规模 |
-| `SUMMARY_OUTPUT_RESERVE` | 20_000 | 压缩时为摘要输出预留的 token |
-| `AUTOMATIC_MARGIN` | 13_000 | 自动压缩的额外余量 |
-| `EMERGENCY_MARGIN` | 3_000 | 紧急压缩的额外余量 |
-| `RECENT_HISTORY_TOKENS` / `RECENT_HISTORY_MESSAGES` | 10_000 / 5 | 压缩后保留的最近历史规模 |
-| `RECENT_FILE_LIMIT` / `RECENT_FILE_TOKENS` | 5 / 5_000 | 最近读取文件快照数量与 token 上限 |
-| `AUTOMATIC_FAILURE_LIMIT` | 3 | 自动压缩连续失败 3 次启用熔断 |
-| `CHARACTERS_PER_TOKEN` | 3.5 | 字符数 → token 的粗略换算 |
+不使用 tokenizer，也不请求独立计数接口。没有可信锚点时按 ASCII 与非 ASCII 等类别保守估算，排除内部 metadata、空字段和外层 JSON 转义。系数只是容量管理策略，不承诺精确复现模型编码。
 
-## 三个核心能力
+锚点绑定请求发出前的消息边界、消息摘要、system/工具形状和模型，基准只取可靠的实际输入。相同前缀的后续请求使用“上次输入 + 新增消息估算”。输出不预先加入基准，避免助手回答在下一次请求中再算一遍。
 
-### 1. Token 估算（`estimate_request_tokens` / `update_usage_anchor`）
+模型切换、历史编辑、摘要替换、结果卸载或 system/工具变化使旧锚点失效。输入未知或未最终确认不生成新锚点；估算不能填补历史消耗。
 
-- 把 `ChatRequest` 规范化序列化后按字符数估算（`字符数 / 3.5`）。
-- 记录 `ContextUsageAnchor`（上次请求的字符数、消息数与摘要哈希）。
-- 下次请求若 **system/tools 形状相同、消息前缀相同、字符数不减少**，则用 `锚点 token + 新增字符数估算`，避免每次全量估算。
+动态提醒改变或随新轮次移到最新用户消息，也会改变前缀。有提醒的阶段主要在同轮连续工具请求间复用锚点；跨轮次只有实际前缀保持一致才继续校准。界面估算使用状态副本，避免只读显示使真实锚点失效。
 
-### 2. 工具结果卸载（`offload_tool_results`）
+## 动态预算
 
-```text
-遍历 transcript 收集 tool_result 块
-→ 找出新结果中超过单条阈值，或让同批合计超过批阈值的调用
-→ 把完整文本写入当前 Session 的 blobs/（按工具结果标识定位）
-→ 原文替换为预览（大小 / 完整内容路径 / 前 20 行）
-→ 已卸载的 call_id 记入 seen_call_ids（同一会话不重复卸载）
-```
+`ContextBudget` 提供 `output_tokens`、`input_limit`、`automatic_threshold`、`recent_history_tokens`、`tool_result_tokens` 和 `tool_batch_tokens`。这些额度随窗口变化，避免小窗口被固定预留减成负数。
 
-- 写入使用临时文件 + `os.replace` 原子替换，并校验路径不越过项目根。
-- 预览提示模型："需要精确原文时请使用 `read_file` 重新读取"。
+`ChatRequest.max_output_tokens` 是本次请求实际允许的输出上限，Provider 构造请求时使用它。输入检查必须为这次真正发出的输出额度留位置。普通请求和摘要请求可以使用各自的额度。
 
-### 3. 摘要压缩（`compact_transcript`）
+显式输出额度不被偷偷缩小，无法容纳时输入预算归零，发送前明确拒绝。
+
+## 工具结果卸载
 
 ```text
-按 user 消息把 transcript 切成"完整轮次组"
-→ 估算摘要请求，超限则按策略丢弃最旧组（前 3 次每次丢 1 组，之后按 20% 比例）
-→ 用单独请求让模型生成 <summary> 摘要（必须包含九个固定章节，顺序固定）
-→ 解析校验摘要（parse_summary）
-→ 保留最近历史（5 条消息 / 10k token）
-→ 拼装压缩后的 transcript：
-   [user: 以下是较早会话的压缩历史]
-   [assistant: 摘要]
-   [user: 恢复上下文提示（最近读取文件 + 可见工具 + 边界提醒）]
-   [最近历史...]
+计算新工具结果的单条及同批预算
+→ 选择超过额度的结果
+→ 原文写入 Session blobs/（临时文件 + 原子替换）
+→ 请求投影保留前后预览、大小和读取路径
+→ 后续精读通过 read_file 读取原文
 ```
 
-摘要请求约束：
+卸载成功后才替换请求中的内容。文件写入失败则保留原内容，不留下无效引用。界面记录和原始事件仍保留结果事实；请求中的预览不冒充完整原文。
 
-- 系统提示要求模型只输出 `<summary>...</summary>`，且必须严格包含九个 `##` 章节（`SUMMARY_HEADINGS`）
-- 任何偏差（标签缺失/重复、章节缺失/乱序）都会抛 `ContextCompactionError`
-- 摘要请求若返回工具调用同样视为错误
+## 摘要压缩
 
-### 辅助能力
+```text
+按完整轮次组选取摘要输入与近期历史
+→ 使用动态预算构造摘要请求
+→ 按同一请求观察路径记录摘要消耗
+→ 验证正常结束、未截断、无工具调用及摘要结构
+→ 构造摘要 + 恢复提示 + 完整近期轮次组
+→ 检查候选变小且可用于后续请求
+→ Session 原子替换当前上下文投影
+```
 
-- `record_file_snapshot()`：`read_file` 成功后记录最近读取文件快照（最多 5 个，截断到 5k token），供压缩后恢复上下文使用
-- `automatic_threshold()`：自动压缩触发阈值
-- `build_recovery_prompt()`：压缩后的"恢复上下文"提示
+摘要仍使用 `<summary>...</summary>` 和九个固定章节。`parse_summary()` 检查标签、章节唯一性及顺序；生成达到输出上限、空摘要、无效结构或压缩后变大，都视为失败。失败或取消不替换旧投影，实际摘要消耗仍计入账本。
+
+未完成的工具调用禁止摘要。工具调用与对应结果按整组保留；整组超过近期预算时交给摘要，并明确补回最新用户原话，候选仍放不下则拒绝。近期文件快照和可见工具帮助恢复工作，但不会替代精确原文；提示明确要求必要时重新读取。
 
 ## 触发时机
 
-| 场景 | 触发方 | 说明 |
+| 场景 | 入口 | 行为 |
 |---|---|---|
-| 自动压缩 | `TurnRunner._run_turn` | 每轮组装请求前估算，超过阈值则压缩 |
-| 紧急压缩 | `TurnRunner._run_turn` | 模型返回 `ProviderPromptTooLongError` 时 |
-| 手动压缩 | `/compact` 命令 | `TurnRunner.compact_context()`，`persist=True` 写会话文件 |
-| 结果卸载 | `TurnRunner` 每轮循环前 | `SessionController.offload_large_tool_results()` |
+| 自动整理 | `TurnRunner` 组装下一次请求前 | 按动态阈值卸载结果、必要时摘要 |
+| 紧急整理 | Provider 报上下文超限 | 在限制的重试次数内整理后再请求 |
+| 手动摘要 | `/compact` → `TurnRunner.compact_context()` | 可取消的独立操作；成功后持久化投影 |
+| 文件快照 | `read_file` 成功 | 保存受预算限制的近期内容，供恢复提示使用 |
 
-## 与其他模块的关系
+自动压缩连续失败有熔断，避免每轮都重复发起无效摘要。接近实际输入边界仍必须进行发送前检查；系统提示或工具定义已无法装入时给出明确错误。
 
-- ← `SessionController`：`compact_context()` / `offload_large_tool_results()` / `record_read_file_result()`
-- ← `TurnRunner`：读取阈值常量、触发压缩
-- → `ChatProvider`：摘要请求使用同一 `stream_chat()`
-- 文件系统：`.lancher/context/<context_id>/tool-results/`（卸载目录，gitignore）
+## 测试重点
 
-## 注意事项
-
-- 估算值是基于字符数的**近似值**，不是模型真实 token 数。
-- 自动压缩有熔断：连续失败 3 次后 `automatic_compaction_disabled=True`，仅当估算超过 `context_window - 3000` 时才会强制重试。
-- 压缩会丢弃最旧轮次的细节，恢复依赖"最近读取文件快照 + 摘要"，模型被明确要求不得猜测原文。
+- 同一输入快照校准后，下一次只加新增内容，不重复输出。
+- 只有输出、部分输入或异常字段不能建立可信锚点。
+- 内容变化触发失效，8K 等小窗口仍产生有效预算。
+- 工具原文可重新读取，同批长输出不能共同挤满请求。
+- 无效或截断摘要不替换旧投影，工具调用与结果不被拆散。

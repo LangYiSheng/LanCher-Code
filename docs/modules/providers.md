@@ -35,7 +35,7 @@
 | `text_delta` | 普通文本增量 |
 | `thinking_delta` | 思考内容增量（Claude thinking / OpenAI reasoning） |
 | `tool_call_delta` | 工具调用增量（名称 / 参数 JSON 分片） |
-| `message_end` | 响应结束，携带 `usage` |
+| `message_end` | 响应结束，携带已知的 `usage`、最终确认及停止原因；未知字段仍为 `None` |
 | `error` | 错误（当前各 Provider 直接抛异常，未产出该事件） |
 
 ## 请求序列化差异
@@ -43,17 +43,24 @@
 ### OpenAI（`openai.py`）
 
 - URL：`{base_url}/chat/completions`，Header：`Authorization: Bearer <api_key>`
-- Payload：`model`、`messages`（system 提示作为独立 system 消息）、`stream: true`、`stream_options: {include_usage: true}`、可选 `tools`（`type: function`）
+- Payload：`model`、`messages`（system 提示作为独立 system 消息）、`stream: true`、`stream_options: {include_usage: true}`、本次请求预算对应的输出上限、可选 `tools`（`type: function`）
+- 输出上限按 URL 主机精确选择字段：官方 `api.openai.com` 使用 `max_completion_tokens`，其他兼容端点使用 `max_tokens`，不根据模型名字猜测；原因是 [OpenAI 已弃用 `max_tokens`，且推理模型存在兼容限制](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)，而 [DeepSeek 明确使用 `max_tokens`](https://api-docs.deepseek.com/quick_start/agent_integrations/oh_my_pi/)。两种字段都发送同一个内部请求预算，只发送其中一种。
 - 工具调用：`delta.tool_calls[].function.{name, arguments}`，参数为 JSON 字符串分片
 - 思考：`delta.reasoning_content` 或 `delta.reasoning`
-- 结束标记：SSE 数据 `[DONE]`；用量从 `chunk.usage` 读取（含 `prompt_tokens_details.cached_tokens`）
+- 结束标记：SSE 数据 `[DONE]`；用量从 `chunk.usage` 读取，保留字段是否上报，支持缓存与推理子项。没有 usage 不能补为零。
 
 ### Anthropic（内部协议值 `claude`，`claude.py`）
 
 - URL：`{base_url}/messages`，Header：`x-api-key: <api_key>`、`anthropic-version: 2023-06-01`
-- Payload：`model`、`system`（字符串拼接）、`max_tokens: 4096`（固定）、`stream: true`、`thinking`（enabled/disabled + budget_tokens）、可选 `tools`（`input_schema`）
+- Payload：`model`、`system`（字符串拼接）、`max_tokens`（本次请求的实际输出预算）、`stream: true`、`thinking`（enabled/disabled + budget_tokens）、可选 `tools`（`input_schema`）
 - 事件类型：`message_start` / `content_block_start`（tool_use 整体给出 input 时直接产出完整参数）/ `content_block_delta`（text_delta / thinking_delta / input_json_delta）/ `message_delta`（usage）/ `message_stop` / `error`
-- 用量合并：`input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 记为 input
+- 用量合并：`input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 记为总输入，缓存读取/创建同时作为子项保存。缺少输入分量则保留部分上报标记；开始帧的输出不当作最终确认。
+
+## 请求观察与统一记账
+
+`UsageObserver` 观察请求开始、累计快照与结束状态，每次真实尝试独立产生记录。普通模型回答和摘要都使用同一观察路径。流式帧按已知字段覆盖累计数值，缺字段保留旧值；取消、网络异常、结束帧缺失时仍保存已收到的快照。
+
+`MessageUsage` 区分 `None`、真实零、部分字段与最终确认，检查缓存/推理子项不能超过对应总量。适配层负责解释协议差异，Session 和退出统计只使用统一语义。完整说明见 [Token 与上下文](../workflows/token-accounting.md)。
 
 ## 错误处理（`base.py`）
 
@@ -73,7 +80,7 @@
 
 | 方向 | 说明 |
 |---|---|
-| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / mode / cancellation_token） |
+| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / mode / cancellation_token / max_output_tokens / 请求归属） |
 | 输出 | `StreamEvent` 异步迭代器 |
 
 ## 与其他模块的关系
@@ -97,5 +104,5 @@
 ## 注意事项
 
 - 每个请求都会用 `client_factory()` 新建一个 `httpx.AsyncClient`（默认按 `timeout_seconds` 配置）。
-- `max_tokens` 在 Claude 实现中是固定值 4096；thinking 开启时 `budget_tokens` 默认 2048。
+- 输出上限使用当前请求预算；thinking 开启时，思考预算也必须适合实际输出额度。
 - 流式解析基于逐行 SSE（`iter_sse_events`），兼容 `event:` / `data:` 分段与 `:` 注释行。

@@ -20,6 +20,8 @@
 | `append_assistant_tool_calls()` / `append_tool_results()` | 写入模型 transcript |
 | `complete_message()` / `fail_message()` / `cancel_message()` | 消息终止与持久化 |
 | `build_request(...)` / `estimate_request_tokens(...)` | 组装请求与上下文估算 |
+| `context_estimate(...)` | 返回估算数字、校准来源和内容分类，不代表实际消耗 |
+| `usage_summary(message_id=None)` / `total_usage()` | 从持久化请求账本汇总单条消息或整段会话的已上报用量 |
 | `offload_large_tool_results()` / `compact_context()` | 工具结果卸载与上下文压缩 |
 | `list_sessions()` | 只读列出项目会话，返回 `SessionInfo` |
 | `new_session()` | 刷新旧会话并重置草稿；有后台资源时保留原Runtime及写入者 |
@@ -42,6 +44,10 @@
 
 `events.jsonl` 使用新事件版本 `1`，是持久化事实来源；`meta.json` 和 `checkpoint.json` 是可重建摘要及状态快照。旧 `.lancher/session/*.jsonl` v1–v4 文件不读取、不迁移。具体布局和生命周期见 [session-lifecycle.md](../workflows/session-lifecycle.md)。
 
+请求账本通过单条 `usage.request_updated` 增量写入，普通 `state.changed` 只保存其余状态，投影时保留已经重建的账本。这样阶段或锚点变化不会反复复制累计请求。`persist()` 也检查账本差异，负责把恢复中的 `running → incomplete` 修复写回事实日志；常规回调已经同步保存快照，后续刷新不会重复写。已保存记录不能被删除，取消和异常只更新状态并保留已上报数字。
+
+Checkpoint 仍保存完整账本，恢复时读取快照并重放尾部；缺少快照时重放全部事件，得到同一份会话状态。完整快照会随会话增长，但它只在明确的快照时机写入，不随每次流式更新复制全部历史。
+
 ## 模型上下文与恢复
 
 界面消息和模型 transcript 分开维护。失败、取消与中断可显示在界面，恢复时缺少工具结果的调用会补齐未知结果，工具不会自动重放。待处理输入恢复为暂停。上下文压缩记录新的上下文投影，同时保留原始事件历史。
@@ -49,6 +55,8 @@
 动态提醒在请求组装时使用当前阶段、权限、计划和 Session 工作目录，避免恢复后的旧提醒继续生效。计划确认绑定当前 Session ID 和计划摘要；恢复对话不会回滚源码文件。
 
 新建和恢复由 `TurnRunner` 协调有效模型。会话只保存稳定模型引用，不保存连接密钥；恢复找不到原模型时按当前可用默认模型处理并显示提示。模型切换清除旧模型的上下文用量锚点，保留对话与卸载引用。
+
+请求开始、累计用量快照和结束状态都写入所属 Session。普通回答与压缩共享这条记录路径；失败或取消前已经上报的用量仍可恢复。`MessageUsage` 使用 `None` 表示未知、`0` 表示明确上报零，同时保存最终确认、部分字段与数据异常信息。会话累计与退出时本次启动累计使用相同的 `RunUsageSummary` 聚合逻辑；恢复历史不会导入本次启动账本。详见 [Token 与上下文](../workflows/token-accounting.md)。
 
 当前 `workspace/` 在全部阶段允许内置文件工具读写，日志和控制文件不在此批准范围；源码、Shell 与外部 MCP 继续遵守阶段和权限判定。这不构成操作系统沙箱。
 

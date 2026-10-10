@@ -67,6 +67,7 @@ async def run_app() -> int:
         initial_work_phase=config.runtime.work_phase,
         initial_permission_policy=config.runtime.permission_policy,
         permission_storage=permission_storage,
+        usage_tracker=usage_tracker,
     )
     tool_registry = create_default_tool_registry()
     mcp_configs, mcp_issues = load_mcp_config(cwd)

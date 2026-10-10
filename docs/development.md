@@ -78,7 +78,9 @@ uv run pytest            # 运行全部测试
 | 门面 | `ChatTUI` / `ConfigBootstrapTUI` | 包装 Textual App |
 | 状态机 | `SessionController.set_work_phase` / `set_permission_policy` | 阶段与策略独立，旧模式入口仅供兼容 |
 | 退出意图状态机 | `tui_views/exit_flow.py` | 停止期间锁存请求，空闲双按在 3 秒内确认；时钟可注入 |
-| 请求用量账本 | `run_usage.py` | 按请求 UUID 累计本次启动用量，同一流的 usage 快照替换而非累加 |
+| 请求用量账本 | `run_usage.py` | 每次实际尝试独立记录，快照按已知字段合并；会话与本次启动共享汇总口径 |
+| 容量与消耗分层 | `context_tokens.py`、`context_budget.py` | 可靠输入 usage 校准下一次请求，动态预算控制容量；粗估不填补实际消耗 |
+| 用量显示 | `usage_display.py` | 详情与退出共享未知、部分上报、子项和异常比例格式 |
 | 持久化 | `sessions.repository`、`settings_service._atomic_write_many` | Session 追加事件 + 文件锁；摘要与配置采用临时文件 + `os.replace` |
 
 ## 运行测试

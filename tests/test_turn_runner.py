@@ -149,6 +149,10 @@ async def test_turn_runner_emergency_compacts_and_retries_once(openai_provider_c
     )
     runner, session = _runner(provider, openai_provider_config, tmp_path)
 
+    session.create_user_message("旧任务材料" + "x" * 50_000)
+    previous = session.create_assistant_message()
+    session.append_message_content(previous.id, "已记录旧材料")
+    session.complete_message(previous.id)
     events = [event async for event in runner.run_user_turn("继续任务")]
 
     assert events[-1].kind == "turn_completed"
@@ -168,7 +172,11 @@ async def test_manual_compact_does_not_create_display_message(openai_provider_co
         ]
     )
     runner, session = _runner(provider, openai_provider_config, tmp_path)
-    session.create_user_message("已有任务")
+    session.create_user_message("已有任务" + "x" * 50_000)
+    previous = session.create_assistant_message()
+    session.append_message_content(previous.id, "已记录")
+    session.complete_message(previous.id)
+    session.create_user_message("继续已有任务")
     saved_id = session.session_id
     message_count = len(session.state.messages)
 
@@ -197,7 +205,11 @@ async def test_automatic_compaction_triggers_before_normal_request(openai_provid
     )
     runner, session = _runner(provider, openai_provider_config, tmp_path)
 
-    events = [event async for event in runner.run_user_turn("x" * 5_000)]
+    session.create_user_message("旧任务" + "x" * 65_000)
+    previous = session.create_assistant_message()
+    session.append_message_content(previous.id, "旧材料已读")
+    session.complete_message(previous.id)
+    events = [event async for event in runner.run_user_turn("继续任务" + "x" * 15_000)]
 
     assert events[-1].kind == "turn_completed"
     assert provider.requests[0].allow_tool_calls is False
@@ -223,8 +235,12 @@ async def test_automatic_compaction_circuit_breaker_persists_after_three_failure
     provider = FakeProvider(responses=responses)
     runner, session = _runner(provider, openai_provider_config, tmp_path)
 
+    session.create_user_message("旧任务" + "x" * 75_000)
+    previous = session.create_assistant_message()
+    session.append_message_content(previous.id, "旧材料已读")
+    session.complete_message(previous.id)
     for index in range(4):
-        _ = [event async for event in runner.run_user_turn(f"{index}" + "x" * 5_000)]
+        _ = [event async for event in runner.run_user_turn(f"{index}" + "x" * 1_000)]
 
     assert session.context_state.automatic_failure_count == 3
     assert session.context_state.automatic_compaction_disabled is True
@@ -680,7 +696,9 @@ async def test_turn_runner_reports_each_parallel_result_and_never_duplicates_on_
                 else:
                     release.set()
 
-    await asyncio.wait_for(collect(), 3)
+    # Windows 上同步落盘的请求账本会增加 I/O 耗时；该超时用于识别死锁，
+    # 具体先后次序仍由事件与状态断言验证。
+    await asyncio.wait_for(collect(), 10)
     assert first_result_observed
     results = [entry for entry in session.state.messages[-1].trace.entries if entry.kind == "tool_result"]
     assert [entry.call_id for entry in results] == ["fast", "slow"]

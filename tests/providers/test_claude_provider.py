@@ -69,7 +69,8 @@ async def test_claude_provider_streams_text_thinking_and_usage(claude_provider_c
     assert [event.kind for event in events] == ["message_start", "thinking_delta", "text_delta", "message_end"]
     assert "".join(event.text or "" for event in events if event.kind == "text_delta") == "你好"
     assert events[-1].usage.input_tokens == 11
-    assert events[-1].usage.cached_input_tokens == 0
+    assert events[-1].usage.cached_input_tokens is None
+    assert "input" in events[-1].usage.partial_fields
     assert events[-1].usage.output_tokens == 5
 
 

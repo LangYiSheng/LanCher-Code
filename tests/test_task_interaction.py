@@ -134,7 +134,8 @@ async def test_steering_closes_pending_approval_without_writing_or_allow_rule(op
             request_ids.append(event.permission_request.request_id)
             runner.enqueue_input("不要写入", "steer")
 
-    events = await asyncio.wait_for(collect(runner, "修改文件", handle), 3)
+    # 这里只防止审批撤销流程死锁；Windows 上真实事件落盘可能超过三秒。
+    events = await asyncio.wait_for(collect(runner, "修改文件", handle), 10)
     assert request_ids
     assert any(e.kind == "permission_request_closed" for e in events)
     assert any(e.tool_result and e.tool_result.error_code == "steering_superseded" for e in events)
