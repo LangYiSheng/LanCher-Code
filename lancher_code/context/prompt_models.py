@@ -25,6 +25,8 @@ class PromptContext:
     plan_snapshot: PlanSnapshot | None = None
     session_id: str | None = None
     session_workspace: Path | None = None
+    agent_context: list[str] = field(default_factory=list)
+    deferred_tools_max_chars: int = 12_000
 
 
 @dataclass(slots=True)

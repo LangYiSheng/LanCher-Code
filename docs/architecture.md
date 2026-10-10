@@ -28,6 +28,7 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 
 - **协议无关的 transcript**：会话层保存的是 `ConversationMessage` 抽象消息，由 Provider 在发送前各自序列化为 OpenAI / Claude 协议格式（见 `providers/*` 的 `_serialize_message`）。
 - **事件流解耦**：`TurnRunner.run_user_turn()` 是一个异步生成器，产出 `TurnEvent`；TUI 只消费事件更新界面，不直接调用 Provider。
+- **能力管理在核心**：`AgentCapabilities` 装配技能工具，管理 Skills 激活、项目约定投影与 MCP 生命周期。TUI 只展示核心快照和调用公共管理接口；其他前端复用同一门面。
 - **阶段与权限独立**：讨论、计划、执行决定可用工具范围，逐次确认、自动编辑、跳过询问决定范围内工具的审批方式。阶段边界同时应用于工具发现和实际执行。
 - **权限判定在工具执行前**：`ToolExecutor` 对每个工具调用先过 `PermissionEngine`，只有 `allow` 才真正执行。
 - **全程异步**：`app.py` 在 `asyncio.run()` 中运行；网络请求（httpx）、子进程（run_command 工具）、文件卸载（`asyncio.to_thread`）都是异步的。
@@ -39,6 +40,7 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 | 应用装配 | `app.run_app()` | 只做组装，不做业务逻辑 |
 | 会话控制器 | `SessionController`（`sessions/controller.py`）与 `sessions/` | 会话状态、transcript、阶段、权限、计划与队列；独立 UUID 和事件日志持久化 |
 | 工具循环 | `TurnRunner`（`agent/runner.py`） | 回合调度、忙时输入投递、取消、压缩与计划确认 |
+| 智能体能力 | `AgentCapabilities`（`agent/capabilities.py`）、`SkillRuntime` | Skills 发现与激活、系统上下文、项目 AGENTS.md、MCP 后台初始化与管理 |
 | 上下文治理 | `context/`（tokens、budget、request、offload、compaction、summary、recovery） | 可靠输入校准、动态额度、结果卸载及摘要候选验证 |
 | 请求用量 | `usage/ledger.py`、`tui/usage.py` | 按请求事实保存消耗，生成会话/本次启动统计并一致显示未知与部分字段 |
 | 权限引擎 | `PermissionEngine`（`permissions/engine.py`）/ `PermissionStorage`（`permissions/storage.py`） | 权限判定与规则存储，不执行工具 |
@@ -71,6 +73,11 @@ graph TD
     TR --> PF
     TR --> TE
     TR --> CM[context.compaction]
+    TR --> CAP[AgentCapabilities]
+    CAP --> SK[SkillsService / SkillRuntime]
+    CAP --> INS[项目 AGENTS.md]
+    CAP --> MCP
+    CAP --> REG
     TR --> TCP[tools.parser]
     TE --> REG
     TE --> PE
@@ -87,6 +94,7 @@ graph TD
     SVC --> CM
     SVC --> ST[sessions.service / repository / codec]
     TUI --> TR
+    TUI --> CAP
     TUI --> SVC
     TUI --> PE
     TUI --> SS
@@ -169,8 +177,9 @@ app.run_app() 创建
 ```text
 MCPClientManager.initialize() → 每个 Server 并行 connect_and_list_tools()
 → MCPServerConnection 后台任务运行（stdio / streamable_http）
-→ 初始化 + 列出工具 → 注册为延迟工具
-→ app 退出时 mcp_manager.close() 统一关闭
+→ 初始化 + 分页列出工具 → 按 Server 注册延迟工具
+→ 支持目录变更通知与手动 refresh / reconnect / reload
+→ 退出时 AgentCapabilities.shutdown() 统一关闭
 ```
 
 ## 设置与首次配置
@@ -179,7 +188,15 @@ MCPClientManager.initialize() → 每个 Server 并行 connect_and_list_tools()
 
 设置默认打开供应商与模型目录，分别显示“本次对话使用”和“新对话默认”。切换本次模型只更新运行时；更改默认只影响新对话。每个表单独立保存，成功后返回目录，返回时只丢弃当前未提交草稿，此前提交保留。
 
-`SettingsService.save_models/save_ui/save_mcp/save_rules` 隔离保存域；模型和偏好通过回调更新运行时，权限规则立即热更新，MCP 保留待重启标记。模型运行时更新失败时，已保存配置保留，旧运行时继续使用并显示错误。旧单模型配置明确拒绝并提示重新配置，原文件保留，不迁移或生成备份。
+`SettingsService.save_models/save_ui/save_mcp/save_rules` 隔离保存域；模型和偏好通过回调更新运行时，权限规则立即热更新，MCP 保存后调用能力核心重读配置并更新连接与工具。写盘成功与运行时更新失败分别报告，MCP 可用 `/mcp reload` 重试。旧单模型配置明确拒绝并提示重新配置，原文件保留，不迁移或生成备份。
+
+## Skills 与项目上下文
+
+`SkillsService` 只发现项目与用户 `.lancher/skills`，元数据、正文快照与引用资源分开。用户 `$技能名` 在输入生效时由核心激活；模型依据目录描述调用 `load_skill`，正文通过回调保存在会话上下文状态，并投影到请求的系统块，工具历史仅保留确认。
+
+技能正文跨轮保留；成功压缩把正文回收、保留引用与指纹，后续需要时先重载。压缩候选状态与原状态分开，失败或取消不卸载正在使用的技能。会话禁用与主动卸载同样由核心管理并持久化。
+
+项目根 `AGENTS.md` 每次请求常驻提供，成功压缩后仍在系统上下文中。技能和项目约定都不提升执行权限。详细格式和使用例见 [Skills 与项目约定](modules/skills.md)。
 
 ## 并发与异步模型
 

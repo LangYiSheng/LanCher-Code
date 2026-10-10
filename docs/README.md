@@ -30,7 +30,8 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 | 请求用量账本 | 按实际请求记录对话、压缩、重试及中断消耗；会话与本次启动使用相同口径，未知不冒充零 |
 | 会话持久化 | 首条消息自动创建 UUID，按项目保存 `.lancher/sessions/<UUID>/events.jsonl` 事件格式 2，独立 workspace，支持恢复、改标题、归档和删除；旧格式保留原文件，列表单独报告并提示新建会话 |
 | 退出小结 | 工作中先停止本轮，空闲 3 秒内双按 Ctrl+C 退出；告别显示完整恢复命令及本次启动的输入、输出、缓存和缓存比 |
-| MCP 扩展 | 支持 stdio / Streamable HTTP 两种 MCP Server，工具延迟加载 |
+| Skills 与项目约定 | `.lancher/skills` 的项目／用户技能，显式指定与模型加载；正文跨轮保留，成功压缩后按引用重载，项目根 `AGENTS.md` 常驻 |
+| MCP 扩展 | stdio / Streamable HTTP 的 Tools；后台初始化、分页、动态刷新、重连、独立超时和延迟发现 |
 
 ## 技术栈
 
@@ -57,6 +58,7 @@ TurnRunner（lancher_code/agent/runner.py）── 工具循环
  ├── SessionController（会话状态 / 提示词组装）
  ├── Provider（openai / claude 流式请求）
  ├── ToolExecutor + ToolRegistry（内置工具 + MCP 工具）
+ ├── AgentCapabilities（Skills / AGENTS.md / MCP 管理与上下文）
  └── PermissionEngine（阶段边界 + 权限判定）
  ↓
 外部：模型 API / 本地 shell / 文件系统 / MCP Server
@@ -75,7 +77,8 @@ TurnRunner（lancher_code/agent/runner.py）── 工具循环
 | 用量与显示 | `lancher_code/usage/ledger.py`、`tui/usage.py` | 请求账本及统一的未知、部分上报、缓存子项显示 |
 | 权限引擎 | `lancher_code/permissions/` | 阶段边界、权限判定、精确/通配规则存储 |
 | 提示词构建 | `lancher_code/context/prompts.py` | system prompt、阶段/权限提示、动态提醒 |
-| 工具系统 | `lancher_code/tools/` | 工具注册表、资源执行器、14 个内置工具 |
+| 智能体能力 | `lancher_code/agent/capabilities.py`、`agent/skills/` | 技能发现与激活、项目约定、MCP 运行时管理；前端调用门面 |
+| 工具系统 | `lancher_code/tools/` | 工具注册表、资源执行器、内置工具及能力工具入口 |
 | 模型供应商 | `lancher_code/providers/` | OpenAI / Claude 流式适配 |
 | MCP | `lancher_code/mcp/` | MCP Server 配置、连接、工具适配 |
 | TUI | `lancher_code/tui/` | 聊天、设置、权限面板、引导界面 |
@@ -96,6 +99,8 @@ python main.py
 首次启动依次配置供应商连接、添加第一个模型、确认使用关系，最终保存到 `~/.lancher/lancher.yaml`。随后可在设置中分别调整本次模型、新对话默认模型、MCP、权限规则和界面偏好。
 
 详细步骤见 [getting-started.md](getting-started.md)。
+
+增加任务流程可从 [Skills 与项目约定](modules/skills.md) 的精简示例开始；外部 Tools 的连接与运行时管理见 [MCP](modules/mcp.md)。
 
 ## 文档导航
 

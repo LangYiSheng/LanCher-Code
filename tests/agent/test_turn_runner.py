@@ -307,8 +307,9 @@ async def test_turn_runner_adds_discovered_schema_only_to_next_loop(openai_provi
     events = [event async for event in runner.run_user_turn("使用远程 echo")]
 
     assert events[-1].kind == "turn_completed"
-    assert [tool.name for tool in provider.requests[0].tools] == ["tool_search"]
-    assert [tool.name for tool in provider.requests[1].tools] == ["tool_search", "mcp__demo__echo"]
+    base_tools = ["tool_search", "load_skill", "read_skill_resource"]
+    assert [tool.name for tool in provider.requests[0].tools] == base_tools
+    assert {tool.name for tool in provider.requests[1].tools} == {*base_tools, "mcp__demo__echo"}
     assert "mcp__demo__echo" in provider.requests[0].system[-1]
 
 
@@ -336,7 +337,7 @@ async def test_turn_runner_resets_discovered_tools_for_next_user_turn(openai_pro
     _ = [event async for event in runner.run_user_turn("第一轮")]
     _ = [event async for event in runner.run_user_turn("第二轮")]
 
-    assert [tool.name for tool in provider.requests[2].tools] == ["tool_search"]
+    assert [tool.name for tool in provider.requests[2].tools] == ["tool_search", "load_skill", "read_skill_resource"]
 
 
 @pytest.mark.asyncio

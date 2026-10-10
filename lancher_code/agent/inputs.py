@@ -107,10 +107,13 @@ class PendingInputQueue:
             for item in self._read()
         )
 
-    def take_steering(self) -> list[PendingInput]:
+    def peek_steering(self) -> list[PendingInput]:
         task_id, _ = self._active()
-        selected = [item for item in self.items if item.delivery == "steer"
-                    and item.state == "pending" and item.target_task_id == task_id]
+        return [item for item in self.items if item.delivery == "steer"
+                and item.state == "pending" and item.target_task_id == task_id]
+
+    def take_steering(self) -> list[PendingInput]:
+        selected = self.peek_steering()
         selected_ids = {item.id for item in selected}
         self._write([item for item in self.items if item.id not in selected_ids], None)
         return selected

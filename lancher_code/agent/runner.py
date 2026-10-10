@@ -9,6 +9,7 @@ from functools import partial
 from uuid import uuid4
 
 from lancher_code.agent.events import TurnEvent
+from lancher_code.agent.capabilities import AgentCapabilities
 from lancher_code.agent.inputs import PendingInputQueue
 from lancher_code.agent.selection import ModelSelection
 from lancher_code.agent.streaming import collect_response
@@ -69,6 +70,8 @@ class TurnRunner:
         *,
         max_tool_loops: int = MAX_TOOL_LOOPS,
         unknown_tool_streak_limit: int = DEFAULT_UNKNOWN_TOOL_STREAK_LIMIT,
+        skills_service=None,
+        mcp_manager=None,
     ) -> None:
         self._models = ModelSelection(provider, session_controller)
         self._session = session_controller
@@ -85,6 +88,22 @@ class TurnRunner:
             read=lambda: self._session.pending_inputs, write=self._pending_changed,
             active=self._input_target, on_steer=self._supersede_permissions,
         )
+        self._capabilities = AgentCapabilities(
+            self._session, self._tool_registry, ensure_idle=self._ensure_model_idle,
+            project_root=session_controller.project_root, skills_service=skills_service,
+        )
+        self._capabilities.configure(mcp_manager)
+
+    @property
+    def capabilities(self) -> AgentCapabilities:
+        return self._capabilities
+
+    def configure_capabilities(self, mcp_manager=None, registry=None) -> None:
+        self._ensure_model_idle()
+        self._capabilities.configure(mcp_manager, registry)
+
+    def start_capabilities(self) -> None:
+        self._capabilities.start()
 
     def _input_target(self) -> tuple[str | None, bool]:
         active = self._active_turn
@@ -111,10 +130,12 @@ class TurnRunner:
         return self._models.model_notice
 
     def _ensure_model_idle(self) -> None:
+        if getattr(self, '_capabilities', None) is not None and self._capabilities.updating:
+            raise ConfigError('能力目录正在更新，请等待完成后再操作。')
         if not self._execution_runtime.accepting(self._session.session_id):
             raise ConfigError("会话正在停止或执行运行时已关闭，暂时不能开始新的操作。")
         if self.has_active_turn or self._manual_compaction:
-            raise ConfigError("模型正在响应或压缩上下文，请等待完成后再切换模型。")
+            raise ConfigError("模型正在响应或压缩上下文，请等待完成后再操作。")
 
     def switch_model(self, model_ref: str) -> None:
         self._ensure_model_idle()
@@ -188,6 +209,8 @@ class TurnRunner:
             return None
         active = self._active_turn
         assert active is not None
+        selected = self._inputs.peek_steering()
+        self._capabilities.skills.apply_explicit_many([item.text for item in selected])
         selected = self._inputs.take_steering()
         message = self._session.complete_message(message_id, usage, record_transcript=False)
         await self._emit(queue, TurnEvent(kind="assistant_message_completed", message=message, usage=usage))
@@ -342,7 +365,10 @@ class TurnRunner:
                         break
             await self.stop_and_wait()
         finally:
-            await self._execution_runtime.close()
+            try:
+                await self._capabilities.shutdown()
+            finally:
+                await self._execution_runtime.close()
 
     @property
     def application_process_count(self) -> int:
@@ -439,6 +465,7 @@ class TurnRunner:
 
     async def run_user_turn(self, text: str) -> AsyncIterator[TurnEvent]:
         self._ensure_model_idle()
+        self.start_capabilities()
         queue: asyncio.Queue[TurnEvent | object] = asyncio.Queue()
         cancellation_token = CancellationToken()
         bound = asyncio.Event()
@@ -514,10 +541,13 @@ class TurnRunner:
             generation = self._execution_runtime.generation(owner_session_id)
             self._session.record_event('turn.started', turn_id=turn_id)
             await self._emit(queue, TurnEvent(kind="user_message_created", message=user_message))
-
             assistant_message = self._session.create_assistant_message()
             active_turn.assistant_message_id = assistant_message.id
             await self._emit(queue, TurnEvent(kind="assistant_message_started", message=assistant_message))
+            activated = self._capabilities.skills.apply_explicit(text)
+            if activated:
+                await self._emit(queue, TurnEvent(kind='progress_updated', message=assistant_message,
+                                                  progress_message='已加载技能：' + '、'.join(activated)))
             await self._emit(
                 queue,
                 TurnEvent(

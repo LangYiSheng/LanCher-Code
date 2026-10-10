@@ -38,8 +38,12 @@
 | `grep` | `builtin/grep.py` | 正则搜索，有模型和界面输出预算 |
 | `write_plan_file` | `builtin/write_plan_file.py` | 计划阶段写本 Session `workspace/plan.md`，更新计划快照 |
 | `tool_search` | `builtin/tool_search.py` | 查找并加载延迟 MCP 工具，下一次模型请求才使用 |
+| `load_skill` | `builtin/skills.py` | 加载已登记技能，正文经回调交给核心系统投影；工具结果只保留确认 |
+| `read_skill_resource` | `builtin/skills.py` | 按已登记技能的相对目录读取 UTF-8 资料或源码，按行分页、不执行脚本 |
 
 当前 Session workspace 文件操作在各阶段自动批准，显式拒绝优先；源码修改仅执行阶段允许。控制记录和多硬链接文件受保护，bypass 无法放行。文件权限是应用层路径约束，不能据此声称 Shell 获得系统沙箱。
+
+技能工具由 `AgentCapabilities` 注册，均为各阶段可用的只读系统工具；只声明精确读取资源，不修改普通文件读取的项目边界。技能指令和脚本仍遵守原有阶段与审批。目录、资源预算和正文生命周期见 [Skills 与项目约定](skills.md)。
 
 FileStateCache 按 Session 分开，恢复旧会话时不会借用另一对话的「已读文件」证据。调度锁覆盖同一应用内的 Session；其他程序仍可能写文件，所以版本检查不省略。
 

@@ -64,7 +64,7 @@ async def test_adapter_maps_definition_and_safely_converts_content(tmp_path: Pat
     assert adapter.definition.permission is not None
     result = await adapter.execute({}, ToolContext(cwd=tmp_path, timeout_seconds=10))
     assert not result.is_error
-    assert result.content.startswith("first\n[已忽略非文本 MCP 内容: ImageContent]\nlast")
+    assert result.content.startswith("first\n[尚未投影非文本 MCP 内容: ImageContent；原始内容未展示]\nlast")
     assert "secret-data" not in result.content
 
 
@@ -204,7 +204,8 @@ async def test_real_stdio_server_discovery_call_and_close(tmp_path: Path) -> Non
     result = await adapter.execute(
         {"value": "你好 MCP"}, ToolContext(cwd=tmp_path, timeout_seconds=10)
     )
-    assert result.content == "你好 MCP"
+    assert result.content.startswith("你好 MCP")
+    assert result.metadata["structured_content"] == {"result": "你好 MCP"}
     await asyncio.wait_for(connection.close(), timeout=5)
 
 

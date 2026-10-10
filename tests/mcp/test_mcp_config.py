@@ -38,6 +38,7 @@ def test_load_config_expands_only_credentials_and_never_reports_secret(tmp_path:
     configs, issues = load_mcp_config(project, home_dir=home, environ={"TOKEN": "top-secret", "HOST": "bad"})
     assert configs[0].url == "https://example.com/${HOST}"
     assert configs[0].headers["Authorization"] == "Bearer top-secret"
+    assert configs[0].headers_template["Authorization"] == "Bearer ${TOKEN}"
     assert "top-secret" not in " ".join(issue.message for issue in issues)
 
 
@@ -91,3 +92,13 @@ def test_settings_preserves_unresolved_credentials_until_connect(tmp_path: Path)
     service.save_mcp("global", {"demo": server})
     assert yaml.safe_load(service.global_mcp_path.read_text(encoding="utf-8")) == {"mcp_servers": {"demo": server}}
     assert validate_server_config("demo", server).headers["Authorization"] == "Bearer ${MCP_TEST_TOKEN}"
+
+
+def test_server_timeouts_are_independent_and_preserved_by_settings(tmp_path: Path) -> None:
+    server = {"type": "stdio", "command": "python", "startup_timeout_seconds": 20,
+              "tool_timeout_seconds": 90, "close_timeout_seconds": 3}
+    config = validate_server_config("demo", server)
+    assert (config.startup_timeout_seconds, config.tool_timeout_seconds, config.close_timeout_seconds) == (20, 90, 3)
+    service = _settings(tmp_path)
+    service.save_mcp("global", {"demo": server})
+    assert yaml.safe_load(service.global_mcp_path.read_text(encoding="utf-8"))["mcp_servers"]["demo"] == server

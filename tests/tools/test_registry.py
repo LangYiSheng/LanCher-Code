@@ -108,3 +108,31 @@ def test_registry_groups_deferred_tools_without_parsing_visible_names() -> None:
     assert len(groups) == 1
     assert groups[0].server_name == "grafana_prod"
     assert groups[0].tool_names == ("mcp__grafana_prod__query",)
+
+
+def test_registry_search_includes_server_metadata_and_prioritizes_exact_names() -> None:
+    registry = ToolRegistry()
+    registry.register_deferred_server("db", title="Inventory", description="库存商品查询")
+    registry.register(DeferredTool("mcp__db__lookup", "普通读取"), deferred_server_name="db")
+    registry.register(DeferredTool("mcp__db__other", "可以替代 mcp__db__lookup"), deferred_server_name="db")
+    assert len(registry.search_deferred("库存")) == 2
+    assert registry.search_deferred("mcp__db__lookup")[0].name == "mcp__db__lookup"
+
+
+def test_registry_catalog_replace_is_atomic_on_conflict_and_unregisters_removed_tools() -> None:
+    registry = ToolRegistry()
+    old = DeferredTool("mcp__demo__old", "old")
+    registry.register_deferred_server("demo", title="Demo", description=None)
+    registry.register(old, deferred_server_name="demo")
+    registry.register(DeferredTool("reserved", "other"))
+    with pytest.raises(ValueError):
+        registry.replace_deferred_server("demo", [DeferredTool("reserved", "new")], title="New", description=None)
+    assert registry.get("mcp__demo__old") is old
+    replacement = DeferredTool("mcp__demo__new", "new")
+    registry.replace_deferred_server("demo", [replacement], title="New", description="更新")
+    assert registry.get("mcp__demo__new") is replacement
+    with pytest.raises(ToolNotFoundError):
+        registry.get("mcp__demo__old")
+    registry.unregister_deferred_server("demo")
+    assert registry.list_deferred_index() == []
+    assert registry.get("reserved")

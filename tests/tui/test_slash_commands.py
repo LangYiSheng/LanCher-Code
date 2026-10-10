@@ -13,7 +13,7 @@ def complete(text, **kwargs):
 
 def test_root_only_has_commands_and_supports_chinese_intent():
     rows = complete("/")
-    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "tasks", "model", "permissions", "compact", "settings", "status", "exit"]
+    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "permissions", "compact", "settings", "status", "exit"]
     assert all("<" not in r.display and "[" not in r.display for r in rows)
     assert complete("/切换对话")[0].apply("/切换对话") == "/session "
     assert create_default_slash_command_registry().parse_submission("/mode plan") is None
@@ -66,6 +66,9 @@ def test_settings_and_policy_values_are_discoverable():
     ("tasks", "show uuid extra"), ("session", "stop uuid"),
     ("settings", "theme blue"), ("settings", "theme"), ("settings", "open extra"),
     ("model", "one two"), ("status", "extra"), ("mode", "plan"),
+    ("skills", "enable"), ("skills", "show"), ("skills", "list extra"),
+    ("skills", "reload name"), ("skills", "unknown"), ("skills", "disable one two"),
+    ("mcp", "reconnect"), ("mcp", "reload name"), ("mcp", "refresh one two"), ("mcp", "unknown"),
 ])
 def test_invalid_commands_are_rejected(name, args):
     with pytest.raises(ValueError):
@@ -122,3 +125,19 @@ def test_process_commands_have_discoverable_scope_and_full_ids():
     assert "后台进程" in create_default_slash_command_registry().hint("/session stop")
     for arguments in ("", "list", f"read {process_id}", f"background {process_id}"):
         create_default_slash_command_registry().validate("tasks", arguments)
+
+
+def test_skills_and_mcp_have_progressive_choices_and_optional_refresh_target():
+    registry = create_default_slash_command_registry()
+    assert [row.display for row in complete("/skills")] == ["list", "show", "reload", "enable", "disable", "unload"]
+    assert [row.display for row in complete("/mcp")] == ["list", "refresh", "reconnect", "reload"]
+    skills = (("project:review", "review · project · 可用"), ("user:review", "review · user · 停用"))
+    row = complete("/skills show project", skill_choices=skills)[0]
+    assert row.apply("/skills show project") == "/skills show project:review"
+    assert "project" in row.description
+    rows = complete("/mcp refresh ", mcp_choices=(("demo", "demo · ready"),))
+    assert rows[0].optional and rows[0].apply("/mcp refresh ") == "/mcp refresh demo"
+    for arguments in ("", "list", "refresh", "refresh demo", "reconnect demo", "reload"):
+        registry.validate("mcp", arguments)
+    for arguments in ("", "list", "reload", "show review", "enable review", "disable review", "unload review"):
+        registry.validate("skills", arguments)

@@ -35,6 +35,7 @@ async def prepare_compaction(
     cancellation_token: CancellationToken | None,
     stream_request: Callable[[ChatRequest], AsyncIterator[StreamEvent]],
     request_factory: Callable[[ChatRequest], ChatRequest],
+    prompt_context_factory: Callable[[ContextManagementState], PromptContext] | None = None,
 ) -> CompactionCandidate:
     class SummaryProvider:
         def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
@@ -45,6 +46,11 @@ async def prepare_compaction(
             return stream_request(outgoing)
 
     candidate_context = copy.deepcopy(context)
+    # 正文只由核心投影，不写进历史工具输出。成功候选回收正文，保留引用；
+    # 提交失败时控制器回滚整个上下文，不能提前让正在使用的技能失效。
+    for activation in candidate_context.skill_activations.values():
+        activation['body'] = ''
+        activation['loaded'] = False
     compacted = await compact_transcript(
         provider=SummaryProvider(), model=config.model,
         transcript=project_tool_results(transcript, context, context_window=config.context_window),
@@ -64,7 +70,8 @@ async def prepare_compaction(
                 block.text = values.pop()
     candidate_context.usage_anchor = None
     request = build_request(
-        config=config, context=prompt_context, transcript=compacted.transcript, state=candidate_context,
+        config=config, context=prompt_context_factory(candidate_context) if prompt_context_factory else prompt_context,
+        transcript=compacted.transcript, state=candidate_context,
         dynamic_context=dynamic_context, tools=visible_tools, allow_tool_calls=True,
         deferred_tool_groups=deferred_tool_groups,
     )

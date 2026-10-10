@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,12 @@ class MCPServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     url: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    startup_timeout_seconds: float | None = None
+    tool_timeout_seconds: float = 60.0
+    close_timeout_seconds: float | None = None
+    # 运行值可以展开凭据，原文用于诊断、重连和配置回写，禁止向模型展示。
+    env_template: dict[str, str] = field(default_factory=dict, repr=False)
+    headers_template: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def is_stdio(self) -> bool:
@@ -57,6 +64,8 @@ def load_mcp_config(project_root: Path, *, home_dir: Path | None = None, environ
     for name, raw in merged.items():
         try:
             config = validate_server_config(name, raw)
+            config.env_template = dict(config.env)
+            config.headers_template = dict(config.headers)
             if config.enabled:
                 config.env = _expand_map(config.env, env_source, config.name, "env")
                 config.headers = _expand_map(config.headers, env_source, config.name, "headers")
@@ -111,13 +120,18 @@ def validate_server_config(name: object, raw: object) -> MCPServerConfig:
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise MCPConfigValidationError(f"Server {name}.enabled 必须是布尔值", field="enabled")
+    timeouts = {
+        "startup_timeout_seconds": _timeout(raw, name, "startup_timeout_seconds", None),
+        "tool_timeout_seconds": _timeout(raw, name, "tool_timeout_seconds", 60.0),
+        "close_timeout_seconds": _timeout(raw, name, "close_timeout_seconds", None),
+    }
     if server_type == "stdio":
         command = raw.get("command")
         if enabled and (not isinstance(command, str) or not command.strip()):
             raise MCPConfigValidationError(f"Server {name}.command 必须是非空字符串", field="command")
         return MCPServerConfig(name=name, type="stdio", enabled=enabled, command=command,
                                args=_string_list(raw.get("args", []), f"Server {name}.args"),
-                               env=_string_map(raw.get("env", {}), f"Server {name}.env"))
+                               env=_string_map(raw.get("env", {}), f"Server {name}.env"), **timeouts)
     url = raw.get("url")
     if enabled:
         if not isinstance(url, str) or not url.strip():
@@ -126,7 +140,16 @@ def validate_server_config(name: object, raw: object) -> MCPServerConfig:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise MCPConfigValidationError(f"Server {name}.url 必须是合法的 HTTP(S) URL", field="url")
     return MCPServerConfig(name=name, type="http", enabled=enabled, url=url,
-                           headers=_string_map(raw.get("headers", {}), f"Server {name}.headers"))
+                           headers=_string_map(raw.get("headers", {}), f"Server {name}.headers"), **timeouts)
+
+
+def _timeout(raw: dict[str, object], name: str, key: str, default: float | None) -> float | None:
+    if key not in raw:
+        return default
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise MCPConfigValidationError(f"Server {name}.{key} 必须是有限的正数", field=key)
+    return float(value)
 
 
 def _string_list(raw: object, path: str) -> list[str]:

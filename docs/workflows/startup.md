@@ -17,6 +17,8 @@ sequenceDiagram
     participant SS as SessionController
     participant REG as tool_registry
     participant MCP as MCPClientManager
+    participant RUN as TurnRunner
+    participant CAP as AgentCapabilities
     participant TUI as ChatTUI
 
     U->>CLI: uv run lancher
@@ -34,14 +36,19 @@ sequenceDiagram
     APP->>PF: create_provider(active_config, usage_observer)
     APP->>LOG: register_sensitive_values(api_key)
     APP->>SS: SessionController(provider, cwd, plan 路径, 初始阶段, 权限策略, 权限存储)
-    APP->>REG: create_default_tool_registry()（14 个内置工具）
+    APP->>REG: create_default_tool_registry()（基础内置工具）
     APP->>MCP: load_mcp_config(cwd) + MCPClientManager（并注册 env/headers 敏感值）
     APP->>SS: PermissionEngine / SettingsService / ToolExecutor
-    APP->>SS: TurnRunner(provider, session, registry, executor, 循环上限...)
-    APP->>TUI: ChatTUI(turn_runner, settings_service, mcp_manager, tool_registry, ...)
+    APP->>RUN: TurnRunner(provider, session, registry, executor, 循环上限...)
+    RUN->>CAP: 创建能力门面、技能服务与工具，绑定项目约定和技能上下文
+    APP->>RUN: configure_capabilities(mcp_manager, registry)
+    APP->>TUI: ChatTUI(turn_runner, settings_service, ...)
+    APP->>RUN: start_capabilities()
+    CAP->>MCP: 后台 initialize(registry)，逐页发现工具
     TUI-->>APP: tui.run() 进入事件循环
-    APP->>SS: finally: turn_runner.shutdown() 与 session.close()
-    APP->>MCP: finally: mcp_manager.close()
+    APP->>RUN: finally: turn_runner.shutdown()（能力与进程统一收尾）
+    APP->>SS: finally: session.close()
+    APP->>MCP: finally: 幂等关闭初始 manager
     opt TUI 正常返回
         APP->>USAGE: 获取最终用量快照
         APP-->>U: 普通终端打印告别、恢复命令与本次用量
@@ -63,10 +70,10 @@ sequenceDiagram
 | 7. 敏感值注册 | `logging_system.register_sensitive_values()` | api_key 与 MCP env/headers 值，日志脱敏 |
 | 8. 创建会话控制器 | `sessions/controller.py SessionController` | 绑定 cwd、初始阶段与策略、权限存储；首条用户消息才创建 UUID Session 与独立 workspace |
 | 9. 创建工具集 | `tools/__init__.py` | 注册 文件工具、run_command、process_list/read/wait/write/stop/background、glob/grep、计划与发现工具 |
-| 10. 创建 MCP | `mcp/manager.py` | 加载全局+项目配置；TUI 挂载后异步初始化 |
+| 10. 创建 MCP | `mcp/manager.py` | 加载全局+项目配置，由核心后台初始化 |
 | 11. 创建执行链 | `tools/core/executor.py` + `permissions/engine.py` | ToolExecutor 持有注册表与权限引擎 |
-| 12. 创建 TurnRunner | `agent/runner.py` | 注入全部依赖，配置循环上限与未知工具熔断 |
-| 13. 启动 TUI | `tui/app.py` | 进入 Textual 事件循环；MCP 初始化完成后启用输入 |
+| 12. 创建 TurnRunner | `agent/runner.py`、`agent/capabilities.py` | 注入依赖，装配 Skills 工具与项目约定、绑定 MCP 门面；配置循环上限与未知工具熔断 |
+| 13. 启动核心能力与 TUI | `app.py`、`tui/app.py` | 核心开始后台 MCP 连接；TUI 显示进度，输入立即可使用内置能力 |
 | 14. 退出清理与小结 | `app.py finally` | 等待 Runner、Session 写入者和 MCP 连接收尾；正常返回后打印恢复命令与本次启动用量，清理失败明确报告并返回 1 |
 
 本次启动账本在应用装配时创建。Provider 工厂和切换模型后的新 Provider 都使用同一个 observer，Session 恢复不导入历史消耗。退出确认与统计口径详见 [结束工作与恢复对话](app-exit.md)。

@@ -25,7 +25,7 @@ from lancher_code.permissions.models import PermissionRequest
 from lancher_code.providers.models import ProviderConfig
 from lancher_code.agent.events import TurnEvent
 from lancher_code.config.models import UIConfig
-from lancher_code.mcp.manager import MCPClientManager, MCPInitializationProgress
+from lancher_code.mcp.manager import MCPInitializationProgress
 from lancher_code.config.settings import SettingsService
 from lancher_code.logging_system import get_logger
 from lancher_code.sessions.controller import SessionController
@@ -48,6 +48,7 @@ from lancher_code.tui.permission import InlinePermissionPanel
 from lancher_code.tui.settings.screen import SettingsResult, SettingsScreen
 from lancher_code.tui.model_picker import ModelPickerScreen
 from lancher_code.tui.command_actions import save_command_setting
+from lancher_code.tui.capabilities import CapabilityCommands
 from lancher_code.tui.theme import apply_theme
 from lancher_code.tui.exit_flow import ExitFlow
 from lancher_code.tui.chat_controls import (
@@ -55,7 +56,6 @@ from lancher_code.tui.chat_controls import (
     PlanReviewScreen, PermissionPolicyScreen, ReadOnlyDetailsScreen,
 )
 from lancher_code.agent.runner import TurnRunner
-from lancher_code.tools.core.registry import ToolRegistry
 
 logger = get_logger("tui.chat")
 
@@ -64,7 +64,6 @@ MAX_COMPOSER_LINES = 6
 COMPOSER_FRAME_HEIGHT = 1
 DEFAULT_PLACEHOLDER = "发送一条消息"
 PLAN_PLACEHOLDER = "补充或修改计划，确认后再开始执行"
-MCP_PLACEHOLDER = "正在初始化 MCP，请稍候…"
 
 CONTEXT_REFRESH_EVENTS: frozenset[str] = frozenset(
     {
@@ -93,8 +92,6 @@ class LanCherTextualApp(App[int]):
         session_controller: SessionController,
         ui_config: UIConfig,
         slash_command_registry: SlashCommandRegistry | None = None,
-        mcp_manager: MCPClientManager | None = None,
-        tool_registry: ToolRegistry | None = None,
         settings_service: SettingsService | None = None,
     ) -> None:
         super().__init__()
@@ -126,10 +123,8 @@ class LanCherTextualApp(App[int]):
         self._permission_ui_lock = asyncio.Lock()
         self._turn_succeeded = False
         self._details_open = False
-        self._mcp_manager = mcp_manager
-        self._tool_registry = tool_registry
         self._settings_service = settings_service
-        self.mcp_initialization_complete = mcp_manager is None or not mcp_manager.has_servers
+        self.mcp_initialization_complete = True
         self._session_commands = SessionCommands(
             session_controller, turn_runner, composer=lambda: self.query_one(ComposerTextArea),
             busy=lambda: self._is_streaming, notify=self.notify, open_screen=self.push_screen,
@@ -138,6 +133,7 @@ class LanCherTextualApp(App[int]):
             preserve_input=self._preserve_command_input,
         )
         self._task_commands = TaskCommands(session_controller, turn_runner, self.notify, self.push_screen)
+        self._capability_commands = CapabilityCommands(turn_runner, self.notify, self.push_screen)
         self._hud = HudPresenter(session_controller, turn_runner, provider_config.model,
                                  self._completion.text_allowed_while_busy)
 
@@ -196,9 +192,8 @@ class LanCherTextualApp(App[int]):
     async def on_mount(self) -> None:
         self.screen.set_class(self.size.width < 64, "-narrow")
         composer = self.query_one(ComposerTextArea)
-        composer.disabled = not self.mcp_initialization_complete
-        if self.mcp_initialization_complete:
-            composer.focus()
+        composer.disabled = False
+        composer.focus()
         self._update_composer_height()
         self._refresh_phase_chrome()
         self._refresh_composer_placeholder()
@@ -208,41 +203,20 @@ class LanCherTextualApp(App[int]):
         await self._refresh_pending_queue()
         self._refresh_plan_panel()
         self._status_refresh_timer = self.set_interval(1.0, self._refresh_status_bar)
-        if self._mcp_manager is not None:
-            self._mcp_manager.add_progress_callback(self._handle_mcp_progress)
-            if self._mcp_manager.has_servers:
-                self._status_hint = "正在连接 MCP"
-                self.initialize_mcp()
-            else:
-                self._handle_mcp_progress(MCPInitializationProgress(0, 0, 0, 0, 0, None, "complete"))
-
-    @work(exclusive=True, exit_on_error=False)
-    async def initialize_mcp(self) -> None:
-        try:
-            if self._mcp_manager is not None and self._tool_registry is not None:
-                await self._mcp_manager.initialize(self._tool_registry)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception(
-                "event=tui_mcp_worker_failed exception_type=%s", type(exc).__name__
-            )
-        finally:
-            self.mcp_initialization_complete = True
-            if not self._ui_closing and self.is_running:
-                composer = self.query_one("#composer-input", ComposerTextArea)
-                composer.disabled = False
-                self._status_hint = "就绪"
-                self._refresh_composer_placeholder()
-                self._refresh_status_bar()
-                composer.focus()
+        capabilities = self._turn_runner.capabilities
+        capabilities.add_mcp_progress_callback(self._handle_mcp_progress)
+        self._turn_runner.start_capabilities()
+        if capabilities.mcp_progress is not None:
+            self._handle_mcp_progress(capabilities.mcp_progress)
 
     def _handle_mcp_progress(self, progress: MCPInitializationProgress) -> None:
-        if self._ui_closing:
+        if self._ui_closing or not self.is_mounted:
             return
         self.query_one(BannerWidget).update_mcp_progress(progress)
-        if progress.state == "complete":
+        self.mcp_initialization_complete = progress.completed_servers >= progress.total_servers
+        if progress.state in {"complete", "catalog_updated", "reconnected"}:
             self._refresh_context_usage()
+            self.call_later(self._completion.refresh)
 
     def on_resize(self) -> None:
         self.screen.set_class(self.size.width < 64, "-narrow")
@@ -395,8 +369,6 @@ class LanCherTextualApp(App[int]):
 
     @on(ComposerSubmitted)
     async def handle_input_submitted(self, event: ComposerSubmitted) -> None:
-        if not self.mcp_initialization_complete:
-            return
         text = event.value.strip()
         if not text:
             return
@@ -527,6 +499,7 @@ class LanCherTextualApp(App[int]):
 
     async def on_unmount(self) -> None:
         self._ui_closing = True
+        self._turn_runner.capabilities.remove_mcp_progress_callback(self._handle_mcp_progress)
         if self._exit_hint_timer is not None:
             self._exit_hint_timer.stop()
             self._exit_hint_timer = None
@@ -594,29 +567,9 @@ class LanCherTextualApp(App[int]):
     def _refresh_context_usage(self) -> None:
         banner = self.query_one(BannerWidget)
         try:
-            visible_tools = []
-            deferred_tool_groups = []
-            if self._tool_registry is not None:
-                visible_tools = self._tool_registry.list_definitions(
-                    discovered_names=set(),
-
-                    work_phase=self._session_controller.work_phase,
-                )
-                deferred_tool_groups = self._tool_registry.list_deferred_index(
-
-                    work_phase=self._session_controller.work_phase,
-                )
-            request = self._session_controller.build_request(
-                visible_tools,
-                allow_tool_calls=True,
-
-                work_phase=self._session_controller.work_phase,
-                permission_policy=self._session_controller.permission_policy,
-                deferred_tool_groups=deferred_tool_groups,
-            )
-            estimate = self._session_controller.context_estimate(request)
-            used_tokens = estimate.tokens
-            self._context_estimate_label = "已校准估算" if estimate.source == "usage_calibrated" else "未校准估算"
+            estimate = self._turn_runner.capabilities.context_usage()
+            used_tokens = estimate["tokens"]
+            self._context_estimate_label = "已校准估算" if estimate["source"] == "usage_calibrated" else "未校准估算"
         except Exception:
             logger.exception("event=tui_context_usage_estimate_failed")
             self._context_estimate_label = "估算暂不可用"
@@ -745,9 +698,6 @@ class LanCherTextualApp(App[int]):
 
     def _refresh_composer_placeholder(self) -> None:
         composer = self.query_one("#composer-input", ComposerTextArea)
-        if not self.mcp_initialization_complete:
-            composer.placeholder = MCP_PLACEHOLDER
-            return
         if self._is_streaming:
             composer.placeholder = "任务进行中，仍可输入下一条消息"
             return
@@ -903,6 +853,12 @@ class LanCherTextualApp(App[int]):
         self._refresh_context_usage()
         return self._turn_runner.model_ref
 
+    async def _apply_mcp_settings(self) -> str:
+        notice = await self._turn_runner.capabilities.reload_mcp()
+        self._refresh_context_usage()
+        await self._completion.refresh()
+        return notice
+
 
     async def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         self._command_preserve_input = False
@@ -983,6 +939,7 @@ class LanCherTextualApp(App[int]):
                 on_models_saved=self._apply_models_settings,
                 on_model_selected=self._handle_model_selected,
                 on_ui_saved=self._apply_ui_settings,
+                on_mcp_saved=self._apply_mcp_settings,
             ), self._handle_settings_result)
             return None
 
@@ -1032,7 +989,41 @@ class LanCherTextualApp(App[int]):
             await self._task_commands.execute(arguments_text)
             return None
 
+        if command_name in {"skills", "mcp"}:
+            action = arguments_text.split(maxsplit=1)[0] if arguments_text.strip() else "list"
+            if action in {"list", "show"}:
+                await self._capability_commands.execute(command_name, arguments_text)
+                self._refresh_context_usage()
+                await self._completion.refresh()
+            else:
+                composer = self.query_one(ComposerTextArea)
+                current = self._slash_command_registry.parse_submission(composer.text.strip())
+                draft = composer.text if (current is not None and current.definition.name == command_name
+                                         and current.arguments_text == arguments_text) else None
+                # 等待核心操作时保留原命令，输入和取消仍由消息循环处理。
+                self._command_preserve_input = True
+                self._run_capability_command(command_name, arguments_text, draft)
+            return None
+
         return None
+
+    @work(group="capability-commands", exclusive=False, exit_on_error=False)
+    async def _run_capability_command(self, command_name: str, arguments_text: str, draft: str | None) -> None:
+        try:
+            await self._capability_commands.execute(command_name, arguments_text)
+        except (LanCherError, ValueError, RuntimeError, OSError) as exc:
+            if not self._ui_closing and self.is_running:
+                self.notify(str(exc), title="命令未执行", severity="warning", timeout=10)
+        else:
+            if not self._ui_closing and self.is_running and draft is not None:
+                composer = self.query_one(ComposerTextArea)
+                # 操作期间用户编辑的新草稿不能被完成回调清掉。
+                if composer.text == draft:
+                    composer.clear()
+        finally:
+            if not self._ui_closing and self.is_running:
+                self._refresh_context_usage()
+                await self._completion.refresh()
 
     @work(group="compaction", exclusive=True, exit_on_error=False)
     async def _run_manual_compaction(self, activity_id: str) -> None:
@@ -1121,7 +1112,7 @@ class LanCherTextualApp(App[int]):
                 self.notify(f"设置已保存，当前模型更新失败：{exc}", title="模型", severity="error", timeout=10)
                 self._status_hint = "模型更新失败"
             else:
-                self._status_hint = "设置已保存 · MCP 重启后生效" if result.restart_required else "设置已保存"
+                self._status_hint = "设置已保存 · MCP 待应用" if result.mcp_pending else "设置已保存"
         else:
             self._status_hint = "就绪"
         self._refresh_status_bar()
@@ -1168,8 +1159,6 @@ class ChatTUI:
         provider_config: ProviderConfig,
         session_controller: SessionController,
         ui_config: UIConfig,
-        mcp_manager: MCPClientManager | None = None,
-        tool_registry: ToolRegistry | None = None,
         settings_service: SettingsService | None = None,
     ) -> None:
         self._app = LanCherTextualApp(
@@ -1177,8 +1166,6 @@ class ChatTUI:
             provider_config=provider_config,
             session_controller=session_controller,
             ui_config=ui_config,
-            mcp_manager=mcp_manager,
-            tool_registry=tool_registry,
             settings_service=settings_service,
         )
 

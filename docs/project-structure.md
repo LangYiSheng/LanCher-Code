@@ -25,8 +25,12 @@ lancher-code/
 │   │   ├── control.py          # 工作阶段、权限策略、取消令牌
 │   │   ├── messages.py         # ChatRequest、ContentBlock、StreamEvent
 │   │   └── tools.py            # 工具定义、调用、结果、阶段能力
-│   ├── agent/                  # 单轮任务编排
+│   ├── agent/                  # 单轮任务编排与智能体能力核心
 │   │   ├── runner.py           # TurnRunner 公开入口与任务循环
+│   │   ├── capabilities.py     # Skills、项目约定与 MCP 生命周期的公共门面
+│   │   ├── skill_context.py    # 技能激活、跨轮状态和系统上下文投影
+│   │   ├── instructions.py     # 项目根 AGENTS.md 常驻只读加载
+│   │   ├── skills/             # 技能发现、格式、快照和限定资源读取
 │   │   ├── inputs.py           # 忙时输入与队列
 │   │   ├── selection.py        # ModelSelection：当前模型与 Provider 切换
 │   │   ├── streaming.py        # 完整模型响应收集
@@ -103,6 +107,7 @@ lancher-code/
 │       ├── timeline.py         # 正文、思考与工具顺序呈现
 │       ├── permission.py       # 内联审批
 │       ├── tasks.py            # 进程任务列表与详情
+│       ├── capabilities.py     # Skills / MCP 状态、详情与管理命令转发
 │       ├── compaction.py       # 压缩活动
 │       ├── usage.py            # 用量显示
 │       └── exit_summary.py     # 退出后的终端小结
@@ -113,7 +118,7 @@ lancher-code/
 ## 依赖与职责
 
 - `app.py` 负责装配；TUI 消费 `TurnEvent` 并调用公开服务，不直接调用模型网络接口。
-- `agent/` 编排一轮任务，`sessions/` 持有对话事实，`context/` 构造模型可见副本并管理容量。请求副本的变化不覆盖原始事件。
+- `agent/` 编排一轮任务并管理 Skills、项目约定和 MCP 能力；前端只消费 `TurnRunner.capabilities` 的状态与公共操作。`sessions/` 持有对话事实，`context/` 构造模型可见副本并管理容量。请求副本的变化不覆盖原始事件。
 - `config/models.py` 持有应用配置组合；供应商定义属于 `providers/models.py`。`providers/catalog.py` 只接收供应商映射与显式引用，不导入 `AppConfig`，避免配置加载与目录解析的循环依赖。
 - `contracts/` 只承载真正跨领域的消息、工具、控制契约。会话、权限、用量等类型由自己的领域维护，不再集中到根层 `models.py`。
 - `permissions/` 判定是否执行，`tools/` 组织工具调用，`execution/` 负责资源与进程；公共路径访问规则集中在 `filesystem/access.py`。
@@ -128,11 +133,13 @@ lancher-code/
 ├── lancher.yaml                 # 唯一主配置
 ├── permissions.yaml             # 用户权限规则
 ├── mcp.yaml                     # 全局 MCP
+├── skills/<名称>/SKILL.md         # 用户技能，可包含 references / scripts 等资源
 └── logs/
 
 <项目>/.lancher/
 ├── permissions.yaml             # 项目权限规则
 ├── mcp.yaml                     # 项目 MCP 覆盖
+├── skills/<名称>/SKILL.md         # 项目技能，同名优先
 └── sessions/<UUID>/
     ├── events.jsonl             # 版本 2，持久化事实来源
     ├── meta.json                # 版本 2，列表缓存
@@ -143,5 +150,7 @@ lancher-code/
 ```
 
 主配置不读取项目根的 `lancher.yaml`。旧配置和旧会话格式会明确报错，原文件保留，不迁移、不自动删除；可用会话与列表中的格式问题分别返回。公开启动入口 `lancher`、`lancher-code`、`python -m lancher_code` 和仓库 `main.py` 保留。
+
+项目根 `AGENTS.md` 位于 `.lancher` 外，由智能体核心在请求构造时加载。技能格式与正文的压缩生命周期见 [Skills 与项目约定](modules/skills.md)。
 
 详细运行链路见 [架构](architecture.md)、[启动流程](workflows/startup.md)、[会话生命周期](workflows/session-lifecycle.md) 与 [工具执行](workflows/tool-execution.md)。

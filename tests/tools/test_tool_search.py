@@ -53,7 +53,7 @@ async def test_tool_search_returns_structured_errors(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_search_requires_narrower_query_when_result_limit_is_exceeded(tmp_path) -> None:
+async def test_tool_search_loads_ranked_first_eight_and_reports_more_matches(tmp_path) -> None:
     class ManyDeferredTool:
         def __init__(self, index: int) -> None:
             self._definition = ToolDefinition(
@@ -79,5 +79,7 @@ async def test_tool_search_requires_narrower_query_when_result_limit_is_exceeded
         ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1),
     )
 
-    assert result.error_code == "too_many_deferred_tools"
+    assert not result.is_error
+    assert len(result.metadata["discovered_tool_names"]) == 8
+    assert result.metadata["has_more"] is True
     assert result.metadata["result_limit"] == 8

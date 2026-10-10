@@ -126,6 +126,8 @@ class MessageEditor:
                         "error_code": result.error_code, "error_message": result.error_message}
             metadata.pop("waiting", None)
             if call_entry is not None:
+                if result.error_code == 'tool_changed':
+                    call_entry.metadata['started'] = False
                 call_entry.metadata["state"] = state
                 call_entry.metadata.pop("waiting", None)
                 metadata["group_id"] = call_entry.metadata.get("group_id")

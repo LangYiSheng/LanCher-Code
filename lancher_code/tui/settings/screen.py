@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable
+from typing import Awaitable, Callable
 
 import yaml
 from textual import on
@@ -35,6 +35,7 @@ class SettingsResult:
     restart_required: bool = False
     config: AppConfig | None = None
     runtime_applied: bool = False
+    mcp_pending: bool = False
 
 
 class SettingsScreen(Screen[SettingsResult]):
@@ -46,15 +47,17 @@ class SettingsScreen(Screen[SettingsResult]):
     def __init__(self, service: SettingsService, current_model_ref: str | None = None,
                  on_models_saved: Callable[[AppConfig], str | None] | None = None,
                  on_model_selected: Callable[[str], str | None] | None = None,
-                 on_ui_saved: Callable[[UIConfig], None] | None = None) -> None:
+                 on_ui_saved: Callable[[UIConfig], None] | None = None,
+                 on_mcp_saved: Callable[[], Awaitable[str]] | None = None) -> None:
         super().__init__()
         self.service = service
         self.current_model_ref = current_model_ref
         self._on_models_saved, self._on_model_selected, self._on_ui_saved = on_models_saved, on_model_selected, on_ui_saved
+        self._on_mcp_saved = on_mcp_saved
         self.snapshot: SettingsSnapshot | None = None
         self._active_tab = "model"
         self._saved = False
-        self._restart_required = service.mcp_restart_required
+        self._mcp_pending = service.mcp_restart_required if on_mcp_saved is None else False
         self._runtime_applied = False
 
     def compose(self) -> ComposeResult:
@@ -149,8 +152,8 @@ class SettingsScreen(Screen[SettingsResult]):
         self.query_one("#settings-pages", VerticalScroll).scroll_home(animate=False)
 
     def _refresh_actions(self) -> None:
-        self.query_one("#settings-restart", Static).update("MCP 有已保存的更改 · 重启后生效" if self._restart_required else "")
-        self.query_one("#settings-restart").display = self._restart_required
+        self.query_one("#settings-restart", Static).update("MCP 有已保存的更改 · /mcp reload 应用" if self._mcp_pending else "")
+        self.query_one("#settings-restart").display = self._mcp_pending
         editing = self._editing
         self.query_one("#settings-save").display = editing
         self.query_one("#settings-cancel", Button).label = "‹ 返回目录" if editing else "‹ 返回对话"
@@ -276,10 +279,19 @@ class SettingsScreen(Screen[SettingsResult]):
         self._show_error(event.message)
 
     @on(DomainSaved)
-    def domain_saved(self, event: DomainSaved) -> None:
+    async def domain_saved(self, event: DomainSaved) -> None:
         self._saved = True
-        self._restart_required |= event.restart_required
+        self._mcp_pending |= event.domain == "mcp" and event.restart_required
         callback_error = None
+        notice = event.notice
+        if event.domain == "mcp" and event.restart_required and self._on_mcp_saved is not None:
+            self._notice("MCP 已保存 · 正在应用…")
+            try:
+                notice = await self._on_mcp_saved()
+            except Exception as exc:
+                callback_error = f"MCP 已保存，应用失败：{exc}；可运行 /mcp reload 重试。"
+            else:
+                self._mcp_pending = False
         if event.ui is not None:
             apply_theme(self.app, event.ui.theme)
             try:
@@ -288,7 +300,7 @@ class SettingsScreen(Screen[SettingsResult]):
             except Exception as exc:
                 callback_error = f"偏好已保存，当前界面更新失败：{exc}"
         self._show_tab("model" if event.domain == "ui" else event.domain)
-        self._notice(event.notice)
+        self._notice(notice)
         if callback_error:
             self._show_error(callback_error)
 
@@ -301,7 +313,8 @@ class SettingsScreen(Screen[SettingsResult]):
             if self._editing:
                 self._show_tab(self._active_tab if self._active_tab != "ui" else "model")
             else:
-                self.dismiss(SettingsResult(self._saved, self._restart_required, deepcopy(self.snapshot.config) if self.snapshot else None, self._runtime_applied))
+                self.dismiss(SettingsResult(self._saved, False, deepcopy(self.snapshot.config) if self.snapshot else None,
+                                            self._runtime_applied, self._mcp_pending))
         self._guard(leave)
 
     def _show_error(self, message: str) -> None:

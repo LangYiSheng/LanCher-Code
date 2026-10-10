@@ -61,25 +61,17 @@ class ToolSearchTool:
                 metadata={"query": query.strip()},
                 tool_name=self.definition.name,
             )
-        if len(matches) > TOOL_SEARCH_RESULT_LIMIT:
-            message = (
-                f"匹配的 MCP 工具超过 {TOOL_SEARCH_RESULT_LIMIT} 个，"
-                "请使用更具体的关键词或 select:<完整工具名>。"
-            )
-            return build_tool_error(
-                summary="MCP 工具搜索结果过多",
-                error_code="too_many_deferred_tools",
-                error_message=message,
-                metadata={"query": query.strip(), "result_limit": TOOL_SEARCH_RESULT_LIMIT},
-                tool_name=self.definition.name,
-            )
-
+        has_more = len(matches) > TOOL_SEARCH_RESULT_LIMIT
+        matches = matches[:TOOL_SEARCH_RESULT_LIMIT]
         names = [definition.name for definition in matches]
         lines = ["已加载以下 MCP 工具，其完整参数定义将在下一次模型请求中提供："]
         lines.extend(f"- {definition.name}: {definition.description}" for definition in matches)
+        if has_more:
+            lines.append(f"还有更多匹配项，已按相关度加载前 {TOOL_SEARCH_RESULT_LIMIT} 个；可缩小关键词继续搜索。")
         return build_tool_success(
             summary=f"已加载 {len(matches)} 个 MCP 工具",
             content="\n".join(lines),
-            metadata={"query": query.strip(), "discovered_tool_names": names},
+            metadata={"query": query.strip(), "discovered_tool_names": names,
+                      "has_more": has_more, "result_limit": TOOL_SEARCH_RESULT_LIMIT},
             tool_name=self.definition.name,
         )

@@ -264,7 +264,7 @@ async def test_add_delete_entries_and_protect_default(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_save_restart_cumulative_and_no_implicit_other_domain_save(tmp_path) -> None:
+async def test_mcp_save_pending_cumulative_and_no_implicit_other_domain_save(tmp_path) -> None:
     service = _service(tmp_path)
     original = service.config_path.read_bytes()
     app = _settings_app(service)
@@ -286,7 +286,7 @@ async def test_mcp_save_restart_cumulative_and_no_implicit_other_domain_save(tmp
         await pilot.pause()
         screen.action_close_settings()
         await pilot.pause()
-        assert app.result.saved and app.result.restart_required
+        assert app.result.saved and app.result.mcp_pending and not app.result.restart_required
 
 
 @pytest.mark.asyncio
@@ -403,14 +403,14 @@ async def test_mcp_duplicate_name_rejected_and_http_ignores_hidden_stdio_args(tm
 
 
 @pytest.mark.asyncio
-async def test_narrow_keyboard_save_discard_and_restart_status_survive_reopen(tmp_path) -> None:
+async def test_narrow_keyboard_save_discard_and_mcp_pending_status_survive_reopen(tmp_path) -> None:
     service = _service(tmp_path)
     service.save_mcp("global", {"demo":{"type":"http", "url":"https://example.test"}})
     app = _settings_app(service)
     async with app.run_test(size=(32, 16)) as pilot:
         screen = app.screen
-        assert screen._restart_required
-        assert "重启后生效" in str(screen.query_one("#settings-restart", Static).render())
+        assert screen._mcp_pending
+        assert "/mcp reload" in str(screen.query_one("#settings-restart", Static).render())
         editor = screen.query_one(ModelSettingsEditor)
         editor.open_model("test", "default")
         screen.query_one("#model-name", Input).value = "keyboard-save"
@@ -431,13 +431,13 @@ async def test_narrow_keyboard_save_discard_and_restart_status_survive_reopen(tm
         await pilot.pause()
         assert editor.kind is None
         await pilot.press("escape")
-        assert app.result.saved and app.result.restart_required
+        assert app.result.saved and app.result.mcp_pending and not app.result.restart_required
         assert load_config(service.config_path).providers["test"].models["default"].model_name == "keyboard-save"
     app = _settings_app(service)
     async with app.run_test(size=(32, 16)) as pilot:
-        assert "重启后生效" in str(app.screen.query_one("#settings-restart", Static).render())
+        assert "/mcp reload" in str(app.screen.query_one("#settings-restart", Static).render())
         await pilot.press("escape")
-        assert app.result.restart_required
+        assert app.result.mcp_pending and not app.result.restart_required
 
 
 @pytest.mark.asyncio

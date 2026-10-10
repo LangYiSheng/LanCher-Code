@@ -107,6 +107,10 @@ class SessionController:
         return self._state
 
     @property
+    def project_root(self) -> Path:
+        return self._cwd
+
+    @property
     def transcript(self) -> list[ConversationMessage]:
         return list(self._transcript)
 
@@ -406,6 +410,14 @@ class SessionController:
             tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
         )
 
+    def bind_agent_context(self, builder) -> None:
+        """装配核心提供的上下文投影；保持会话层不依赖界面或能力实现。"""
+        self._agent_context_builder = builder
+
+    def save_agent_context(self) -> None:
+        self._mark_dirty()
+        self.flush()
+
     def estimate_request_tokens(self, request: ChatRequest) -> int:
         return estimate_request_tokens(request, self.context_state)
 
@@ -556,6 +568,7 @@ class SessionController:
                 cancellation_token=cancellation_token,
                 stream_request=lambda request: self.stream_request(provider, request),
                 request_factory=lambda request: self.bind_usage_request(request, turn_id=turn_id, purpose="compaction"),
+                prompt_context_factory=lambda state: self._prompt_context(context_state=state),
             )
             result = candidate.result
             self._transcript = candidate.transcript
@@ -866,7 +879,9 @@ class SessionController:
     def _prompt_context(
         self, *, work_phase: WorkPhase | None = None,
         permission_policy: PermissionPolicy | None = None,
+        context_state: ContextManagementState | None = None,
     ) -> "PromptContext":
+        builder = getattr(self, '_agent_context_builder', None)
         return build_prompt_context(
             cwd=self._cwd,
             current_date=self._current_date,
@@ -879,6 +894,8 @@ class SessionController:
             plan_mode_turn_count=self._state.plan_mode_turn_count,
             pending_plan_entry_kind=self._state.pending_plan_entry_kind,
             pending_plan_exit_notice=self._state.pending_plan_exit_notice,
+            agent_context=builder(context_state if context_state is not None else self.context_state) if builder else [],
+            deferred_tools_max_chars=max(512, min(12_000, self.context_window // 8)),
         )
 
     def _advance_dynamic_prompt_state_after_user_turn(self) -> None:

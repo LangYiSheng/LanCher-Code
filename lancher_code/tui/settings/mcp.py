@@ -79,7 +79,7 @@ class MCPSettingsEditor(SettingsDomainEditor):
         self.query_one("#mcp-list").display = False
         self.query_one("#mcp-editor").display = True
         self.query_one("#mcp-editor-title", Static).update(f"编辑 MCP · {name}" if name else "添加 MCP 服务器")
-        self.query_one("#mcp-editor-scope", Static).update(("全局" if self._mcp_scope == "global" else "当前项目") + " · 保存后重启生效")
+        self.query_one("#mcp-editor-scope", Static).update(("全局" if self._mcp_scope == "global" else "当前项目") + " · 保存后重新加载连接")
         kind = server.get("type", "stdio")
         with self.prevent(Select.Changed):
             self.query_one("#mcp-type", Select).value = kind
@@ -130,7 +130,7 @@ class MCPSettingsEditor(SettingsDomainEditor):
         if self._mcp_scope == "global": self.snapshot.global_mcp = servers
         else: self.snapshot.project_mcp = servers
         self.show_catalog()
-        self.post_message(DomainSaved("mcp", "MCP 已保存，重启后生效。" if changed else "MCP 设置未改变。", restart_required=changed))
+        self.post_message(DomainSaved("mcp", "MCP 已保存，等待应用。" if changed else "MCP 设置未改变。", restart_required=changed))
 
     @on(Button.Pressed, "#mcp-delete")
     def delete_mcp(self) -> None:

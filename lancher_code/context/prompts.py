@@ -77,27 +77,56 @@ def build_environment_prompt(context: PromptContext) -> str:
     )
 
 
-def build_deferred_tools_prompt(tool_groups: list[DeferredToolGroup]) -> str | None:
+def build_deferred_tools_prompt(tool_groups: list[DeferredToolGroup], *, max_chars: int = 12_000) -> str | None:
     if not tool_groups:
         return None
+    max_chars = max(512, max_chars)
+    prefix = (
+        '<deferred_tools>\n<instruction>\n'
+        '以下 MCP 工具已延迟加载，当前请求不包含其完整参数定义。'
+        '需要使用时，必须先调用 tool_search；不要直接调用尚未加载的工具。\n'
+        '</instruction>\n\n'
+    )
+    suffix = '\n</deferred_tools>'
     servers: list[str] = []
+    size = len(prefix) + len(suffix)
+    overflow = False
     for group in tool_groups:
         lines = ["<server>", f"<name>{escape(group.title)}</name>"]
         if group.description:
             lines.append(f"<description>{escape(group.description)}</description>")
         lines.append("<tools>")
-        lines.extend(f"<tool>{escape(tool_name)}</tool>" for tool_name in group.tool_names)
+        for tool_name in group.tool_names:
+            line = f'<tool>{escape(tool_name)}</tool>'
+            size += len(line) + 1
+            if size > max_chars:
+                overflow = True
+                break
+            lines.append(line)
         lines.extend(("</tools>", "</server>"))
-        servers.append("\n".join(lines))
-    return (
-        "<deferred_tools>\n"
-        "<instruction>\n"
-        "以下 MCP 工具已延迟加载，当前请求不包含其完整参数定义。"
-        "需要使用时，必须先调用 tool_search；不要直接调用尚未加载的工具。\n"
-        "</instruction>\n\n"
-        + "\n\n".join(servers)
-        + "\n</deferred_tools>"
-    )
+        server = '\n'.join(lines)
+        size += len(server) - sum(len(line) + 1 for line in lines if line.startswith('<tool>')) + 2
+        if overflow or size > max_chars:
+            overflow = True
+            break
+        servers.append(server)
+    if not overflow:
+        return prefix + '\n\n'.join(servers) + suffix
+    # 目录过大时退化为服务器摘要，搜索仍在注册表完整目录中进行。
+    notice = (f'<notice>目录含 {len(tool_groups)} 个服务器、'
+              f'{sum(len(group.tool_names) for group in tool_groups)} 个工具；'
+              '名称索引已省略，请按服务器或任务描述调用 tool_search。</notice>\n')
+    servers = []
+    size = len(prefix) + len(notice) + len(suffix)
+    for group in tool_groups:
+        description = f'\n<description>{escape(group.description[:256])}</description>' if group.description else ''
+        server = (f'<server>\n<name>{escape(group.title[:128])}</name>{description}\n'
+                  f'<tool_count>{len(group.tool_names)}</tool_count>\n</server>')
+        if size + len(server) + 2 > max_chars:
+            break
+        servers.append(server)
+        size += len(server) + 2
+    return prefix + notice + '\n\n'.join(servers) + suffix
 
 
 def build_dynamic_context_prompt(context: PromptContext) -> str | None:
@@ -188,6 +217,8 @@ def build_prompt_context(
     plan_snapshot: PlanSnapshot | None = None,
     session_id: str | None = None,
     session_workspace: Path | None = None,
+    agent_context: list[str] | None = None,
+    deferred_tools_max_chars: int = 12_000,
 ) -> PromptContext:
     resolved_plan_file_path = plan_file_path.resolve() if plan_file_path is not None else None
     phase = work_phase if work_phase is not None else "execute"
@@ -206,6 +237,8 @@ def build_prompt_context(
         plan_snapshot=plan_snapshot,
         session_id=session_id,
         session_workspace=session_workspace,
+        agent_context=list(agent_context or []),
+        deferred_tools_max_chars=deferred_tools_max_chars,
     )
 
 
@@ -231,7 +264,8 @@ def build_chat_request_payload(
     ]
     if dynamic_context:
         system.append(dynamic_context)
-    deferred_tools_prompt = build_deferred_tools_prompt(deferred_tool_groups or [])
+    system.extend(context.agent_context)
+    deferred_tools_prompt = build_deferred_tools_prompt(deferred_tool_groups or [], max_chars=context.deferred_tools_max_chars)
     if deferred_tools_prompt:
         system.append(deferred_tools_prompt)
     messages = list(transcript)

@@ -182,6 +182,9 @@ mcp_servers:
     args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/Dev"]
     env:
       LOG_LEVEL: info
+    startup_timeout_seconds: 30
+    tool_timeout_seconds: 60
+    close_timeout_seconds: 5
   internal_api:
     type: http
     url: https://mcp.example.com/mcp
@@ -195,9 +198,20 @@ mcp_servers:
 | `enabled` | bool，默认 `true`；`false` 时该 Server 被跳过 |
 | `command` / `args` / `env` | stdio 类型必填 `command` |
 | `url` / `headers` | http 类型必填 `url`（必须是合法 HTTP(S) URL） |
+| `startup_timeout_seconds` | 可选，连接／握手／完整工具发现与刷新超时，默认 30 秒 |
+| `tool_timeout_seconds` | 可选，远端调用独立超时，默认 60 秒 |
+| `close_timeout_seconds` | 可选，关闭连接超时，默认 5 秒 |
 | 名称 | 只能包含字母、数字、`_`、`-` |
 
 合并规则：**项目配置按名称覆盖全局配置**（`{**user, **project}`），同名项目项整体替换。加载与设置保存共用 `mcp/config.py` 的 `validate_server_config()`；保存保留环境变量原文，加载启用项时展开 `env` / `headers`。启动加载失败只产生该项的 `MCPConfigIssue`，不影响其他 Server；非法项目覆盖不会回退为同名全局配置。
+
+超时均须为有限正数，单位为秒。在应用设置中保存 MCP 后通过核心立即应用，直接修改文件后运行 `/mcp reload`。本轮 MCP 只提供 Tools，目录分页、刷新与重连见 [MCP 模块](modules/mcp.md)。
+
+## Skills 与项目约定
+
+项目技能放在 `./.lancher/skills/<名称>/SKILL.md`，用户技能放在 `~/.lancher/skills/<名称>/SKILL.md`；不需要在主 YAML 注册。项目同名优先，完整 ID 为 `project/<名称>`、`user/<名称>`。使用 YAML frontmatter 的 `name`、`description` 和 Markdown 正文；`disable-model-invocation: true` 限制为用户显式指定。文件变更后可用 `/skills reload` 更新目录，当前已加载正文保持快照。
+
+本会话的禁用与加载状态保存到 Session，正文跨轮生效，成功压缩后回收并按需要重载。项目根 `AGENTS.md` 在请求时常驻加载，最多 32 KiB，当前不处理子目录继承。完整示例与预算见 [Skills 与项目约定](modules/skills.md)。
 
 ## 设置面板（/settings）
 
@@ -209,7 +223,7 @@ mcp_servers:
 
 “应用条目”只修改设置草稿，底部“保存”才写入文件。删除默认模型或其供应商前须先指定另一个默认模型；删除供应商会确认其下模型列表。
 
-保存按领域调用 `SettingsService.save_models/save_ui/save_mcp/save_rules`：校验本次提交，使用 `config/writer.py` 的临时文件与 `os.replace` 原子替换目标文件；写盘成功后才激活相关运行时更新。模型与 UI 保存保留主配置中的其他领域、环境变量原文及继承关系。模型目录保存后立即可用；修改默认值不覆盖当前会话已选模型。当前模型仍存在时继续使用它，并更新其连接配置；已删除时回退新默认模型并提示。MCP 的修改仍需重启生效。
+保存按领域调用 `SettingsService.save_models/save_ui/save_mcp/save_rules`：校验本次提交，使用 `config/writer.py` 的临时文件与 `os.replace` 原子替换目标文件；写盘成功后才激活相关运行时更新。模型与 UI 保存保留主配置中的其他领域、环境变量原文及继承关系。模型目录保存后立即可用；修改默认值不覆盖当前会话已选模型。当前模型仍存在时继续使用它，并更新其连接配置；已删除时回退新默认模型并提示。MCP 保存后由能力核心关闭旧连接、重读配置并更新工具；应用失败与已保存事实分别显示，可用 `/mcp reload` 重试。
 
 聊天中使用 `/model` 展开模型候选项，Tab 或 Enter 填入后再次 Enter 切换，也可输入 `/model 供应商ID/模型ID`。仅切换当前会话，保留历史和权限，不修改新对话默认模型；首条消息之后的模型选择随 Session 自动持久化。`/settings default-model 供应商ID/模型ID` 单独修改默认值。详见 [cli-and-interaction.md](cli-and-interaction.md)。
 

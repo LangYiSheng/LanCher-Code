@@ -39,7 +39,7 @@ class BannerWidget(Static):
         self.refresh()
 
     def update_mcp_progress(self, progress: MCPInitializationProgress) -> None:
-        if progress.state == "complete":
+        if progress.state in {"complete", "catalog_updated", "reconnected"}:
             if progress.total_servers == 0:
                 self.mcp_status = "MCP：未配置"
             elif progress.failed_servers:

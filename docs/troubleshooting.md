@@ -59,7 +59,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 ### 修改配置后不生效
 
 - `runtime.work_phase` / `runtime.permission_policy` 控制启动默认值；运行中可用 `/discuss`、`/plan`、`/do` 和 `/permissions` 分别修改。忙碌时先完成或停止任务
-- 模型目录与权限规则保存后立即生效，MCP 配置仍需重启。只修改默认模型不会替换当前会话所选模型；需要立即改用另一模型时执行 `/model`。
+- 模型目录与权限规则保存后立即生效，MCP 保存后由核心立即重新应用；直接修改 YAML 或应用失败时使用 `/mcp reload`。只修改默认模型不会替换当前会话所选模型；需要立即改用另一模型时执行 `/model`。
 
 ## 运行问题
 

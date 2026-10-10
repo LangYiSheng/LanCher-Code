@@ -263,7 +263,7 @@ async def test_menu_keyboard_and_layout_across_sizes(tmp_path, theme, size):
         assert app.theme == f"lancher-{theme}"
         composer = await type_command(app, pilot, "/")
         assert "Enter 填入" in str(app.query_one("#composer-help", Static).render())
-        for _ in range(10):
+        for _ in range(len(app._completion.matches) - 1):
             await pilot.press("down")
         menu = app.query_one(SlashCompletionMenu)
         item = [i for i in app.query(SlashCompletionMenuItem) if i._active][0]

@@ -69,7 +69,7 @@ def build_app(directory, config, responses, *, profiles=()):
     executor = ToolExecutor(registry, cwd=directory, execution_runtime=runtime,
                             permission_engine=PermissionEngine(storage))
     runner = TurnRunner(ScriptedProvider(responses), session, registry, executor)
-    app = LanCherTextualApp(runner, config, session, UIConfig(), tool_registry=registry)
+    app = LanCherTextualApp(runner, config, session, UIConfig())
     return app, session, runner, storage
 
 

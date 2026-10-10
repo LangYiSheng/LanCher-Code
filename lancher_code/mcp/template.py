@@ -14,6 +14,9 @@ mcp_servers: {}
 #     type: stdio
 #     command: npx
 #     args: ["-y", "@modelcontextprotocol/server-filesystem", "D:/Dev"]
+#     startup_timeout_seconds: 30
+#     tool_timeout_seconds: 60
+#     close_timeout_seconds: 5
 #     env:
 #       LOG_LEVEL: info
 

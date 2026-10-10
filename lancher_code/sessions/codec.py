@@ -274,6 +274,8 @@ class SessionCodec:
             "recent_files": [asdict(value) for value in context.recent_files],
             "automatic_failure_count": context.automatic_failure_count,
             "automatic_compaction_disabled": context.automatic_compaction_disabled,
+            "skill_activations": copy.deepcopy(context.skill_activations),
+            "disabled_skills": list(context.disabled_skills),
         }
 
     @staticmethod
@@ -315,6 +317,26 @@ class SessionCodec:
         if any(not isinstance(item, dict) for item in raw_files):
             raise TypeError("context file snapshot")
         files = [ContextFileSnapshot(**item) for item in raw_files]
+        activations = value.get('skill_activations', {})
+        disabled_skills = value.get('disabled_skills', [])
+        if not isinstance(activations, dict) or len(activations) > 128:
+            raise ValueError('技能激活记录无效。')
+        for skill_id, item in activations.items():
+            if not isinstance(skill_id, str) or not isinstance(item, dict) or item.get('id') != skill_id:
+                raise ValueError('技能激活身份无效。')
+            for key in ('name', 'description', 'scope', 'path', 'directory', 'digest', 'body', 'activation_kind'):
+                if not isinstance(item.get(key), str):
+                    raise ValueError(f'技能激活字段 {key} 无效。')
+            if (type(item.get('loaded')) is not bool or item['scope'] not in {'project', 'user'}
+                    or item['activation_kind'] not in {'explicit', 'automatic'}
+                    or skill_id != f"{item['scope']}/{item['name']}"
+                    or len(item['body']) > 24_000 or (not item['loaded'] and item['body'])):
+                raise ValueError('技能激活状态无效。')
+            if len(item['digest']) != 64 or any(c not in '0123456789abcdef' for c in item['digest']):
+                raise ValueError('技能内容指纹无效。')
+        if (not isinstance(disabled_skills, list) or len(disabled_skills) > 128
+                or any(not isinstance(item, str) or not item for item in disabled_skills)):
+            raise ValueError('技能禁用记录无效。')
         return ContextManagementState(
             context_id=context_id,
             usage_anchor=anchor,
@@ -322,6 +344,8 @@ class SessionCodec:
             recent_files=files,
             automatic_failure_count=failure_count,
             automatic_compaction_disabled=disabled,
+            skill_activations=copy.deepcopy(activations),
+            disabled_skills=list(dict.fromkeys(disabled_skills)),
         )
 
     @staticmethod

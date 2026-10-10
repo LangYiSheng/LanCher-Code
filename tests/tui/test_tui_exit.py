@@ -225,13 +225,14 @@ async def test_initialization_can_exit_with_double_interrupt(openai_provider_con
             finally:
                 self.cancelled.set()
 
+        async def close(self):
+            pass
+
     manager = MCP()
-    app._mcp_manager = manager
-    app._tool_registry = runner._tool_registry
-    app.mcp_initialization_complete = False
+    runner.configure_capabilities(mcp_manager=manager)
     async with app.run_test(size=(32, 16)) as pilot:
         await until(pilot, manager.started.is_set)
-        assert app.query_one(ComposerTextArea).disabled
+        assert not app.query_one(ComposerTextArea).disabled
         await pilot.press("ctrl+c")
         assert app._exit_flow.is_armed
         await pilot.press("ctrl+c")

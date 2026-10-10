@@ -81,7 +81,6 @@ async def run_app() -> int:
     mcp_manager = MCPClientManager(
         mcp_configs,
         issues=mcp_issues,
-        timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS,
     )
     permission_engine = PermissionEngine(permission_storage)
     settings_service = SettingsService(
@@ -106,20 +105,20 @@ async def run_app() -> int:
         unknown_tool_streak_limit=config.runtime.unknown_tool_streak_limit,
     )
     turn_runner.configure_models(config, provider_factory=provider_factory)
+    turn_runner.configure_capabilities(mcp_manager=mcp_manager, registry=tool_registry)
     tui = ChatTUI(
         turn_runner=turn_runner,
         provider_config=active_config,
         session_controller=session_controller,
         ui_config=config.ui,
         settings_service=settings_service,
-        mcp_manager=mcp_manager,
-        tool_registry=tool_registry,
     )
     normal_return = False
     cleanup_errors: list[str] = []
     stopped_processes = 0
     target = None
     try:
+        turn_runner.start_capabilities()
         result = await tui.run()
         normal_return = True
     finally:

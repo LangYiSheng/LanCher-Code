@@ -47,6 +47,8 @@ class CompletionController:
         processes = self.runner.list_processes() if composer.text.lstrip().startswith("/tasks") else []
         sessions = []
         session_listing_error = None
+        skills = self.runner.capabilities.list_skills() if composer.text.lstrip().startswith("/skills") else []
+        servers = self.runner.capabilities.mcp_status() if composer.text.lstrip().startswith("/mcp") else []
         if cursor_at_end and composer.text.lstrip().startswith("/session"):
             try:
                 listing = self.session.list_sessions()
@@ -65,6 +67,9 @@ class CompletionController:
                     active_session_id=self.session.session_id,
                     process_choices=tuple((str(item["process_id"]), task_label(item)) for item in processes),
                     model_choices=self.model_choices(),
+                    skill_choices=tuple((str(item.get("id", item["name"])),
+                        f'{item["name"]} · {item.get("scope", "")} · ' + ("启用" if item.get("enabled", True) else "停用")) for item in skills),
+                    mcp_choices=tuple((str(item["name"]), f'{item["name"]} · {item.get("state", "未知")}') for item in servers),
                     active_model_ref=self.runner.model_ref,
                     default_model_ref=self.runner.model_config.default_model if self.runner.model_config is not None else None,
                     permission_policy=self.session.permission_policy,
@@ -183,7 +188,9 @@ class CompletionController:
 
     @staticmethod
     def allowed_while_busy(command_name: str, arguments_text: str) -> bool:
-        return command_name == "tasks" or (command_name == "session" and arguments_text.strip() == "stop")
+        return (command_name == "tasks" or (command_name == "session" and arguments_text.strip() == "stop")
+                or (command_name in {"skills", "mcp"} and arguments_text.strip() in {"", "list"})
+                or (command_name == "skills" and arguments_text.split()[:1] == ["show"]))
 
 
     def text_allowed_while_busy(self, text: str) -> bool:

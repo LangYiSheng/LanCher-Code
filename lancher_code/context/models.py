@@ -37,6 +37,9 @@ class ContextManagementState:
     recent_files: list[ContextFileSnapshot] = field(default_factory=list)
     automatic_failure_count: int = 0
     automatic_compaction_disabled: bool = False
+    # 激活正文与引用属于会话上下文；界面不参与其加载和生命周期判断。
+    skill_activations: dict[str, dict[str, object]] = field(default_factory=dict)
+    disabled_skills: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True, frozen=True)

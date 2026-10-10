@@ -12,6 +12,8 @@
 
 公开入口在 `lancher_code/agent/runner.py`，模型选择由 `agent/selection.py` 管理，输入队列在 `inputs.py`，流式响应收集在 `streaming.py`，工具批次收尾在 `tool_batch.py`，界面事件类型在 `events.py`。
 
+`TurnRunner.capabilities` 暴露 `AgentCapabilities`：Skills 发现与激活、项目 AGENTS.md、MCP 连接和工具目录管理均属于核心。装配时调用 `configure_capabilities()`，运行前调用 `start_capabilities()`，退出时随 `shutdown()` 收尾；界面只消费状态和调用管理入口。输入真正生效时处理 `$技能名`，不是在界面收到草稿时提前加载。格式与生命周期见 [Skills 与项目约定](skills.md)。
+
 ## 在系统中的位置
 
 ```text

@@ -14,6 +14,8 @@
 - 支持配置多个自定义供应商，每个供应商可添加多个模型；兼容 `OpenAI` 与 `Anthropic` 两类协议。
 - 支持供应商公共连接参数、模型逐字段覆盖、默认主模型，以及聊天中通过 `/model` 切换。
 - 内置文件、搜索、计划工具，以及 `run_command` 和六个 `process_*` 进程管理工具。
+- Skills 支持项目与用户 `.lancher/skills` 目录、`$技能名` 显式指定和模型按需加载；正文跨轮保留，成功压缩后按引用重载。
+- 自动读取项目根 `AGENTS.md`；MCP Tools 支持后台初始化、分页发现、动态目录刷新、重连和独立超时。
 - 按资源调度并行工具；每段对话可同时托管多个 Pipe / PTY 进程，支持后台、增量日志、输入和进程树停止。
 - 支持 ReAct 式多轮工具循环、工具轨迹展示、Token 用量展示。
 - 讨论、计划、执行三个工作阶段与审批策略独立；计划支持确认正文后开始执行。
@@ -125,7 +127,11 @@ rules:
 - `/model [供应商ID/模型ID]`
   打开模型选择器，或直接切换当前会话的主模型；保留对话历史，不修改全局默认值。
 - `/settings`
-  管理供应商、模型、MCP、权限、外观与输入。逐条保存；本次模型与新对话默认独立。MCP 修改持续标记待重启。
+  管理供应商、模型、MCP、权限、外观与输入。逐条保存；本次模型与新对话默认独立。MCP 保存后由核心立即重新应用，失败可用 `/mcp reload` 重试。
+- `/skills [list|show|reload|enable|disable|unload] [技能名或ID]`
+  查看与管理当前会话的技能；任务中用 `$技能名` 或 `$project/技能名` 显式加载，模型也可按描述选择。
+- `/mcp [list|refresh|reconnect|reload] [服务器名]`
+  查看连接状态、刷新工具目录、重新连接或重读配置。
 - `/session <new|list|resume|rename|archive|remove> [UUID] [标题]`
   管理项目对话；首条消息自动保存，标题可包含空格并允许重复。新建、恢复按独立 UUID 切换；归档和删除需要确认，当前会话请先 `new`。恢复后待发送消息全部暂停。
 - `/tasks [list|show|read|stop|background] [进程UUID]`
@@ -146,15 +152,16 @@ rules:
 ## `.lancher` 目录说明
 
 - `~/.lancher`
-  存放全局配置、用户级权限规则，以及后续全局能力。
+  存放全局配置、用户级权限规则、MCP 配置与用户 Skills。
 - `./.lancher`
-  存放当前项目权限规则和按 UUID 分离的 Session 记录及工作文件。
+  存放项目权限规则、MCP 配置、项目 Skills 和按 UUID 分离的 Session 记录及工作文件。
 
 当前默认文件：
 
 - 全局配置：`~/.lancher/lancher.yaml`
 - 用户级权限规则：`~/.lancher/permissions.yaml`
 - 项目级权限规则：`./.lancher/permissions.yaml`
+- 用户／项目技能：`~/.lancher/skills/<名称>/SKILL.md`、`./.lancher/skills/<名称>/SKILL.md`
 - 会话事件：`./.lancher/sessions/<UUID>/events.jsonl`
 - 会话工作目录：`./.lancher/sessions/<UUID>/workspace/`（含 `plan.md`、`tmp/`、`artifacts/`）
 - 进程记录与输出：`./.lancher/sessions/<UUID>/processes/<进程UUID>/`（应用管理区）
@@ -168,3 +175,5 @@ Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入�
 - Provider、会话层、工具系统、TurnRunner、TUI 已全部打通。
 - 五层权限系统已落地，并覆盖命令执行与文件操作。
 - 核心代码按 `agent/`、`context/`、`sessions/`、`config/` 等领域组织；目录职责见 [项目结构](docs/project-structure.md)，验证方式见 [开发说明](docs/development.md)。
+
+Skills 的格式、精简示例、引用资料与压缩生命周期见 [Skills 与项目约定](docs/modules/skills.md)。项目同名技能优先，可用 `project/<名称>`、`user/<名称>` 精确指定。技能与项目约定的加载、会话状态及 MCP 生命周期由 `agent/` 核心管理，TUI 只展示状态并调用公共入口；技能不会扩大阶段或执行权限。MCP 本轮只提供 Tools，详见 [MCP 模块](docs/modules/mcp.md)。

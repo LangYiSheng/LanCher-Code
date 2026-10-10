@@ -22,6 +22,8 @@ class SlashCompletionContext:
     active_session_id: str | None = None
     process_choices: tuple[tuple[str, str], ...] = ()
     model_choices: tuple[tuple[str, str], ...] = ()
+    skill_choices: tuple[tuple[str, str], ...] = ()
+    mcp_choices: tuple[tuple[str, str], ...] = ()
     active_model_ref: str | None = None
     default_model_ref: str | None = None
     permission_policy: str = "default"
@@ -75,6 +77,20 @@ TASK_ACTIONS = {
     "read": "读取当前进程输出",
     "stop": "停止一个进程及其托管子进程",
     "background": "把本轮进程交给会话后台继续运行",
+}
+SKILL_ACTIONS = {
+    "list": "查看可用技能与加载状态",
+    "show": "查看技能说明与来源",
+    "reload": "重新扫描技能目录",
+    "enable": "启用一个技能",
+    "disable": "停用一个技能",
+    "unload": "卸载当前任务加载的技能",
+}
+MCP_ACTIONS = {
+    "list": "查看服务器连接与工具数量",
+    "refresh": "刷新服务器工具目录",
+    "reconnect": "重新连接一个服务器",
+    "reload": "重新加载 MCP 配置",
 }
 POLICIES = {
     "default": "标准 · 修改和命令按规则询问",
@@ -176,7 +192,7 @@ class SlashCommandRegistry:
         elif name == "settings":
             if not completed:
                 for value, (label, _) in SETTINGS.items():
-                    add(value, label, value != "open", "保存后立即生效；MCP 连接调整需重启。")
+                    add(value, label, value != "open", "保存后立即生效；MCP 配置由核心重新加载。")
             elif len(completed) == 1 and completed[0] in SETTINGS:
                 if completed[0] == "default-model":
                     for value, label in context.model_choices:
@@ -184,6 +200,17 @@ class SlashCommandRegistry:
                 else:
                     for value, label in SETTINGS[completed[0]][1].items():
                         add(value, label, detail="保存界面偏好，不修改模型、权限或 MCP 文件。")
+        elif name in {"skills", "mcp"}:
+            actions = SKILL_ACTIONS if name == "skills" else MCP_ACTIONS
+            targeted = {"show", "enable", "disable", "unload"} if name == "skills" else {"refresh", "reconnect"}
+            if not completed:
+                for value, label in actions.items():
+                    add(value, label, value in targeted, "状态来自智能体核心；不会发送给模型。")
+            elif len(completed) == 1 and completed[0] in targeted:
+                choices = context.skill_choices if name == "skills" else context.mcp_choices
+                for value, label in choices:
+                    add(value, label, detail="作用范围：当前项目与当前任务" if name == "skills" else "作用范围：当前 MCP 连接",
+                        optional=name == "mcp" and completed[0] == "refresh")
         return [SlashCompletionCandidate(
             f"argument:{name}:{start}:{value}", (" " if exact_parent else "") + value,
             value, label, start, len(text), space, detail, optional and (not prefix or prefix == value),
@@ -257,6 +284,14 @@ class SlashCommandRegistry:
                 return "Enter 打开任务列表 · Tab 选择操作"
             if args[0] in TASK_ACTIONS and args[0] != "list" and len(args) == 1:
                 return "输入完整进程 UUID · Tab 从当前会话任务中选择"
+        if name in {"skills", "mcp"}:
+            if not args:
+                return "Enter 打开列表 · Tab 选择操作"
+            targeted = {"show", "enable", "disable", "unload"} if name == "skills" else {"refresh", "reconnect"}
+            if len(args) == 1 and args[0] in targeted:
+                if name == "mcp" and args[0] == "refresh":
+                    return "Enter 刷新全部 · Tab 选择一个服务器"
+                return "选择技能名称或 ID" if name == "skills" else "选择一个服务器名称"
         if name == "model" and not args:
             return "选择本次模型 · 可输入名称或供应商 ID 检索"
         if name == "permissions" and not args:
@@ -306,6 +341,14 @@ class SlashCommandRegistry:
         if name == "tasks" and args:
             if args[0] not in TASK_ACTIONS or len(args) != (1 if args[0] == "list" else 2):
                 raise ValueError(f"用法：{command.usage}")
+        if name == "skills" and args:
+            counts = {"list": 1, "reload": 1, "show": 2, "enable": 2, "disable": 2, "unload": 2}
+            if args[0] not in counts or len(args) != counts[args[0]]:
+                raise ValueError(f"用法：{command.usage}")
+        if name == "mcp" and args:
+            counts = {"list": {1}, "reload": {1}, "refresh": {1, 2}, "reconnect": {2}}
+            if args[0] not in counts or len(args) not in counts[args[0]]:
+                raise ValueError(f"用法：{command.usage}")
 
 
 def create_default_slash_command_registry() -> SlashCommandRegistry:
@@ -316,6 +359,8 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
         ("do", "开始执行 · 切换到执行模式", "保留当前审批策略", "/do [任务]", False),
         ("session", "切换对话 · 新建、恢复和管理会话", "首条消息自动保存；作用范围：当前项目", "/session <new|list|stop|resume|rename|archive|remove> [UUID] [标题]", True),
         ("tasks", "管理进程 · 输出、输入、后台和停止", "作用范围：当前会话；停止本轮会保留会话后台进程", "/tasks [list|show|read|stop|background] [进程UUID]", True),
+        ("skills", "管理技能 · 查看、启停与重新加载", "任务中使用 $技能名指定；加载由核心管理", "/skills [list|show|reload|enable|disable|unload] [技能名或ID]", True),
+        ("mcp", "管理 MCP · 查看、刷新与重新连接", "连接状态与工具目录由核心管理", "/mcp [list|refresh|reconnect|reload] [服务器名]", True),
         ("model", "选择模型 · 更改本次对话模型", "本次选择与新对话默认相互独立", "/model <供应商ID/模型ID>", True),
         ("permissions", "调整权限 · 更改本次审批策略", "只修改权限，不改变工作阶段", "/permissions <default|acceptEdits|bypass>", True),
         ("compact", "压缩上下文 · 整理当前对话记录", "作用范围：当前对话上下文", "/compact", False),

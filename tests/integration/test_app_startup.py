@@ -19,8 +19,6 @@ class _FakeChatTUI:
     session_controller: object
     ui_config: object
     settings_service: object
-    mcp_manager: object
-    tool_registry: object
     stopped_process_count: int = 0
 
     async def run(self) -> int:
@@ -54,6 +52,13 @@ class _FakeTurnRunner:
     def configure_models(self, config, *, provider_factory) -> None:
         self.model_config = config
         self.provider_factory = provider_factory
+
+    def configure_capabilities(self, *, mcp_manager, registry) -> None:
+        self.mcp_manager = mcp_manager
+        self.registry = registry
+
+    def start_capabilities(self) -> None:
+        self.capabilities_started = True
 
     async def shutdown(self) -> None:
         self.closed = True
@@ -197,6 +202,9 @@ async def test_exit_summary_runs_once_after_all_cleanup_and_shares_usage_tracker
         stopped_process_count = 2
 
         async def run(self):
+            assert self.turn_runner.capabilities_started
+            assert isinstance(self.turn_runner.mcp_manager, MCP)
+            assert not hasattr(self, 'mcp_manager') and not hasattr(self, 'tool_registry')
             # 模拟模型切换使用配置绑定的工厂，而非绕过本次启动的账本。
             self.turn_runner.provider_factory(self.provider_config)
             tracker = observers[-1]

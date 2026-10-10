@@ -49,7 +49,7 @@ def build_model_app(tmp_path):
 
     runner = TurnRunner(object(), session, registry, executor)
     runner.configure_models(config, provider_factory=factory)
-    app = LanCherTextualApp(runner, resolve_model(config.providers, config.default_model), session, UIConfig(), tool_registry=registry)
+    app = LanCherTextualApp(runner, resolve_model(config.providers, config.default_model), session, UIConfig())
     return app, runner, session, config, constructed
 
 

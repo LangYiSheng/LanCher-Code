@@ -264,6 +264,8 @@ class ToolExecutor:
         argument_error = self._argument_error(call)
         if argument_error is not None:
             return argument_error
+        if self._tool_replaced(call, tool):
+            return self._changed_tool_result(call)
         if on_call_started is not None:
             await on_call_started(call)
         self._raise_if_cancelled(context)
@@ -277,7 +279,14 @@ class ToolExecutor:
         try:
             # 进程工具分别管理本次等待期限和进程运行期限；普通工具超时不能
             # 把这些期限重新合并，也不能在停止流程完成之前打断收尾。
-            timeout = None if call.tool_name in {"run_command", "process_wait", "process_stop", "process_background"} else context.timeout_seconds
+            # MCP 自己区分远端调用期限；执行器留出收尾时间，不用本地默认
+            # 十秒截断服务器明确配置的长查询。
+            server_timeout = getattr(tool, 'timeout_seconds', None)
+            timeout = (None if call.tool_name in {"run_command", "process_wait", "process_stop", "process_background"}
+                       else server_timeout + 1.0 if isinstance(server_timeout, (int, float)) and server_timeout > 0
+                       else context.timeout_seconds)
+            if self._tool_replaced(call, tool):
+                return self._changed_tool_result(call)
             result = await self._await_cancelable(tool.execute(call.arguments, context), context, timeout=timeout)
             result.call_id, result.tool_name = call.call_id, call.tool_name
             return result
@@ -389,6 +398,17 @@ class ToolExecutor:
     def _error(call: ToolCall, code: str, message: str, metadata: dict[str, object] | None = None) -> ToolExecutionResult:
         return ToolExecutionResult(call.call_id, call.tool_name, content=message, is_error=True,
                                    summary=message, error_code=code, error_message=message, metadata=metadata or {})
+
+    def _tool_replaced(self, call: ToolCall, tool) -> bool:
+        try:
+            return self._registry.get(call.tool_name) is not tool
+        except ToolNotFoundError:
+            return True
+
+    @staticmethod
+    def _changed_tool_result(call: ToolCall) -> ToolExecutionResult:
+        return ToolExecutor._error(call, 'tool_changed', '等待期间工具目录已更新，当前调用未执行。请重新发现工具。',
+                                   {'started': False, 'outcome': 'not_started'})
 
     @staticmethod
     def _superseded(call: ToolCall) -> ToolExecutionResult:

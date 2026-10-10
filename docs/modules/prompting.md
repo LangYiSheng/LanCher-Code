@@ -8,6 +8,7 @@
 - 环境上下文（系统、cwd、日期）
 - 工作阶段与独立权限策略，以及计划状态的动态提醒
 - MCP 延迟工具索引
+- 核心提供的项目 AGENTS.md、Skills 目录、激活正文或待重载引用
 - 用户消息的组装
 
 实现位置：`lancher_code/context/prompts.py`。
@@ -19,7 +20,7 @@
 | `build_system_prompt()` | 固定的角色/行为/工具/质量/安全/任务/输出风格提示（多段拼接） |
 | `build_environment_prompt(context)` | 当前系统标签、工作目录、日期 |
 | `build_prompt_context(...)` | 组装 `PromptContext`（含 `os_label`、`plan_exists` 等） |
-| `build_chat_request_payload(...)` | 最终拼装：`system = [系统提示, 环境提示, 动态提醒?, 延迟工具索引?]` + `messages` + `tools` |
+| `build_chat_request_payload(...)` | 最终拼装：`system = [系统提示, 环境提示, 动态提醒?, agent_context..., 延迟工具索引?]` + `messages` + `tools` |
 | `build_user_message(text, dynamic_context)` | 用户消息 = `<system-reminder>` 块 + 文本块 |
 | `build_dynamic_context_prompt(context)` | 根据工作阶段生成讨论、计划与退出计划提醒 |
 | `build_deferred_tools_prompt(groups)` | `<deferred_tools>` 索引（Server 名 + 工具名，HTML 转义） |
@@ -62,6 +63,8 @@ PromptPayload(
         build_system_prompt(),          # 固定
         build_environment_prompt(...),  # 环境
         "<system-reminder>...</system-reminder>",  # 可选：动态提醒
+        "<project_instructions>...</project_instructions>",  # 可选：项目约定
+        "<active_skill>...</active_skill>",       # 可选：核心投影的技能正文
         "<deferred_tools>...</deferred_tools>",     # 可选：MCP 索引
     ],
     messages=[ConversationMessage(...)],
@@ -72,6 +75,7 @@ PromptPayload(
 ## 与其他模块的关系
 
 - ← `sessions/controller.py`：组装请求、注入动态提醒
+- ← `agent/capabilities.py`：提供项目约定与技能上下文块；候选压缩请求使用候选技能状态
 - ← `context/summary.py`：压缩摘要有独立系统提示（`SUMMARY_SYSTEM_PROMPT`，不在本模块）
 - → `context/prompt_models.py`：产出 `PromptContext` / `PromptPayload`
 
@@ -79,6 +83,7 @@ PromptPayload(
 
 - `build_system_prompt()` 是**固定文本**，不含环境信息；环境信息在 `build_environment_prompt()` 中，二者分离（有对应测试保证）。
 - 延迟工具索引中的 Server 标题/描述会经过 HTML 转义（`escape`），防止注入。
+- MCP 索引有字符预算，未列出的已注册工具仍可搜索；技能目录有独立预算。技能正文由核心系统投影，不依靠工具结果保存，也不由 TUI 注入。
 - 平台标签：Windows → "Windows PowerShell"，Linux → "Linux shell"，macOS → "macOS shell"（`_runtime_label()`）。
 
 

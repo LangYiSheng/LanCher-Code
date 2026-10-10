@@ -69,18 +69,17 @@ class FakeProvider:
                 await asyncio.sleep(delay)
 
 
-def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Path) -> tuple[LanCherTextualApp, SessionController]:
+def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Path, *, skills_service=None) -> tuple[LanCherTextualApp, SessionController]:
     session = SessionController(provider_config, cwd=tmp_path)
     registry = ToolRegistry()
     registry.register(EchoTool())
     executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
-    runner = TurnRunner(provider, session, registry, executor)
+    runner = TurnRunner(provider, session, registry, executor, skills_service=skills_service)
     app = LanCherTextualApp(
         turn_runner=runner,
         provider_config=provider_config,
         session_controller=session,
         ui_config=ui_config,
-        tool_registry=registry,
     )
     return app, session
 
@@ -262,7 +261,7 @@ async def test_session_resume_rebuilds_chat_widgets(
 
 
 @pytest.mark.asyncio
-async def test_mcp_initialization_gates_input_and_restores_composer(
+async def test_core_mcp_initialization_keeps_input_usable(
     openai_provider_config, ui_config, tmp_path: Path,
 ) -> None:
     class FakeManager:
@@ -282,19 +281,27 @@ async def test_mcp_initialization_gates_input_and_restores_composer(
             for callback in self.callbacks:
                 callback(MCPInitializationProgress(1, 1, 1, 0, 2, None, "complete"))
 
-    app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
+        async def close(self) -> None:
+            pass
+
+    response = [StreamEvent(kind="text_delta", text="收到"), StreamEvent(kind="message_end", response_complete=True)]
+    provider = FakeProvider(responses=[response])
+    app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
     manager = FakeManager()
-    app._mcp_manager = manager  # type: ignore[assignment]
-    app._tool_registry = object()  # type: ignore[assignment]
-    app.mcp_initialization_complete = False
+    app._turn_runner.configure_capabilities(mcp_manager=manager)
 
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
         await pilot.pause(0.05)
-        assert composer.disabled
-        assert composer.placeholder == "正在初始化 MCP，请稍候…"
-        await app.handle_input_submitted(ComposerSubmitted(composer, "不应发送"))
-        assert session._state.messages == []
+        assert not composer.disabled and composer.placeholder == "发送一条消息"
+        assert "正在初始化" in app.query_one(BannerWidget).mcp_status
+        assert not hasattr(app, "_mcp_manager") and not hasattr(app, "_tool_registry")
+        await _submit_message(app, pilot, "先处理本地任务")
+        async with asyncio.timeout(10):
+            while app._is_streaming:
+                await pilot.pause(0.01)
+        assert provider.requests and session.state.messages[0].content == "先处理本地任务"
+        assert not manager.release.is_set()
         manager.release.set()
         await pilot.pause(0.05)
         assert app.mcp_initialization_complete
@@ -321,7 +328,7 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
         menu = app.query_one(SlashCompletionMenu)
         assert menu.display
         assert _visible_slash_commands(app) == [
-            "discuss", "plan", "do", "session", "tasks", "model", "permissions",
+            "discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "permissions",
             "compact", "settings", "status", "exit",
         ]
 
