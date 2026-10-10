@@ -38,6 +38,7 @@ lancher-code/
 │   ├── settings_service.py        # SettingsService：设置页数据读写与校验
 │   ├── slash_commands.py          # 斜杠命令注册、解析、补全
 │   ├── tool_call_parser.py        # ToolCallAssembler：流式工具调用分片拼接
+│   ├── transcript_projection.py   # 旧协议和跨模型工具历史的请求副本投影
 │   ├── tui.py                     # TUI 视图对外 re-export
 │   ├── config_system/             # 配置系统
 │   │   ├── paths.py               # 所有配置文件路径常量与函数

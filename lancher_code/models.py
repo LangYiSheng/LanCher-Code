@@ -59,7 +59,7 @@ TurnEventKind = Literal[
     "turn_completed",
     "compaction_updated",
 ]
-ContentBlockKind = Literal["text", "tool_use", "tool_result"]
+ContentBlockKind = Literal["text", "tool_use", "tool_result", "thinking", "redacted_thinking"]
 TraceEntryKind = Literal["thinking", "tool_call", "tool_result", "text", "notice", "compaction"]
 CompactionTrigger = Literal["manual", "automatic", "emergency"]
 CompactionStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"]
@@ -616,10 +616,27 @@ class ContentBlock:
     name: str = ""
     input: dict[str, object] = field(default_factory=dict)
     is_error: bool = False
+    # 协议思考属于单次助手响应，签名与加密数据不能由展示轨迹重建。
+    signature: str | None = None
+    data: str | None = None
+    thinking_protocol: ProviderProtocol | None = None
+    thinking_field: Literal["reasoning_content", "reasoning"] | None = None
 
     @classmethod
     def text_block(cls, text: str) -> ContentBlock:
         return cls(kind="text", text=text)
+
+    @classmethod
+    def thinking_block(
+        cls, text: str, *, signature: str | None = None, protocol: ProviderProtocol = "claude",
+        thinking_field: Literal["reasoning_content", "reasoning"] | None = None,
+    ) -> ContentBlock:
+        return cls(kind="thinking", text=text, signature=signature, thinking_protocol=protocol,
+                   thinking_field=thinking_field)
+
+    @classmethod
+    def redacted_thinking_block(cls, data: str) -> ContentBlock:
+        return cls(kind="redacted_thinking", data=data, thinking_protocol="claude")
 
     @classmethod
     def tool_use_block(cls, *, call_id: str, name: str, input: dict[str, object]) -> ContentBlock:
@@ -634,6 +651,8 @@ class ContentBlock:
 class ConversationMessage:
     role: ConversationRole
     blocks: list[ContentBlock]
+    response_protocol: ProviderProtocol | None = None
+    response_model: str | None = None
 
     @classmethod
     def text_message(cls, role: ConversationRole, text: str) -> ConversationMessage:
@@ -766,6 +785,10 @@ class StreamEvent:
     usage: MessageUsage = field(default_factory=MessageUsage)
     tool_call_chunk: ToolCallChunk | None = None
     stop_reason: str | None = None
+    # 只在提供方完整结束时携带；按本次响应的协议顺序保留，独立于 UI trace。
+    assistant_blocks: list[ContentBlock] | None = None
+    # None 留给自定义提供方；明确 False 的响应不得触发工具执行。
+    response_complete: bool | None = None
 
 
 @dataclass(slots=True)

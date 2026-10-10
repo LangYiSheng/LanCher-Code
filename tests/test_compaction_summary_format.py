@@ -203,7 +203,7 @@ async def test_format_retry_length_rejection_does_not_drop_more_history_or_retry
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retry", [False, True])
-@pytest.mark.parametrize("failure", ["length", "max_tokens", "max_output_tokens", "usage_cap", "missing_end", "tool_call"])
+@pytest.mark.parametrize("failure", ["length", "max_tokens", "max_output_tokens", "usage_cap", "missing_end", "incomplete_end", "tool_call"])
 async def test_completion_errors_never_trigger_another_format_retry(retry: bool, failure: str) -> None:
     events = _response("<summary>" + _body() + "</summary>")
     if failure in {"length", "max_tokens", "max_output_tokens"}:
@@ -212,6 +212,8 @@ async def test_completion_errors_never_trigger_another_format_retry(retry: bool,
         events[-1].usage = MessageUsage(output_tokens=context_budget(8192, purpose="compaction").output_tokens)
     elif failure == "missing_end":
         events.pop()
+    elif failure == "incomplete_end":
+        events[-1].response_complete = False
     else:
         events.insert(0, StreamEvent(kind="tool_call_delta"))
     provider = Provider(*([_response("普通回答")] if retry else []), events)

@@ -555,7 +555,7 @@ async def _collect_summary(provider: ChatProvider, request: ChatRequest) -> str:
             elif event.kind == "tool_call_delta":
                 saw_tool_call = True
             elif event.kind == "message_end":
-                completed = True
+                completed = event.response_complete is not False
                 usage = event.usage
                 stop_reason = getattr(event, "stop_reason", None)
     if request.cancellation_token is not None and request.cancellation_token.is_cancelled:

@@ -17,8 +17,8 @@
 | `create_user_message(text)` | 首条消息建立会话，再创建用户消息和动态提醒 |
 | `create_assistant_message()` / `append_message_content(...)` | 助手消息与流式文本 |
 | `append_trace_*()` | 思考、文本、通知、工具调用及结果记录 |
-| `append_assistant_tool_calls()` / `append_tool_results()` | 写入模型 transcript |
-| `complete_message()` / `fail_message()` / `cancel_message()` | 消息终止与持久化 |
+| `append_assistant_response()` / `append_tool_results()` | 保存单次完整协议响应及工具返回；思考、签名、正文与调用共同落盘 |
+| `complete_message(..., record_transcript=False)` / `fail_message()` / `cancel_message()` | 消息终止与持久化；已保存完整响应时不再重复正文 |
 | `build_request(...)` / `estimate_request_tokens(...)` | 组装请求与上下文估算 |
 | `context_estimate(...)` | 返回估算数字、校准来源和内容分类，不代表实际消耗 |
 | `usage_summary(message_id=None)` / `total_usage()` | 从持久化请求账本汇总单条消息或整段会话的已上报用量 |
@@ -46,6 +46,8 @@
 `events.jsonl` 使用新事件版本 `1`，是持久化事实来源；`meta.json` 和 `checkpoint.json` 是可重建摘要及状态快照。旧 `.lancher/session/*.jsonl` v1–v4 文件不读取、不迁移。具体布局和生命周期见 [session-lifecycle.md](../workflows/session-lifecycle.md)。
 
 请求账本通过单条 `usage.request_updated` 增量写入，普通 `state.changed` 只保存其余状态，投影时保留已经重建的账本。这样阶段或锚点变化不会反复复制累计请求。`persist()` 也检查账本差异，负责把恢复中的 `running → incomplete` 修复写回事实日志；常规回调已经同步保存快照，后续刷新不会重复写。已保存记录不能被删除，取消和异常只更新状态并保留已上报数字。
+
+助手协议响应带来源协议及模型，保存前校验思考块。旧缺思考元数据和跨来源工具交换仅在请求副本中转换为注明原因的文字历史，存储原文不变；普通请求与摘要请求采用同一投影。详见 [思考协议与工具恢复](../workflows/thinking-and-tool-recovery.md)。
 
 Checkpoint 仍保存完整账本，恢复时读取快照并重放尾部；缺少快照时重放全部事件，得到同一份会话状态。完整快照会随会话增长，但它只在明确的快照时机写入，不随每次流式更新复制全部历史。
 

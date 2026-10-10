@@ -62,13 +62,13 @@ run_user_turn(text)
           · text_delta → 追加内容 + 事件 assistant_text_delta
           · thinking_delta → 思考轨迹 + progress
           · tool_call_delta → ToolCallAssembler.consume
-          · message_end → 记录 usage
+          · message_end → 记录 usage 与单次完整助手响应；提前 EOF 不执行工具
           · ProviderPromptTooLongError → 紧急压缩后重试一次
-       d. assembler.finalize() 得到 ToolCall 列表
-          · 解析失败 → 合成 tool_call_parser 错误调用，继续循环
+       d. assembler.finalize_batch() 得到 ToolCall 列表
+          · 参数错误或输出上限 → 整批不执行，以真实编号逐个返回简短错误
        e. 累计用量、更新会话
        f. 有工具调用：
-          · 写 transcript、发 tool_call_started 事件
+          · 整段助手响应（含原始思考/签名/正文/工具）写 transcript、发 tool_call_started 事件
           · ToolExecutor.execute_calls(...) 执行
           · on_invocation_state：已提交状态 → 对话trace与progress；资源等待带真实阻塞快照
           · on_call_started：进入执行阶段；开始与终态清除旧等待说明

@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 
 import httpx
 
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
-from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
+from lancher_code.models import ChatRequest, ContentBlock, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
 from lancher_code.run_usage import RequestUsageStatus, UsageField, UsageObserver
 
@@ -44,6 +45,8 @@ class ClaudeProvider(BaseChatProvider):
         stop_reason: str | None = None
         usage_request_id: str | None = None
         usage_status: RequestUsageStatus = "failed"
+        assistant_blocks: dict[int, ContentBlock] = {}
+        tool_arguments: dict[int, str] = {}
         try:
             async with self._client_factory() as client:
                 usage_request_id = self._start_usage_request(request)
@@ -78,17 +81,48 @@ class ClaudeProvider(BaseChatProvider):
 
                         if event_type == "content_block_start":
                             block = event.get("content_block", {})
-                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                            index = int(event.get("index", 0))
+                            if not isinstance(block, dict):
+                                continue
+                            block_type = block.get("type")
+                            if block_type == "thinking":
+                                thinking = block.get("thinking")
+                                thinking = thinking if isinstance(thinking, str) else ""
+                                signature = block.get("signature")
+                                assistant_blocks[index] = ContentBlock.thinking_block(
+                                    thinking, signature=signature if isinstance(signature, str) else None,
+                                )
+                                if thinking:
+                                    yield StreamEvent(kind="thinking_delta", text=thinking)
+                            elif block_type == "redacted_thinking":
+                                data = block.get("data")
+                                if not isinstance(data, str):
+                                    raise ProviderResponseError("加密思考内容块缺少 data 字符串。")
+                                assistant_blocks[index] = ContentBlock.redacted_thinking_block(data)
+                            elif block_type == "text":
+                                text = block.get("text")
+                                text = text if isinstance(text, str) else ""
+                                assistant_blocks[index] = ContentBlock.text_block(text)
+                                if text:
+                                    yield StreamEvent(kind="text_delta", text=text)
+                            elif block_type == "tool_use":
                                 input_payload = block.get("input")
                                 arguments_delta = ""
-                                if isinstance(input_payload, dict) and input_payload:
+                                if input_payload is not None and input_payload != {}:
                                     arguments_delta = json.dumps(input_payload, ensure_ascii=False)
+                                call_id = block.get("id") if isinstance(block.get("id"), str) else None
+                                name = block.get("name") if isinstance(block.get("name"), str) else ""
+                                assistant_blocks[index] = ContentBlock.tool_use_block(
+                                    call_id=call_id or "", name=name,
+                                    input=input_payload if isinstance(input_payload, dict) else {},
+                                )
+                                tool_arguments[index] = arguments_delta
                                 yield StreamEvent(
                                     kind="tool_call_delta",
                                     tool_call_chunk=ToolCallChunk(
-                                        call_index=int(event.get("index", 0)),
-                                        provider_call_id=block.get("id") if isinstance(block.get("id"), str) else None,
-                                        name_delta=block.get("name") if isinstance(block.get("name"), str) else "",
+                                        call_index=index,
+                                        provider_call_id=call_id,
+                                        name_delta=name,
                                         arguments_delta=arguments_delta,
                                     ),
                                 )
@@ -96,22 +130,37 @@ class ClaudeProvider(BaseChatProvider):
 
                         if event_type == "content_block_delta":
                             delta = event.get("delta", {})
+                            if not isinstance(delta, dict):
+                                continue
                             delta_type = delta.get("type")
+                            index = int(event.get("index", 0))
                             if delta_type == "text_delta":
                                 text = delta.get("text")
                                 if isinstance(text, str) and text:
+                                    block = assistant_blocks.setdefault(index, ContentBlock.text_block(""))
+                                    block.text += text
                                     yield StreamEvent(kind="text_delta", text=text)
                             elif delta_type == "thinking_delta":
                                 thinking = delta.get("thinking")
                                 if isinstance(thinking, str) and thinking:
+                                    block = assistant_blocks.setdefault(index, ContentBlock.thinking_block(""))
+                                    block.text += thinking
                                     yield StreamEvent(kind="thinking_delta", text=thinking)
+                            elif delta_type == "signature_delta":
+                                signature = delta.get("signature")
+                                if isinstance(signature, str):
+                                    block = assistant_blocks.get(index)
+                                    if block is None or block.kind != "thinking":
+                                        raise ProviderResponseError("思考签名增量缺少对应的思考内容块。")
+                                    block.signature = (block.signature or "") + signature
                             elif delta_type == "input_json_delta":
                                 partial_json = delta.get("partial_json")
                                 if isinstance(partial_json, str) and partial_json:
+                                    tool_arguments[index] = tool_arguments.get(index, "") + partial_json
                                     yield StreamEvent(
                                         kind="tool_call_delta",
                                         tool_call_chunk=ToolCallChunk(
-                                            call_index=int(event.get("index", 0)),
+                                            call_index=index,
                                             arguments_delta=partial_json,
                                         ),
                                     )
@@ -122,7 +171,9 @@ class ClaudeProvider(BaseChatProvider):
                             usage_status = "completed"
                             usage.is_final = saw_output_delta
                             self._report_usage(usage_request_id, usage, usage.known_fields)
-                            yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason)
+                            yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason,
+                                              assistant_blocks=self._complete_assistant_blocks(assistant_blocks, tool_arguments),
+                                              response_complete=True)
                             return
 
                         if event_type == "error":
@@ -142,9 +193,10 @@ class ClaudeProvider(BaseChatProvider):
 
                     if not saw_end:
                         usage_status = "incomplete"
-                        yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason)
+                        yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason,
+                                          response_complete=False)
         except (asyncio.CancelledError, GeneratorExit):
-            if usage_status != "completed":
+            if usage_status not in {"completed", "incomplete"}:
                 usage_status = "cancelled"
             raise
         except ProviderResponseError:
@@ -164,6 +216,25 @@ class ClaudeProvider(BaseChatProvider):
             raise
         finally:
             self._finish_usage_request(usage_request_id, usage_status)
+
+    @staticmethod
+    def _complete_assistant_blocks(
+        blocks: dict[int, ContentBlock], tool_arguments: dict[int, str],
+    ) -> list[ContentBlock]:
+        completed = deepcopy(blocks)
+        for index, block in completed.items():
+            if block.kind != "tool_use":
+                continue
+            if not block.call_id:
+                raise ProviderResponseError("提供方工具调用缺少真实调用标识，不能回传或执行。")
+            raw = tool_arguments.get(index, "")
+            try:
+                value = json.loads(raw.strip() or "{}")
+            except json.JSONDecodeError:
+                value = None
+            # 保留真实调用标识和原文，让下一轮收到解析失败反馈而不是伪造调用。
+            block.input = value if isinstance(value, dict) else {"INVALID_JSON": raw}
+        return [completed[index] for index in sorted(completed)]
 
     def _build_payload(self, request: ChatRequest) -> dict[str, object]:
         max_tokens = request.max_output_tokens if request.max_output_tokens is not None else DEFAULT_MAX_TOKENS
@@ -223,6 +294,14 @@ class ClaudeProvider(BaseChatProvider):
                         "input": block.input,
                     }
                 )
+            elif message.role == "assistant" and block.thinking_protocol == "claude":
+                if block.kind == "thinking":
+                    thinking: dict[str, object] = {"type": "thinking", "thinking": block.text}
+                    if block.signature is not None:
+                        thinking["signature"] = block.signature
+                    content.append(thinking)
+                elif block.kind == "redacted_thinking":
+                    content.append({"type": "redacted_thinking", "data": block.data})
         return {
             "role": message.role,
             "content": content,

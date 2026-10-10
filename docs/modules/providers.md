@@ -83,6 +83,10 @@
 | 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / mode / cancellation_token / max_output_tokens / 请求归属） |
 | 输出 | `StreamEvent` 异步迭代器 |
 
+正常结束事件的 `assistant_blocks` 是单次完整助手响应，包含原始思考、签名或加密数据、正文和真实工具调用。`response_complete` 区分完整结束与提前 EOF。Claude 兼容协议按内容块顺序回传；OpenAI 兼容协议保留 `reasoning_content`／`reasoning` 的字段来源，避免把展示思考误当完整协议。
+
+详见 [思考协议、工具截断与会话恢复](../workflows/thinking-and-tool-recovery.md)。
+
 ## 与其他模块的关系
 
 - ← `factory.py` ← `app.py`：启动时解析默认模型后创建

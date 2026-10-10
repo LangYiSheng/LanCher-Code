@@ -84,6 +84,8 @@ async def test_steering_preserves_user_order_and_segment_usage(openai_provider_c
     assert sum(e.kind == "turn_completed" for e in events) == 1
     assert sum(e.kind == "assistant_message_completed" for e in events) == 2
     assert not runner.pending_inputs
+    assert [block.text for message in session.transcript if message.role == "assistant"
+            for block in message.blocks if block.kind == "text"] == ["第一段", "按补充继续"]
 
 
 class GatedRead:

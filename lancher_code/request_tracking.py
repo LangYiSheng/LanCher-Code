@@ -48,7 +48,7 @@ async def tracked_stream(
         async with aclosing(provider.stream_chat(request)) as stream:
             async for event in stream:
                 if event.kind == "message_end":
-                    terminal_seen = True
+                    terminal_seen = event.response_complete is not False
                     merged = merge_usage(record.usage, event.usage)
                     if merged != record.usage:
                         receive(replace(record, usage=merged).to_dict())

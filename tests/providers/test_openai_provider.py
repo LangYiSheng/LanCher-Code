@@ -9,10 +9,137 @@ import pytest
 from lancher_code.errors import ProviderAuthError, ProviderPromptTooLongError, ProviderResponseError
 from lancher_code.models import ChatRequest, ContentBlock, ConversationMessage, ToolDefinition
 from lancher_code.providers.openai import OpenAIProvider
+from lancher_code.run_usage import RunUsageTracker
 
 
 def _build_sse_payload(chunks: list[str]) -> bytes:
     return "".join(chunks).encode("utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+@pytest.mark.parametrize("arguments, expected_input", [
+    ('{"path":"demo.txt"}', {"path": "demo.txt"}),
+    ('{"path":"broken', {"INVALID_JSON": '{"path":"broken'}),
+])
+async def test_openai_reasoning_and_tool_exchange_round_trip_uses_original_field(
+    openai_provider_config, reasoning_field: str, arguments: str, expected_input: dict[str, object],
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 2:
+            assistant = payload["messages"][-2]
+            assert assistant[reasoning_field] == "先分析再读取"
+            assert ({"reasoning", "reasoning_content"} - {reasoning_field}).isdisjoint(assistant)
+            assert assistant["content"] == "读取文件"
+            tool = assistant["tool_calls"][0]
+            assert tool["id"] == "original-call"
+            assert tool["function"]["name"] == "read_file"
+            assert json.loads(tool["function"]["arguments"]) == expected_input
+            return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  content=_build_sse_payload(["data: [DONE]\n\n"]))
+        deltas = [
+            {reasoning_field: "先分析"},
+            {reasoning_field: "再读取"},
+            {"content": "读取文件"},
+            {"tool_calls": [{"index": 0, "id": "original-call",
+                             "function": {"name": "read_file", "arguments": arguments[:7]}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": arguments[7:]}}]},
+        ]
+        chunks = [f"data: {json.dumps({'choices': [{'delta': delta}]}, ensure_ascii=False)}\n\n"
+                  for delta in deltas]
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=_build_sse_payload([*chunks, "data: [DONE]\n\n"]))
+
+    transport = httpx.MockTransport(handler)
+    provider = OpenAIProvider(openai_provider_config,
+                              client_factory=lambda: httpx.AsyncClient(transport=transport))
+    request = _request()
+    events = [event async for event in provider.stream_chat(request)]
+    blocks = events[-1].assistant_blocks
+    assert events[-1].response_complete is True
+    assert blocks is not None
+    assert [block.kind for block in blocks] == ["thinking", "text", "tool_use"]
+    assert blocks[0].thinking_protocol == "openai"
+    assert blocks[0].thinking_field == reasoning_field
+    request.messages.extend([
+        ConversationMessage(role="assistant", blocks=blocks),
+        ConversationMessage(role="tool", blocks=[ContentBlock.tool_result_block(
+            call_id="original-call", text="反馈", is_error="INVALID_JSON" in expected_input,
+        )]),
+    ])
+    second = [event async for event in provider.stream_chat(request)]
+    assert second[-1].assistant_blocks == []
+    assert blocks[0].text == "先分析再读取"
+
+
+def test_openai_does_not_manufacture_or_accept_foreign_reasoning_fields(openai_provider_config) -> None:
+    provider = OpenAIProvider(openai_provider_config)
+    message = ConversationMessage(role="assistant", blocks=[
+        ContentBlock.thinking_block("Claude 思考", signature="opaque-signature"),
+        ContentBlock.redacted_thinking_block("opaque-data"),
+        ContentBlock.text_block("正文"),
+    ])
+    assert provider._serialize_message(message) == {"role": "assistant", "content": "正文"}
+    assert provider._serialize_message(ConversationMessage.text_message("assistant", "普通回答")) == {
+        "role": "assistant", "content": "普通回答",
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_incomplete_stream_does_not_publish_complete_assistant_blocks(openai_provider_config) -> None:
+    transport = httpx.MockTransport(lambda _request: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        content=b'data: {"choices":[{"delta":{"reasoning_content":"not finished"}}]}\n\n',
+    ))
+    tracker = RunUsageTracker()
+    provider = OpenAIProvider(openai_provider_config,
+                              client_factory=lambda: httpx.AsyncClient(transport=transport), usage_observer=tracker)
+    stream = provider.stream_chat(_request())
+    events = []
+    try:
+        async for event in stream:
+            events.append(event)
+            if event.kind == "message_end":
+                break
+    finally:
+        await stream.aclose()
+    assert events[-1].assistant_blocks is None
+    assert events[-1].response_complete is False
+    assert tracker.records[0].status == "incomplete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provide_id", [False, True])
+async def test_openai_requires_actual_tool_id_but_accepts_it_in_later_delta(
+    openai_provider_config, provide_id: bool,
+) -> None:
+    deltas = [
+        {"tool_calls": [{"index": 0, "function": {"arguments": '{"path":"'}}]},
+        {"tool_calls": [{"index": 0, **({"id": "later-real-id"} if provide_id else {}),
+                         "function": {"name": "read_file", "arguments": 'demo.txt"}'}}]},
+    ]
+    chunks = [f"data: {json.dumps({'choices': [{'delta': delta}]})}\n\n" for delta in deltas]
+    transport = httpx.MockTransport(lambda _request: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        content=_build_sse_payload([*chunks, "data: [DONE]\n\n"]),
+    ))
+    tracker = RunUsageTracker()
+    provider = OpenAIProvider(openai_provider_config,
+                              client_factory=lambda: httpx.AsyncClient(transport=transport), usage_observer=tracker)
+    if not provide_id:
+        with pytest.raises(ProviderResponseError, match="真实调用标识"):
+            _ = [event async for event in provider.stream_chat(_request())]
+        assert tracker.records[0].status == "failed"
+        return
+    events = [event async for event in provider.stream_chat(_request())]
+    assert events[-1].assistant_blocks == [ContentBlock.tool_use_block(
+        call_id="later-real-id", name="read_file", input={"path": "demo.txt"},
+    )]
 
 
 def _request(*, allow_tool_calls: bool = True) -> ChatRequest:

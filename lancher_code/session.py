@@ -55,6 +55,7 @@ from lancher_code.context_budget import context_budget
 from lancher_code.context_tokens import estimate_request
 from lancher_code.request_tracking import tracked_stream
 from lancher_code.run_usage import RequestUsageRecord, RunUsageTracker, summarize_records
+from lancher_code.transcript_projection import project_historical_tool_exchanges
 
 from lancher_code.permission_engine import PermissionStorage
 from lancher_code.prompting import (
@@ -461,6 +462,22 @@ class SessionController:
         self._transcript.append(ConversationMessage(role="assistant", blocks=blocks))
 
     @persist_change()
+    def append_assistant_response(self, blocks: list[ContentBlock]) -> None:
+        """保存一次完整助手交换，包含工具调用前的思考与文字。"""
+        if not blocks:
+            return
+        # 提供方/runner 随后仍会更新流式缓冲和工具参数，持久化快照不能
+        # 与这些可变对象共用引用，也不能用界面上的累计文本重建协议。
+        response = ConversationMessage(
+            role="assistant", blocks=copy.deepcopy(blocks), response_protocol=self._provider_config.protocol,
+            response_model=self._provider_config.model,
+        )
+        # 完整快照也可能来自损坏的流；先验证再修改内存/写事件，不能
+        # 把空思考等无效协议落成下次无法恢复的会话记录。
+        SessionCodec._decode_transcript(asdict(response))
+        self._transcript.append(response)
+
+    @persist_change()
     def append_tool_results(self, results: list[ToolExecutionResult]) -> None:
         if not results:
             return
@@ -480,13 +497,15 @@ class SessionController:
             self._transcript.append(ConversationMessage(role="tool", blocks=blocks))
 
     @persist_change()
-    def complete_message(self, message_id: str, usage: MessageUsage | None = None) -> SessionMessage:
+    def complete_message(
+        self, message_id: str, usage: MessageUsage | None = None, *, record_transcript: bool = True
+    ) -> SessionMessage:
         message = self.finish_trace_segment(message_id)
         message.status = "complete"
         message.trace.collapsed = True
         if usage is not None:
             message.usage = copy.deepcopy(usage)
-        if message.content.strip():
+        if record_transcript and message.content.strip():
             self._transcript.append(ConversationMessage.text_message("assistant", message.content))
         self._active_dynamic_context = None
         return message
@@ -721,7 +740,15 @@ class SessionController:
 
             class SummaryProvider:
                 def stream_chat(self, request):
-                    return controller.stream_request(provider, request)
+                    # 摘要也可能在切换模型后发出。只投影其发送副本，
+                    # 不把历史文字降级写回 compact 保留的原始近期消息。
+                    outgoing = copy.copy(request)
+                    thinking = request.thinking
+                    outgoing.messages = project_historical_tool_exchanges(
+                        request.messages, protocol=controller._provider_config.protocol, model=request.model,
+                        thinking_enabled=bool(thinking and thinking.enabled),
+                    )
+                    return controller.stream_request(provider, outgoing)
 
             compacted = await compact_transcript(
                 provider=SummaryProvider(),
@@ -1198,13 +1225,20 @@ class SessionController:
                 and blocks[0].text.startswith("<system-reminder>\n")
             ):
                 blocks = blocks[1:]
-            messages.append(ConversationMessage(role=message.role, blocks=blocks))
+            messages.append(ConversationMessage(
+                role=message.role, blocks=blocks, response_protocol=message.response_protocol,
+                response_model=message.response_model,
+            ))
         if self._active_dynamic_context:
             for message in reversed(messages):
                 if message.role == "user":
                     message.blocks.insert(0, ContentBlock.text_block(self._active_dynamic_context))
                     break
-        return messages
+        thinking = self._request_thinking()
+        return project_historical_tool_exchanges(
+            messages, protocol=self._provider_config.protocol, model=self._provider_config.model,
+            thinking_enabled=bool(thinking and thinking.enabled),
+        )
 
     def _advance_dynamic_prompt_state_after_user_turn(self) -> None:
         if self.work_phase == "plan":

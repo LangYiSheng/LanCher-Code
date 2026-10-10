@@ -14,9 +14,9 @@ from lancher_code.execution.contracts import InvocationInfo
 from lancher_code.errors import (
     ConfigError,
     ContextCompactionError,
+    ProviderResponseError,
     LanCherError,
     ProviderPromptTooLongError,
-    ToolCallParseError,
 )
 from lancher_code.logging_system import get_logger, register_sensitive_values
 from lancher_code.model_catalog import iter_model_refs, model_display_name, resolve_model
@@ -27,6 +27,7 @@ from lancher_code.models import (
     CompactionActivity,
     CompactionTrigger,
     ContextCompactionResult,
+    ContentBlock,
     MessageUsage,
     PendingInput,
     PermissionPolicy,
@@ -67,6 +68,8 @@ class _ActiveTurn:
 class _StreamCollector:
     def __init__(self) -> None:
         self._text_parts: list[str] = []
+        self.assistant_blocks: list[ContentBlock] | None = None
+        self.stop_reason: str | None = None
 
     def append(self, delta: str) -> None:
         self._text_parts.append(delta)
@@ -74,6 +77,15 @@ class _StreamCollector:
     @property
     def text(self) -> str:
         return "".join(self._text_parts)
+
+    def response_blocks(self, tool_calls: list[ToolCall]) -> list[ContentBlock]:
+        # Provider快照保留单次响应的原顺序和签名；旧测试流仅提供正文/工具增量。
+        if self.assistant_blocks is not None:
+            return deepcopy(self.assistant_blocks)
+        blocks = [ContentBlock.text_block(self.text)] if self.text else []
+        blocks.extend(ContentBlock.tool_use_block(call_id=call.call_id, name=call.tool_name,
+                                                input=deepcopy(call.arguments)) for call in tool_calls)
+        return blocks
 
 
 class TurnRunner:
@@ -337,7 +349,7 @@ class TurnRunner:
                     and item.target_task_id == active.task_id]
         selected_ids = {item.id for item in selected}
         self._pending_changed([item for item in items if item.id not in selected_ids])
-        message = self._session.complete_message(message_id, usage)
+        message = self._session.complete_message(message_id, usage, record_transcript=False)
         await self._emit(queue, TurnEvent(kind="assistant_message_completed", message=message, usage=usage))
         for item in selected:
             user = self._session.create_user_message(item.text)
@@ -819,23 +831,11 @@ class TurnRunner:
                         )
                         request.cancellation_token = cancellation_token
 
-                try:
-                    tool_calls = assembler.finalize()
-                    precomputed_results: list[ToolExecutionResult] = []
-                except ToolCallParseError as exc:
-                    tool_calls = [self._synthetic_tool_call()]
-                    precomputed_results = [
-                        ToolExecutionResult(
-                            call_id=tool_calls[0].call_id,
-                            tool_name=tool_calls[0].tool_name,
-                            content=exc.user_message,
-                            is_error=True,
-                            metadata={},
-                            summary="工具调用解析失败",
-                            error_code="tool_call_parse_error",
-                            error_message=exc.user_message,
-                        )
-                    ]
+                tool_calls, precomputed_results = assembler.finalize_batch(stop_reason=collector.stop_reason)
+                # 每次请求只提交一次完整助手响应；工具反馈分支同样需要原思考数据。
+                response_blocks = collector.response_blocks(tool_calls)
+                if response_blocks:
+                    self._session.append_assistant_response(response_blocks)
 
                 total_usage = self._current_message_usage(assistant_message.id)
                 await self._emit(
@@ -851,7 +851,6 @@ class TurnRunner:
                     if collector.text:
                         self._session.clear_message_content(assistant_message.id)
 
-                    self._session.append_assistant_tool_calls(tool_calls)
                     pending_tool_calls = list(tool_calls)
                     self._session.append_trace_tool_calls(assistant_message.id, tool_calls)
                     for call in tool_calls:
@@ -976,7 +975,7 @@ class TurnRunner:
                     continue
                 # 最终检查与关闭接收在同一事件循环片段完成；晚到的补充保留为暂停消息。
                 active_turn.accepting_input = False
-                message = self._session.complete_message(assistant_message.id, total_usage)
+                message = self._session.complete_message(assistant_message.id, total_usage, record_transcript=False)
                 snapshot = self._session.plan_snapshot
                 if phase == "plan" and snapshot is not None and snapshot.digest == written_plan_digest:
                     snapshot.ready = True
@@ -1088,44 +1087,49 @@ class TurnRunner:
         usage = MessageUsage()
         self._session.bind_usage_request(request, turn_id=self._active_turn.task_id if self._active_turn else None,
                                          message_id=assistant_message_id)
-        async for event in self._session.stream_request(self._provider, request):
-            if event.kind == "thinking_delta" and event.text:
-                self._session.append_trace_thinking(assistant_message_id, event.text)
-                await self._emit(
-                    queue,
-                    TurnEvent(
-                        kind="progress_updated",
-                        message=self._session.get_message(assistant_message_id),
-                        usage=self._current_message_usage(assistant_message_id),
-                        progress_message="模型正在思考",
-                    ),
-                )
-            elif event.kind == "text_delta" and event.text:
-                collector.append(event.text)
-                self._session.append_message_content(assistant_message_id, event.text)
-                await self._emit(
-                    queue,
-                    TurnEvent(
-                        kind="assistant_text_delta",
-                        message=self._session.get_message(assistant_message_id),
-                        usage=self._current_message_usage(assistant_message_id),
-                        text=event.text,
-                    ),
-                )
-            elif event.kind == "tool_call_delta" and event.tool_call_chunk:
-                message = self._session.get_message(assistant_message_id)
-                entries = message.trace.entries
-                if entries and entries[-1].kind in {"thinking", "text"} and entries[-1].metadata.get("state") == "streaming":
+        async with aclosing(self._session.stream_request(self._provider, request)) as stream:
+            async for event in stream:
+                if event.kind == "thinking_delta" and event.text:
+                    self._session.append_trace_thinking(assistant_message_id, event.text)
+                    await self._emit(
+                        queue,
+                        TurnEvent(
+                            kind="progress_updated",
+                            message=self._session.get_message(assistant_message_id),
+                            usage=self._current_message_usage(assistant_message_id),
+                            progress_message="模型正在思考",
+                        ),
+                    )
+                elif event.kind == "text_delta" and event.text:
+                    collector.append(event.text)
+                    self._session.append_message_content(assistant_message_id, event.text)
+                    await self._emit(
+                        queue,
+                        TurnEvent(
+                            kind="assistant_text_delta",
+                            message=self._session.get_message(assistant_message_id),
+                            usage=self._current_message_usage(assistant_message_id),
+                            text=event.text,
+                        ),
+                    )
+                elif event.kind == "tool_call_delta" and event.tool_call_chunk:
+                    message = self._session.get_message(assistant_message_id)
+                    entries = message.trace.entries
+                    if entries and entries[-1].kind in {"thinking", "text"} and entries[-1].metadata.get("state") == "streaming":
+                        self._session.finish_trace_segment(assistant_message_id)
+                        await self._emit(queue, TurnEvent(
+                            kind="progress_updated", message=message,
+                            usage=self._current_message_usage(assistant_message_id),
+                            progress_message="正在准备工具调用",
+                        ))
+                    assembler.consume(event.tool_call_chunk)
+                elif event.kind == "message_end":
                     self._session.finish_trace_segment(assistant_message_id)
-                    await self._emit(queue, TurnEvent(
-                        kind="progress_updated", message=message,
-                        usage=self._current_message_usage(assistant_message_id),
-                        progress_message="正在准备工具调用",
-                    ))
-                assembler.consume(event.tool_call_chunk)
-            elif event.kind == "message_end":
-                self._session.finish_trace_segment(assistant_message_id)
-                usage = event.usage
+                    if event.response_complete is False:
+                        raise ProviderResponseError("模型响应流提前结束，未收到完整响应；本次工具没有执行，请重试。")
+                    collector.assistant_blocks = deepcopy(event.assistant_blocks)
+                    collector.stop_reason = event.stop_reason
+                    usage = event.usage
         self._session.finish_trace_segment(assistant_message_id)
         return usage
 
@@ -1158,16 +1162,6 @@ class TurnRunner:
     @staticmethod
     async def _emit(queue: asyncio.Queue[TurnEvent | object], event: TurnEvent) -> None:
         await queue.put(event)
-
-    @staticmethod
-    def _synthetic_tool_call() -> ToolCall:
-        return ToolCall(
-            call_index=0,
-            call_id=f"tool-call-parse-{uuid4().hex[:8]}",
-            tool_name="tool_call_parser",
-            arguments={},
-            arguments_json="{}",
-        )
 
     @staticmethod
     def _next_unknown_tool_streak(current_streak: int, results: list[ToolExecutionResult]) -> int:

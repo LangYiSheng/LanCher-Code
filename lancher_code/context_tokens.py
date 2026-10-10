@@ -37,6 +37,12 @@ def _digest(value: object) -> str:
 
 
 def _block_content(block: ContentBlock) -> dict[str, object]:
+    if block.kind in {"thinking", "redacted_thinking"}:
+        # 思考签名和密文是可回传的原始协议内容；哪怕可读文字相同，
+        # 它们变化后也不能再套用先前请求的实际输入用量。
+        return {"kind": block.kind, "text": block.text, "signature": block.signature,
+                "data": block.data, "thinking_protocol": block.thinking_protocol,
+                "thinking_field": block.thinking_field}
     if block.kind == "text":
         return {"kind": block.kind, "text": block.text}
     if block.kind == "tool_use":
@@ -45,7 +51,8 @@ def _block_content(block: ContentBlock) -> dict[str, object]:
 
 
 def _message_content(message: ConversationMessage) -> dict[str, object]:
-    return {"role": message.role, "blocks": [_block_content(block) for block in message.blocks]}
+    return {"role": message.role, "blocks": [_block_content(block) for block in message.blocks],
+            "response_protocol": message.response_protocol, "response_model": message.response_model}
 
 
 def _shape_digest(request: ChatRequest) -> str:
@@ -65,13 +72,19 @@ def _messages_digest(messages: list[ConversationMessage]) -> str:
 
 
 def _message_breakdown(messages: list[ConversationMessage]) -> dict[str, int]:
-    result = {"message_text": 0, "tool_arguments": 0, "tool_results": 0, "framing": 0}
+    result = {"message_text": 0, "thinking": 0, "thinking_metadata": 0,
+              "tool_arguments": 0, "tool_results": 0, "framing": 0}
     for message in messages:
         result["framing"] += 8  # 消息角色与提供方聊天模板的保守包装额度。
         for block in message.blocks:
             result["framing"] += 2
             if block.kind == "text":
                 result["message_text"] += estimate_text_tokens(block.text)
+            elif block.kind in {"thinking", "redacted_thinking"}:
+                result["thinking"] += estimate_text_tokens(block.text)
+                # 提供方对签名/密文的编码与计费可能不同，这只是未知输入
+                # 的保守额度；已上报 usage 仍覆盖完整旧请求的粗估。
+                result["thinking_metadata"] += estimate_text_tokens((block.signature or "") + (block.data or ""))
             elif block.kind == "tool_use":
                 result["tool_arguments"] += estimate_text_tokens(block.name + block.call_id + _canonical(block.input))
                 result["framing"] += 8

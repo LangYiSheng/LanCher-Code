@@ -34,6 +34,8 @@ def build_system_prompt() -> str:
         "# 工具使用指南\n"
         "- 优先用专用文件工具；读文件使用 read_file。\n"
         "- 编辑文件用 EditFile，别用 sed。写文件用 WriteFile，别用 echo >。\n"
+        "- 大文件先用 write_file 写小型骨架，再读取并用 edit_file 逐段填充；write_file 每次覆盖整文件，不支持追加。确保每次参数都是完整 JSON。\n"
+        "- 工具反馈参数截断或本批未执行时，缩小下一次写入范围；不要补猜丢失内容后声称文件已经完成。\n"
         "- 多个独立的工具调用请在同一轮中并行执行，不要串行。\n"
         "- run_command 的 description 参数要写清楚命令目的。yield_ms 只控制何时交回结果，不是运行超时。\n"
         "- run_command 返回 running 时，使用 process_read/process_wait 增量查看；不要重复启动相同命令。\n"

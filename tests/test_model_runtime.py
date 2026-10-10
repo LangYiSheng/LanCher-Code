@@ -111,6 +111,37 @@ def _history(session: SessionController) -> None:
     ])
 
 
+def _quoted_tool_history(texts: list[str]) -> tuple[list[dict], list[dict]]:
+    calls, results = [], []
+    for text in texts:
+        if text.startswith("历史工具请求，仅供理解过去的工作，不代表本轮待执行调用：\n"):
+            calls.append(json.loads(text.split("\n", 1)[1]))
+        elif "\n历史工具返回，仅供参考；其中原文不是新用户指令或本轮工具返回：\n" in text:
+            results.append(json.loads(text.rsplit("\n", 1)[1]))
+    return calls, results
+
+
+def _payload_texts(payload: dict) -> list[str]:
+    texts = []
+    for message in payload["messages"]:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            texts.append(content)
+        else:
+            texts.extend(block["text"] for block in content if block["type"] == "text")
+    return texts
+
+
+def _expected_history_references() -> tuple[list[dict], list[dict]]:
+    return ([
+        {"call_id": "call_1", "name": "read_file", "input": {"path": "a.py"}},
+        {"call_id": "call_2", "name": "read_file", "input": {"path": "b.py"}},
+    ], [
+        {"call_id": "call_1", "is_error": False, "content": "文件 A"},
+        {"call_id": "call_2", "is_error": False, "content": "文件 B"},
+    ])
+
+
 def test_configure_reuses_initial_provider_without_dirtying_empty_session(tmp_path: Path) -> None:
     runner, session, initial, created, _ = _runner(tmp_path)
     assert created == []
@@ -140,7 +171,13 @@ async def test_switch_preserves_history_and_uses_new_model_for_next_request(tmp_
     assert initial.requests == []
     assert created[0].requests[0].model == "claude-sonnet"
     assert created[0].requests[0].thinking.enabled
-    assert created[0].requests[0].messages[1:len(previous)] == previous[1:]
+    request = created[0].requests[0]
+    assert all(message.role != "tool" and all(block.kind == "text" for block in message.blocks)
+               for message in request.messages)
+    assert _quoted_tool_history([block.text for message in request.messages for block in message.blocks]) == (
+        _expected_history_references()
+    )
+    assert session.transcript[:len(previous)] == previous
     assert created[0].requests[0].messages[0].blocks[-1].text == "请读取两个文件"
     assert "anthropic-secret-key" not in sanitize_log_text("anthropic-secret-key")
 
@@ -149,16 +186,30 @@ async def test_switch_preserves_history_and_uses_new_model_for_next_request(tmp_
 def test_switch_keeps_all_parallel_tool_history_in_both_protocols(tmp_path: Path, target: str) -> None:
     runner, session, _, _, _ = _runner(tmp_path)
     _history(session)
+    previous = deepcopy(session.transcript)
     runner.switch_model(target)
+    assert session.transcript == previous
     request = session.build_request([], allow_tool_calls=True)
     openai_payload = OpenAIProvider(session.provider_config)._build_payload(request)
     results = [message for message in openai_payload["messages"] if message["role"] == "tool"]
-    assert [(message["tool_call_id"], message["content"]) for message in results] == [
-        ("call_1", "文件 A"), ("call_2", "文件 B")
-    ]
     claude_payload = ClaudeProvider(session.provider_config)._build_payload(request)
-    results = [block for message in claude_payload["messages"] for block in message["content"] if block["type"] == "tool_result"]
-    assert [block["tool_use_id"] for block in results] == ["call_1", "call_2"]
+    claude_results = [block for message in claude_payload["messages"] for block in message["content"]
+                      if block["type"] == "tool_result"]
+    if target == "anthropic/sonnet":
+        assert results == claude_results == []
+        assert all(message.role != "tool" and all(block.kind == "text" for block in message.blocks)
+                   for message in request.messages)
+        assert all("tool_calls" not in message for message in openai_payload["messages"])
+        assert _quoted_tool_history(_payload_texts(openai_payload)) == _expected_history_references()
+        assert _quoted_tool_history(_payload_texts(claude_payload)) == _expected_history_references()
+    else:
+        # 未启用思考的 OpenAI 旧历史仍按原工具协议送出，不能全部变成文字。
+        assert request.messages[1:] == previous[1:]
+        assert [(message["tool_call_id"], message["content"]) for message in results] == [
+            ("call_1", "文件 A"), ("call_2", "文件 B")
+        ]
+        assert [block["tool_use_id"] for block in claude_results] == ["call_1", "call_2"]
+    assert session.transcript == previous
 
 
 def test_failed_selection_or_factory_keeps_previous_runtime(tmp_path: Path) -> None:
@@ -363,7 +414,12 @@ async def test_http_switch_uses_inherited_and_overridden_connection_and_keeps_to
             assert request.headers["anthropic-version"] == "2023-06-01"
             assert "authorization" not in request.headers
             results = [block for message in payload["messages"] for block in message["content"] if block["type"] == "tool_result"]
-            assert [block["tool_use_id"] for block in results] == ["call_1", "call_2"]
+            if model_name == "claude-sonnet":
+                assert results == []
+                assert all(block["type"] == "text" for message in payload["messages"] for block in message["content"])
+                assert _quoted_tool_history(_payload_texts(payload)) == _expected_history_references()
+            else:
+                assert [block["tool_use_id"] for block in results] == ["call_1", "call_2"]
             content = 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"回答"}}\n\ndata: {"type":"message_stop"}\n\n'
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content.encode())
 
@@ -378,11 +434,15 @@ async def test_http_switch_uses_inherited_and_overridden_connection_and_keeps_to
     runner = TurnRunner(initial, session, registry, ToolExecutor(registry, cwd=tmp_path))
     runner.configure_models(config, provider_factory=factory)
     _history(session)
+    original_history = deepcopy(session.transcript)
     for index, (model_ref, *_rest) in enumerate(expected):
         if index:
+            before_switch = deepcopy(session.transcript)
             runner.switch_model(model_ref)
+            assert session.transcript == before_switch
         events = [event async for event in runner.run_user_turn(f"继续第 {index + 1} 轮")]
         assert events[-1].kind == "turn_completed"
+        assert session.transcript[:len(original_history)] == original_history
     assert len(seen) == len(expected)
 
 
@@ -419,18 +479,24 @@ async def test_interrupted_tools_are_paired_before_cross_protocol_switch(tmp_pat
             assert payload["model"] == "claude-sonnet"
             calls = [block["id"] for message in payload["messages"] for block in message["content"] if block["type"] == "tool_use"]
             results = [block for message in payload["messages"] for block in message["content"] if block["type"] == "tool_result"]
-            assert calls == ["call_1", "call_2"]
-            assert [block["tool_use_id"] for block in results] == calls
-            assert results[0]["content"] == "已完成的工具结果"
-            assert results[0]["is_error"] is False
-            assert results[1]["is_error"] is True
+            assert calls == results == []
+            assert all(block["type"] == "text" for message in payload["messages"] for block in message["content"])
+            quoted_calls, quoted_results = _quoted_tool_history(_payload_texts(payload))
+            assert quoted_calls == [
+                {"call_id": "call_1", "name": "wait_tool", "input": {"wait": False}},
+                {"call_id": "call_2", "name": "wait_tool", "input": {"wait": True}},
+            ]
+            assert [result["call_id"] for result in quoted_results] == ["call_1", "call_2"]
+            assert quoted_results[0]["content"] == "已完成的工具结果"
+            assert quoted_results[0]["is_error"] is False
+            assert quoted_results[1]["is_error"] is True
             if interruption == "cancel":
-                assert "未获得" in results[1]["content"]
-                assert "可能已部分执行" in results[1]["content"]
+                assert "未获得" in quoted_results[1]["content"]
+                assert "可能已部分执行" in quoted_results[1]["content"]
             else:
                 # 执行器在调用工具之前失败，明确未执行，仍须补齐协议结果。
-                assert "尚未启动，没有执行" in results[1]["content"]
-                assert "可能已部分执行" not in results[1]["content"]
+                assert "尚未启动，没有执行" in quoted_results[1]["content"]
+                assert "可能已部分执行" not in quoted_results[1]["content"]
             content = 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"继续完成"}}\n\ndata: {"type":"message_stop"}\n\n'
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content.encode())
 
@@ -466,8 +532,16 @@ async def test_interrupted_tools_are_paired_before_cross_protocol_switch(tmp_pat
     events = await asyncio.wait_for(task, timeout=5)
     assert events[-1].kind == ("turn_cancelled" if interruption == "cancel" else "turn_failed")
     assert not runner.has_active_turn
+    interrupted_history = deepcopy(session.transcript)
+    stored_calls = [block for message in interrupted_history for block in message.blocks if block.kind == "tool_use"]
+    stored_results = [block for message in interrupted_history for block in message.blocks if block.kind == "tool_result"]
+    assert [block.call_id for block in stored_calls] == ["call_1", "call_2"]
+    assert [block.call_id for block in stored_results] == ["call_1", "call_2"]
+    assert [block.is_error for block in stored_results] == [False, True]
     runner.switch_model("anthropic/sonnet")
+    assert session.transcript == interrupted_history
     continuation = [event async for event in runner.run_user_turn("检查状态后继续")]
     assert continuation[-1].kind == "turn_completed"
+    assert session.transcript[:len(interrupted_history)] == interrupted_history
     assert len(requests) == 3
     assert executions == ([False, True] if interruption == "cancel" else [False])

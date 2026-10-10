@@ -111,11 +111,12 @@ python main.py
 8. [结束工作与恢复对话 workflows/app-exit.md](workflows/app-exit.md) — 确认退出、先收尾再告别，以及本次启动的用量账本
 9. [Token 与上下文 workflows/token-accounting.md](workflows/token-accounting.md) — 用数字例子理解请求记账、usage 校准、动态预算与压缩验证
 10. [上下文压缩活动 workflows/context-compaction.md](workflows/context-compaction.md) — 折叠交互、前后估算、压缩率、失败与 Session 恢复
-11. [运行流程 workflows/](workflows/) — 启动、一轮对话、会话生命周期等流程
-12. [开发指南 development.md](development.md) — 如何继续开发
-13. [故障排查 troubleshooting.md](troubleshooting.md) — 常见问题
-14. [术语表 glossary.md](glossary.md) — 专有名词
-15. [PyInstaller 打包 pyinstaller.md](pyinstaller.md) — Windows 可执行文件打包
+11. [思考协议与工具恢复 workflows/thinking-and-tool-recovery.md](workflows/thinking-and-tool-recovery.md) — 完整回传、截断反馈及缺失协议的历史恢复
+12. [运行流程 workflows/](workflows/) — 启动、一轮对话、会话生命周期等流程
+13. [开发指南 development.md](development.md) — 如何继续开发
+14. [故障排查 troubleshooting.md](troubleshooting.md) — 常见问题
+15. [术语表 glossary.md](glossary.md) — 专有名词
+16. [PyInstaller 打包 pyinstaller.md](pyinstaller.md) — Windows 可执行文件打包
 
 ## 相关文件速查
 

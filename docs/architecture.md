@@ -110,7 +110,7 @@ graph TD
            │    ├─ text_delta → 追加到消息内容
            │    ├─ thinking_delta → 写入思考轨迹
            │    └─ tool_call_delta → ToolCallAssembler 拼接
-           ├─ ToolCallAssembler.finalize() → ToolCall 列表
+           ├─ ToolCallAssembler.finalize_batch() → 完整工具批次或原编号错误反馈
            ├─ ToolExecutor.execute_calls()：
            │    ├─ 冻结参数 + 标准 JSON Schema 校验（离线引用解析）
            │    ├─ 阶段工具边界 + PermissionEngine.evaluate()（五层判定）

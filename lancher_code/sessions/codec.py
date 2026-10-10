@@ -457,14 +457,52 @@ class SessionCodec:
             raise ValueError('模型上下文消息必须包含 blocks 数组。')
         if value['role'] not in {'system', 'user', 'assistant', 'tool'}:
             raise ValueError('模型上下文角色无效。')
+        response_protocol, response_model = value.get('response_protocol'), value.get('response_model')
+        if response_protocol is not None and (
+            not isinstance(response_protocol, str) or response_protocol not in {'claude', 'openai'}
+        ):
+            raise ValueError('助手响应来源协议无效。')
+        if response_model is not None and (not isinstance(response_model, str) or not response_model.strip()):
+            raise ValueError('助手响应来源模型无效。')
+        if value['role'] != 'assistant' and (response_protocol is not None or response_model is not None):
+            raise ValueError('响应来源只能属于助手消息。')
         blocks = []
         for raw in value['blocks']:
-            if not isinstance(raw, dict) or raw.get('kind') not in {'text', 'tool_use', 'tool_result'}:
+            if not isinstance(raw, dict) or raw.get('kind') not in {'text', 'thinking', 'redacted_thinking', 'tool_use', 'tool_result'}:
                 raise ValueError('模型上下文内容块无效。')
             block = ContentBlock(**raw)
             if not isinstance(block.text, str) or not isinstance(block.input, dict) or type(block.is_error) is not bool:
                 raise ValueError('模型上下文内容块字段无效。')
-            if block.kind != 'text' and (not isinstance(block.call_id, str) or not block.call_id):
+            if block.kind in {'tool_use', 'tool_result'} and (not isinstance(block.call_id, str) or not block.call_id):
                 raise ValueError('工具内容块缺少调用标识。')
+            if any(item is not None and not isinstance(item, str) for item in (block.signature, block.data)):
+                raise ValueError('思考签名或密文必须为文本。')
+            if block.thinking_protocol is not None and (
+                not isinstance(block.thinking_protocol, str) or block.thinking_protocol not in {'claude', 'openai'}
+            ):
+                raise ValueError('思考内容块协议无效。')
+            if block.thinking_field is not None and (
+                not isinstance(block.thinking_field, str) or block.thinking_field not in {'reasoning_content', 'reasoning'}
+            ):
+                raise ValueError('思考内容块字段来源无效。')
+            if block.kind in {'thinking', 'redacted_thinking'}:
+                if value['role'] != 'assistant':
+                    raise ValueError('思考内容块只能属于助手消息。')
+                if block.thinking_field is not None and block.thinking_protocol != 'openai':
+                    raise ValueError('推理字段来源必须属于 OpenAI 协议。')
+                if block.kind == 'thinking':
+                    # 某些提供方不给可读思考，只返回可验证签名。这种真实
+                    # 内容仍需原样保存；单纯空块则不能冒充完整协议。
+                    if not block.text.strip() and not block.signature:
+                        raise ValueError('思考内容与签名不能同时为空。')
+                    if block.data is not None:
+                        raise ValueError('可读思考不能包含屏蔽思考密文。')
+                elif not block.data or block.text or block.signature is not None or block.thinking_field is not None:
+                    raise ValueError('屏蔽思考必须包含独立的非空密文。')
+            elif any(item is not None for item in (
+                block.signature, block.data, block.thinking_protocol, block.thinking_field,
+            )):
+                raise ValueError('普通内容块不能携带思考协议字段。')
             blocks.append(block)
-        return ConversationMessage(role=value['role'], blocks=blocks)
+        return ConversationMessage(role=value['role'], blocks=blocks,
+                                   response_protocol=response_protocol, response_model=response_model)
