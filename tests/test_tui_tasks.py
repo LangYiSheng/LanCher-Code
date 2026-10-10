@@ -229,3 +229,31 @@ async def test_hud_refresh_ignores_already_unmounted_widgets(openai_provider_con
         app._refresh_status_bar()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 40), (60, 24), (32, 16)])
+async def test_blocker_task_selection_keeps_full_identity_and_stops_only_target(
+    openai_provider_config, tmp_path, size,
+):
+    app, _ = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    runtime = FakeTaskRuntime()
+    other = dict(runtime.task, process_id="00000000000040008000000000000000", description="无关任务")
+    actions = runtime.actions()
+    actions = TaskScreenActions(lambda: [other, runtime.list_tasks()[0]], actions.read_output,
+        actions.stop, actions.background, actions.write_input, actions.stop_session)
+    screen = TasksScreen("87654321876543218765432187654321", actions,
+                         selected_process_id=runtime.process_id)
+    async with app.run_test(size=size) as pilot:
+        app.push_screen(screen)
+        await pilot.pause()
+        assert screen.selected_process_id == runtime.process_id
+        detail = screen.query_one("#tasks-detail", Static)
+        assert runtime.process_id in detail.content
+        if size[0] < 64:
+            assert detail.content == runtime.process_id
+            assert detail.get_content_height(detail.container_size, app.screen.size, detail.size.width) <= detail.region.height
+        await pilot.click("#tasks-stop")
+        await pilot.pause()
+        assert ("stop", runtime.process_id) in runtime.calls
+        assert ("stop", other["process_id"]) not in runtime.calls
+
+

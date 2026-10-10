@@ -23,6 +23,7 @@ from lancher_code.tui_views.chat import LanCherTextualApp
 from lancher_code.tui_views.composer import ComposerTextArea
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.tui_views.tasks import TasksScreen
+from lancher_code.tui_views.timeline import ToolCallWidget
 from lancher_code.turn_runner import TurnRunner
 
 
@@ -97,7 +98,7 @@ async def wait_http_ready(client, url, pilot):
                 await pilot.pause(0.02)
 
 
-async def approve_command(app, pilot):
+async def grant_command(app, pilot):
     await until(pilot, lambda: bool(app.query(InlinePermissionPanel)))
     panel = app.query_one(InlinePermissionPanel)
     assert panel.request.tool_name == "run_command"
@@ -105,6 +106,11 @@ async def approve_command(app, pilot):
     request_id = panel.request.request_id
     panel.focus()
     await pilot.press("enter")
+    return request_id
+
+
+async def approve_command(app, pilot):
+    request_id = await grant_command(app, pilot)
     await finish(app, pilot)
     return request_id
 
@@ -171,12 +177,14 @@ async def test_run_async_background_http_survives_turns_then_session_stop_allows
     (tmp_path / "index.html").write_text("runtime-http-ready", encoding="utf-8")
     server = python_command("-u", "-m", "http.server", str(port), "--bind", "127.0.0.1")
     version = python_command("--version")
+    request = python_command("-c", "import urllib.request; print(urllib.request.urlopen("
+                             f"'http://127.0.0.1:{port}/').read().decode())")
     profile = CommandProfile("回归服务器", server,
         resources=(ResourceClaim("external", f"port:{port}"),),
         readiness=ReadinessProbe("tcp", "127.0.0.1", port, 10000))
     # 已知只读命令可与端口资源并行；资源声明不会授予执行权限。
     version_profile = CommandProfile("只读版本查询", version, resources=())
-    background_turn = [command_call(version), reply()] if use_profiles else [reply()]
+    background_turn = [command_call(version if use_profiles else request), reply()]
     app, session, runner, storage = build_app(tmp_path, openai_provider_config,
         [reply(), command_call(server, lifetime="session", yield_ms=0), reply(),
          *background_turn, command_call(version), reply()],
@@ -201,16 +209,11 @@ async def test_run_async_background_http_survives_turns_then_session_stop_allows
             assert app.screen.session_id == session.session_id
             await pilot.press("escape")
             assert (await client.get(url)).status_code == 200
-            if use_profiles:
-                await send(app, pilot, "服务器继续运行时查看 Python 版本")
-                approvals.append(await approve_command(app, pilot))
-                assert last_result(session).ok
-            else:
-                # 未声明命令保守持有项目锁，但不妨碍普通对话完成。
-                await send(app, pilot, "服务器继续运行时完成普通回答")
-                await finish(app, pilot)
-                assert session.state.messages[-1].status == "complete"
-                assert not app.query(InlinePermissionPanel)
+            await send(app, pilot, "查看 Python 版本" if use_profiles else "请求后台 HTTP 服务")
+            approvals.append(await approve_command(app, pilot))
+            assert last_result(session).ok, last_result(session).text
+            if not use_profiles:
+                assert "runtime-http-ready" in last_result(session).metadata["content"]
             assert (await client.get(url)).status_code == 200
         await send(app, pilot, "/session stop", slash=True)
         await until(pilot, lambda: all(item["status"] not in {"starting", "running", "stopping"}
@@ -224,8 +227,67 @@ async def test_run_async_background_http_survives_turns_then_session_stop_allows
         result = last_result(session)
         assert result.ok, result.text
         assert process_info(runner, result)["origin_turn_id"]
-        assert len(set(approvals)) == (3 if use_profiles else 2)
+        assert len(set(approvals)) == 3
         assert not storage.rules_for_scope("session")
+        app.exit(0)
+
+    await run_real_app(app, drive)
+
+
+@pytest.mark.asyncio
+async def test_run_async_approved_command_names_actual_blocker_then_runs_after_task_stop(
+    tmp_path, openai_provider_config,
+):
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    (tmp_path / "index.html").write_text("blocker-server-ready", encoding="utf-8")
+    server = python_command("-u", "-m", "http.server", str(port), "--bind", "127.0.0.1")
+    version = python_command("--version")
+    profile = CommandProfile("明确持有项目资源的服务器", server,
+        resources=(ResourceClaim("project", str(tmp_path), lifetime="process"),))
+    app, session, runner, storage = build_app(tmp_path, openai_provider_config,
+        [command_call(server, lifetime="session", yield_ms=0), reply(), command_call(version), reply()],
+        profiles=[profile])
+
+    async def drive(pilot):
+        await send(app, pilot, "启动明确持有项目资源的后台服务器")
+        approvals = [await approve_command(app, pilot)]
+        server_result = last_result(session)
+        assert server_result.ok, server_result.text
+        process_id = server_result.metadata["process_id"]
+        async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+            url = f"http://127.0.0.1:{port}/"
+            assert (await wait_http_ready(client, url, pilot)).text == "blocker-server-ready"
+            await send(app, pilot, "服务器持有资源时查看版本")
+            approvals.append(await grant_command(app, pilot))
+            await until(pilot, lambda: any(item.state == "waiting_resources"
+                                          for item in app.query(ToolCallWidget)))
+            waiting = next(item for item in app.query(ToolCallWidget) if item.state == "waiting_resources")
+            assert "等待资源" in waiting.header.content.plain
+            assert "待批准" not in waiting.header.content.plain
+            assert not waiting.call.metadata["started"]
+            assert waiting.call.metadata["waiting"]["reason"] == "resource_conflict"
+            blockers = waiting.call.metadata["waiting"]["blockers"]
+            assert {item["process_id"] for item in blockers} == {process_id}
+            assert process_id in waiting.body.content.plain
+            assert f"/tasks show {process_id}" in waiting.body.content.plain
+            assert not app.query(InlinePermissionPanel)
+            assert len(runner.list_processes()) == 1
+            assert (await client.get(url)).status_code == 200
+            await send(app, pilot, f"/tasks show {process_id}", slash=True)
+            await until(pilot, lambda: isinstance(app.screen, TasksScreen))
+            assert app.screen.selected_process_id == process_id
+            await pilot.click("#tasks-stop")
+            await until(pilot, lambda: process_info(runner, server_result)["status"] == "cancelled")
+            await pilot.press("escape")
+            await finish(app, pilot)
+        result = last_result(session)
+        assert result.ok, result.text
+        assert "Python " in result.metadata["content"]
+        assert "waiting" not in waiting.call.metadata
+        assert len(runner.list_processes()) == 2
+        assert len(set(approvals)) == 2 and not storage.rules_for_scope("session")
         app.exit(0)
 
     await run_real_app(app, drive)

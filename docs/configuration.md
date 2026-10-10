@@ -110,7 +110,7 @@ default_model: deepseek/chat
 
 数值必须为正，未知项会报错。进程启动的 `yield_ms` 是本次等待时间，`max_runtime_ms` 是真实运行期限；它们由每次命令参数明确给出，不能与上述额度混淆。
 
-未知命令保守独占项目。下面的例子只适用于你确认脚本写入范围、端口与资源的情况：
+未知命令在本次启动调用期间保守独占项目，返回后台任务后释放该临时锁，因此默认配置也能先启动服务、再请求它。后台命令仍可能自己修改文件；需要持续协调真实资源时再配置 profile。下面的例子只适用于你确认脚本写入范围、端口与资源的情况：
 
 ```yaml
 execution:
@@ -118,12 +118,14 @@ execution:
     - name: 开发服务
       command_match: npm run dev
       resources:
-        - {kind: path, key: .cache, mode: exclusive, recursive: true}
-        - {kind: external, key: 'port:5173', mode: exclusive}
+        - {kind: path, key: .cache, mode: exclusive, recursive: true, lifetime: process}
+        - {kind: external, key: 'port:5173', mode: exclusive, lifetime: process}
       readiness: {kind: tcp, host: 127.0.0.1, port: 5173, timeout_ms: 30000}
 ```
 
 匹配按列表顺序取首次命中，支持 glob；建议精确匹配已知脚本。每个 profile 必须明确填写 `resources`，省略或拼错配置字段会报错。资源种类为 `path`、`project`、`process`、`external`，模式为 `shared` 或 `exclusive`；`recursive` 只适用于路径，路径 key 相对项目根解析。`resources: []` 明确表示用户约定无调度资源需求，不能用它假装未知命令安全。
+
+资源的 `lifetime` 默认 `process`，保留到进程实际退出；明确写 `invocation` 则在本次启动调用结束释放。它与命令参数的同名 `lifetime=turn/session` 含义不同：前者说明锁保留多久，后者说明进程由本轮还是 Session 负责清理。一个 profile 可以混用两个资源期限。profile 不授予执行权限，默认策略下启动命令仍需批准；未声明资源的 MCP 仍只在本次工具调用期间项目独占。
 
 系统输出每次读取 4096 字节，分别增量解码；任务窗口显示缓冲固定保留约 48,000 个最近字符，不提供空配置项承诺无限缓冲。
 

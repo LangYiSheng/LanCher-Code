@@ -159,7 +159,11 @@ async def test_denied_approval_is_recorded_without_claiming_tool_executed(openai
 
     events = await asyncio.wait_for(collect(runner, "修改文件", handle), 3)
     assert not (tmp_path / "new.txt").exists()
-    assert not any(event.kind == "progress_updated" and event.tool_call is not None for event in events)
+    # 排队和审批也会报告真实进度；拒绝后仍不能宣称已经开始执行。
+    progress = [event.progress_message or "" for event in events
+                if event.kind == "progress_updated" and event.tool_call is not None]
+    assert any("等待批准" in text for text in progress)
+    assert not any("正在执行" in text for text in progress)
     entries = session.state.messages[-1].trace.entries
     call = next(entry for entry in entries if entry.kind == "tool_call")
     result = next(entry for entry in entries if entry.kind == "tool_result")

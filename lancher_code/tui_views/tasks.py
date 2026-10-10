@@ -174,12 +174,14 @@ class TasksScreen(ModalScreen[None]):
         receipt = f"输入：{input_status} · 累计 {task.get('input_bytes', 0)} 字节" if task.get("input_status") else ""
         exit_detail = f"退出码：{task.get('exit_code')} · 原因：{task.get('exit_reason') or '正常结束'}" if task.get("exit_code") is not None or task.get("exit_reason") else ""
         control_detail = " · ".join(part for part in (exit_detail, receipt) if part)
-        self.query_one("#tasks-detail", Static).update(
+        detail = (
             f"{task_label(task)}\nUUID：{process_id}\n"
             f"{str(task.get('transport', 'pipe')).upper()} · {elapsed_label(task)} · "
             f"就绪：{ {'unknown': '未知', 'pending': '等待', 'ready': '已就绪', 'timeout': '探测超时'}.get(str(task.get('readiness', 'unknown')), str(task.get('readiness'))) }\n目录：{task.get('cwd', '')}"
             + (f"\n{control_detail}" if control_detail else "")
         )
+        # 窄屏的两行详情完整保留任务身份；状态和归属已显示在列表。
+        self.query_one("#tasks-detail", Static).update(str(process_id) if self.has_class("-narrow") else detail)
         active = str(task.get("status")) not in TERMINAL_STATES
         self._set_actions_enabled(active)
         running = task.get("status") == "running" and not self._action_busy

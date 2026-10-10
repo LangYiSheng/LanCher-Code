@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from lancher_code.context_management import AUTOMATIC_FAILURE_LIMIT, EMERGENCY_MARGIN, automatic_threshold
+from lancher_code.execution.contracts import InvocationInfo
 from lancher_code.errors import (
     ConfigError,
     ContextCompactionError,
@@ -818,6 +819,24 @@ class TurnRunner:
 
                     recorded_ids: set[str] = set()
 
+                    async def report_invocation_state(call: ToolCall, info: InvocationInfo) -> None:
+                        # 只把当前轮次的真实执行投影送到时间线；审批结束不等于工具已启动。
+                        if (self._active_turn is not active_turn or info.turn_id != turn_id
+                                or info.session_id != self._session.session_id
+                                or call.call_id in recorded_ids):
+                            return
+                        labels = {
+                            "queued": "等待执行", "awaiting_permission": "等待批准",
+                            "waiting_resources": "等待资源 · 审批已通过", "running": "正在执行",
+                        }
+                        if info.state not in labels:
+                            return
+                        message = self._session.set_trace_tool_state(
+                            assistant_message.id, call.call_id, info.state,
+                            waiting=info.waiting, invocation_id=info.invocation_id)
+                        await self._emit(queue, TurnEvent(kind="progress_updated", message=message,
+                            tool_call=call, progress_message=f"{labels[info.state]} · {call.tool_name}"))
+
                     async def report_started(call: ToolCall) -> None:
                         message = self._session.set_trace_tool_state(assistant_message.id, call.call_id, "running")
                         self._session.record_event('tool.started', {'call_id': call.call_id, 'tool_name': call.tool_name},
@@ -854,6 +873,7 @@ class TurnRunner:
                         available_tool_names={tool.name for tool in visible_tools},
                         should_interrupt=self._has_steering,
                         on_call_started=report_started,
+                        on_invocation_state=report_invocation_state,
                         on_result=report_result,
                     )
                     calls_by_id = {call.call_id: call for call in tool_calls}
@@ -962,6 +982,7 @@ class TurnRunner:
             return
         # 仅补齐尚未记录结果的调用，不能把中断误报为工具完全没有执行。
         trace = self._session.get_message(message_id).trace.entries
+        invocations = {item['invocation_id']: item for item in self.list_execution_tasks()}
         results = []
         for call in pending:
             entry = next((item for item in reversed(trace) if item.kind == 'tool_call' and item.call_id == call.call_id), None)
@@ -971,6 +992,13 @@ class TurnRunner:
                 external = bool(definition.permission and definition.permission.source == 'external' and definition.category != 'read')
             except Exception:
                 external = False
+            invocation = invocations.get(entry.metadata.get('invocation_id')) if entry else None
+            if (external and invocation and invocation['state'] == 'cancelled'
+                    and invocation.get('error_code') is None):
+                # running 状态通知可先让出控制权。执行器只有真正进入远端
+                # execute 后才把取消记为 interrupted / outcome_unknown。
+                started = False
+                entry.metadata['started'] = False
             unknown_remote = started and external
             message = (f'{reason}，远端操作结果未知；停止本地等待不能证明远端已撤销。请先检查远端状态，勿直接重复提交。'
                        if unknown_remote else

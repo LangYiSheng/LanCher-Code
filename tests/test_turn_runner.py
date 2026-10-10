@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError
-from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk, ToolDefinition, ToolExecutionResult
+from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk, ToolDefinition, ToolExecutionResult, ToolPermissionMetadata
 from lancher_code.session import SessionController
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
@@ -732,3 +732,62 @@ async def test_tool_argument_stream_notifies_thinking_finished_before_arguments_
     assert len(notifications) == 1
     assert len(provider.requests) == 2
     assert session.state.messages[-1].status == "complete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before_dispatch", [True, False], ids=["notification-before-dispatch", "remote-already-entered"])
+async def test_remote_cancel_uses_invocation_fact_instead_of_running_label(
+    openai_provider_config, tmp_path, monkeypatch, before_dispatch,
+):
+    entered = asyncio.Event()
+
+    class RemoteWriter:
+        definition = ToolDefinition("mcp__demo__write", "远端写入", category="command",
+            permission=ToolPermissionMetadata("external", "mcp__demo__write", "远端写入", "demo", "write"))
+
+        async def execute(self, arguments, context):
+            entered.set()
+            await asyncio.Event().wait()
+
+    provider = FakeProvider([[StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(
+        call_index=0, provider_call_id="remote-write", name_delta="mcp__demo__write", arguments_delta="{}")),
+        StreamEvent(kind="message_end")]])
+    registry = ToolRegistry()
+    registry.register(RemoteWriter())
+    session = SessionController(openai_provider_config, cwd=tmp_path, initial_permission_policy="bypass")
+    runner = TurnRunner(provider, session, registry, ToolExecutor(registry, cwd=tmp_path))
+    emit = runner._emit
+
+    async def cancel_during_running_notification(queue, event):
+        await emit(queue, event)
+        if before_dispatch and event.kind == "progress_updated" and event.progress_message == "正在执行 · mcp__demo__write":
+            assert not entered.is_set()
+            runner.cancel_active_turn()
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(runner, "_emit", cancel_during_running_notification)
+    consumer = asyncio.create_task(_collect_remote_cancel(runner))
+    try:
+        if not before_dispatch:
+            await asyncio.wait_for(entered.wait(), 5)
+            runner.cancel_active_turn()
+        events = await asyncio.wait_for(consumer, 5)
+        assert events[-1].kind == "turn_cancelled"
+        assert entered.is_set() is (not before_dispatch)
+        call, result = [entry for entry in session.state.messages[-1].trace.entries
+                        if entry.kind in {"tool_call", "tool_result"}]
+        assert result.metadata["started"] is (not before_dispatch)
+        assert result.metadata["outcome"] == ("not_started" if before_dispatch else "unknown")
+        assert result.metadata["error_code"] == ("tool_result_interrupted" if before_dispatch else "mcp_outcome_unknown")
+        assert call.metadata["started"] is (not before_dispatch)
+        assert "waiting" not in call.metadata
+        invocation = runner.list_execution_tasks()[0]
+        assert invocation["state"] == ("cancelled" if before_dispatch else "interrupted")
+        assert invocation["error_code"] == (None if before_dispatch else "mcp_outcome_unknown")
+    finally:
+        await runner.shutdown()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+async def _collect_remote_cancel(runner):
+    return [event async for event in runner.run_user_turn("远端提交")]

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from lancher_code.errors import ToolNotFoundError
-from lancher_code.execution.contracts import InvocationInfo, ResourceClaim
+from lancher_code.execution.contracts import InvocationInfo, ResourceClaim, ResourceOwner
 from lancher_code.execution.scheduler import ResourceScheduler, claims_conflict, get_project_scheduler, normalize_claim, path_claim, project_claim
 from lancher_code.logging_system import get_logger
 from lancher_code.models import (
@@ -28,6 +28,7 @@ logger = get_logger("tools.executor")
 PermissionResolver = Callable[[PermissionRequest], Awaitable[PermissionResolution]]
 ToolStartedCallback = Callable[[ToolCall], Awaitable[None]]
 ToolResultCallback = Callable[[ToolExecutionResult], Awaitable[None]]
+InvocationStateCallback = Callable[[ToolCall, InvocationInfo], Awaitable[None]]
 
 
 class ToolExecutor:
@@ -56,6 +57,7 @@ class ToolExecutor:
         available_tool_names: set[str] | None = None,
         should_interrupt: Callable[[], bool] | None = None,
         on_call_started: ToolStartedCallback | None = None, on_result: ToolResultCallback | None = None,
+        on_invocation_state: InvocationStateCallback | None = None,
     ) -> list[ToolExecutionResult]:
         context = ToolContext(
             cwd=self._cwd, timeout_seconds=self._timeout_seconds, mode=mode,
@@ -72,13 +74,14 @@ class ToolExecutor:
         frozen_calls = [replace(call, arguments=deepcopy(call.arguments)) for call in calls]
         claims = [self._resource_claims(call, context) if self._argument_error(call) is None else () for call in frozen_calls]
         completed = [asyncio.Event() for _ in calls]
+        invocations = [self.execution_runtime.begin_invocation(call, context) for call in frozen_calls]
         tasks = []
         for index, call in enumerate(frozen_calls):
-            predecessors = [completed[earlier] for earlier in range(index)
+            predecessors = [(completed[earlier], invocations[earlier]) for earlier in range(index)
                             if any(claims_conflict(one, other) for one in claims[earlier] for other in claims[index])]
             tasks.append(asyncio.create_task(self._execute_one(
-                call, replace(context), scheduler, claims[index], predecessors, completed[index],
-                permission_resolver, available_tool_names, should_interrupt, on_call_started, on_result,
+                call, replace(context), invocations[index], scheduler, claims[index], predecessors, completed[index],
+                permission_resolver, available_tool_names, should_interrupt, on_call_started, on_result, on_invocation_state,
             )))
         try:
             # gather 保留输入顺序，on_result 按实际完成顺序立即推送。
@@ -138,45 +141,78 @@ class ToolExecutor:
         return (project_claim(root),)
 
     async def _execute_one(
-        self, call: ToolCall, context: ToolContext, scheduler: ResourceScheduler,
-        claims: tuple[ResourceClaim, ...], predecessors: list[asyncio.Event], completed: asyncio.Event,
+        self, call: ToolCall, context: ToolContext, invocation: InvocationInfo, scheduler: ResourceScheduler,
+        claims: tuple[ResourceClaim, ...], predecessors: list[tuple[asyncio.Event, InvocationInfo]], completed: asyncio.Event,
         permission_resolver: PermissionResolver | None, available_tool_names: set[str] | None,
         should_interrupt: Callable[[], bool] | None, on_call_started: ToolStartedCallback | None,
-        on_result: ToolResultCallback | None,
+        on_result: ToolResultCallback | None, on_invocation_state: InvocationStateCallback | None,
     ) -> ToolExecutionResult:
-        invocation = self.execution_runtime.begin_invocation(call, context)
         context.invocation_id = invocation.invocation_id
         try:
-            for predecessor in predecessors:
-                await self._await_cancelable(predecessor.wait(), context)
+            unresolved = [info for event, info in predecessors if not event.is_set()]
+            if unresolved:
+                await self._report_state(call, invocation, "queued", on_invocation_state,
+                                         waiting=self._predecessor_snapshot(unresolved))
+            elif on_invocation_state is not None:
+                await on_invocation_state(call, deepcopy(invocation))
+            predecessor_waits = {asyncio.create_task(event.wait()) for event, _ in predecessors if not event.is_set()}
+            pending_waits = predecessor_waits.copy()
+            try:
+                while pending_waits:
+                    # 前序可能乱序完成；只显示仍未结束者，执行仍须等待全部冲突前序。
+                    await self._await_cancelable(asyncio.wait(pending_waits, return_when=asyncio.FIRST_COMPLETED), context)
+                    pending_waits = {wait for wait in pending_waits if not wait.done()}
+                    remaining = [info for event, info in predecessors if not event.is_set()]
+                    if remaining and remaining != unresolved:
+                        await self._report_state(call, invocation, "queued", on_invocation_state,
+                                                 waiting=self._predecessor_snapshot(remaining))
+                    unresolved = remaining
+            finally:
+                for wait in predecessor_waits:
+                    if not wait.done():
+                        wait.cancel()
+                await asyncio.gather(*predecessor_waits, return_exceptions=True)
             result = await self._run_one(call, context, invocation, scheduler, claims, permission_resolver,
-                                         available_tool_names, should_interrupt, on_call_started)
+                                         available_tool_names, should_interrupt, on_call_started, on_invocation_state)
             state = ("interrupted" if result.error_code == "mcp_outcome_unknown" else
                      "superseded" if result.error_code == "steering_superseded" else
                      "failed" if result.is_error else "succeeded")
-            self.execution_runtime.update_invocation(invocation, state, error_code=result.error_code,
-                                                     process_id=result.metadata.get("process_id"))
+            await self._report_state(call, invocation, state, on_invocation_state, error_code=result.error_code,
+                                     process_id=result.metadata.get("process_id"))
             if on_result is not None:
                 await on_result(result)
             return result
         except asyncio.CancelledError:
             if invocation.state not in {"succeeded", "failed", "interrupted", "superseded"}:
-                if invocation.state == "running" and self._external_side_effect(call):
-                    self.execution_runtime.update_invocation(invocation, "interrupted", error_code="mcp_outcome_unknown")
-                else:
-                    self.execution_runtime.update_invocation(invocation, "cancelled")
+                # running 通知本身可让出控制权；真正进入外部工具后的取消在 _run_one 标记未知结果。
+                await self._report_state(call, invocation, "cancelled", on_invocation_state)
             raise
         finally:
-            # 后台进程保留资源占用，但不占普通工具的并发额度。
-            if context.resource_lease is not None and not context.resource_lease.transferred:
-                await context.resource_lease.release()
+            # 后台只保留显式进程资源；调用排序锁在句柄返回后结束。
+            if context.resource_lease is not None:
+                await context.resource_lease.finish_invocation()
             completed.set()
+
+    @staticmethod
+    def _predecessor_snapshot(predecessors: list[InvocationInfo]) -> dict:
+        return {"reason": "predecessors", "blockers": [
+            {"session_id": info.session_id or None, "invocation_id": info.invocation_id,
+             "tool_name": info.tool_name, "process_id": info.process_id, "resources": []} for info in predecessors]}
+
+    async def _report_state(self, call: ToolCall, invocation: InvocationInfo, state: str,
+                            callback: InvocationStateCallback | None, **changes) -> None:
+        changes.setdefault("waiting", {})
+        self.execution_runtime.update_invocation(invocation, state, **changes)
+        if callback is not None:
+            # 记录是事实来源；界面拿到独立快照，不能反过来更改真实调用状态。
+            await callback(call, deepcopy(invocation))
 
     async def _run_one(
         self, call: ToolCall, context: ToolContext, invocation: InvocationInfo,
         scheduler: ResourceScheduler, claims: tuple[ResourceClaim, ...],
         permission_resolver: PermissionResolver | None, available_tool_names: set[str] | None,
         should_interrupt: Callable[[], bool] | None, on_call_started: ToolStartedCallback | None,
+        on_invocation_state: InvocationStateCallback | None,
     ) -> ToolExecutionResult:
         self._raise_if_cancelled(context)
         if self._superseded_now(context, should_interrupt):
@@ -196,7 +232,7 @@ class ToolExecutor:
         check = self._permission_engine.evaluate(call=call, tool=tool.definition, context=context)
         approval_signature = self._permission_signature(check)
         if check.decision == "ask":
-            self.execution_runtime.update_invocation(invocation, "awaiting_permission")
+            await self._report_state(call, invocation, "awaiting_permission", on_invocation_state)
         denied = await self._handle_permission_check(call=call, tool_name=tool.definition.name,
                     permission_check=check, permission_resolver=permission_resolver,
                     should_interrupt=should_interrupt, context=context)
@@ -205,11 +241,14 @@ class ToolExecutor:
         self._raise_if_cancelled(context)
         if self._superseded_now(context, should_interrupt):
             return self._superseded(call)
-        self.execution_runtime.update_invocation(invocation, "waiting_resources")
+        await self._report_state(call, invocation, "waiting_resources", on_invocation_state)
+        async def report_waiting(snapshot: dict) -> None:
+            await self._report_state(call, invocation, "waiting_resources", on_invocation_state, waiting=snapshot)
         management = (call.tool_name in {"process_stop", "process_read", "process_list", "process_background"}
                       and (tool.definition.permission is None or tool.definition.permission.source != "external"))
         context.resource_lease = await scheduler.reserve(claims, cancellation_token=context.cancellation_token,
-                                                        counted=not management)
+            counted=not management, owner=ResourceOwner(context.session_id, invocation.invocation_id, call.tool_name),
+            on_wait=report_waiting)
         self._raise_if_cancelled(context)
         if self._superseded_now(context, should_interrupt):
             return self._superseded(call)
@@ -229,7 +268,11 @@ class ToolExecutor:
         self._raise_if_cancelled(context)
         if self._superseded_now(context, should_interrupt):
             return self._superseded(call)
-        self.execution_runtime.update_invocation(invocation, "running")
+        await self._report_state(call, invocation, "running", on_invocation_state)
+        # 状态通知也会让出控制权，停止或新输入可能就在此时到达。
+        self._raise_if_cancelled(context)
+        if self._superseded_now(context, should_interrupt):
+            return self._superseded(call)
         try:
             # 进程工具分别管理本次等待期限和进程运行期限；普通工具超时不能
             # 把这些期限重新合并，也不能在停止流程完成之前打断收尾。
@@ -238,6 +281,9 @@ class ToolExecutor:
             result.call_id, result.tool_name = call.call_id, call.tool_name
             return result
         except asyncio.CancelledError:
+            if self._external_side_effect(call):
+                await self._report_state(call, invocation, "interrupted", on_invocation_state,
+                                         error_code="mcp_outcome_unknown")
             raise
         except asyncio.TimeoutError:
             logger.error("event=tool_execution_timeout tool=%s", call.tool_name)

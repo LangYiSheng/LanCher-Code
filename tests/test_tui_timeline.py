@@ -6,7 +6,7 @@ import pytest
 from rich.console import Console
 from textual.widgets import Static
 
-from lancher_code.models import TraceEntry, TurnEvent, UIConfig
+from lancher_code.models import ToolExecutionResult, TraceEntry, TurnEvent, UIConfig
 from lancher_code.tui_views.message import ThinkingTraceWidget, ToolActivityWidget, ToolCallWidget
 from lancher_code.tui_views.theme import theme_palette
 from lancher_code.tui_views.timeline import _thinking_display_parts, timeline_blocks
@@ -466,3 +466,75 @@ async def test_legacy_trace_keeps_available_order_and_final_body(openai_provider
         assert isinstance(blocks[0], ThinkingTraceWidget)
         assert "旧过程说明" in _text(blocks[1])
         assert "旧会话的最终回答" in _text(app._message_widgets[message.id].query_one(".message-body", Static))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 40), (60, 24), (32, 16)])
+async def test_resource_wait_shows_approval_and_actual_blocker(openai_provider_config, tmp_path, size):
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    message = session.create_assistant_message()
+    process_id = "87654321876543218765432187654321"
+    call = _call("waiting", state="waiting_resources")
+    call.metadata["started"] = False
+    call.metadata["waiting"] = {"reason": "resource_conflict", "blockers": [{
+        "session_id": "12345678123442348123456781234567", "invocation_id": "server-call",
+        "tool_name": "run_command", "process_id": process_id,
+        "resources": [{"kind": "project", "key": str(tmp_path), "mode": "exclusive",
+                       "recursive": True, "lifetime": "process"}],
+    }]}
+    message.trace.entries = [call, _call("finished", state="complete"), _result("finished")]
+    async with app.run_test(size=size) as pilot:
+        await app._mount_message_widget(message)
+        await pilot.pause()
+        widget = app._message_widgets[message.id]
+        group = widget.query_one(ToolActivityWidget)
+        waiting = next(item for item in widget.query(ToolCallWidget) if item.call_id == "waiting")
+        assert waiting.state == "waiting_resources"
+        assert "等待资源" in _text(_header(waiting))
+        assert "待批准" not in _text(_header(waiting))
+        assert "1 项等待资源" in _text(_header(group))
+        assert not waiting.collapsed
+        details = waiting.body.content.plain
+        assert "审批已通过" in details and "尚未开始执行" in details
+        assert process_id in details and f"/tasks show {process_id}" in details
+        assert "项目" in details and "进程运行期间" in details
+        assert _header(waiting).region.right <= size[0]
+        assert app.query_one("#composer").region.bottom <= size[1]
+
+
+def test_waiting_trace_copies_snapshot_and_clears_it_at_start_or_result(openai_provider_config, tmp_path):
+    _, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    message = session.create_assistant_message()
+    message.trace.entries = [_call("a", state="queued")]
+    snapshot = {"reason": "capacity", "limit": 8, "blockers": []}
+    session.set_trace_tool_state(message.id, "a", "waiting_resources", waiting=snapshot)
+    snapshot["blockers"].append({"process_id": "later-change"})
+    call = message.trace.entries[0]
+    assert call.metadata["waiting"]["blockers"] == []
+    assert not call.metadata.get("started")
+    session.set_trace_tool_state(message.id, "a", "running")
+    assert call.metadata["started"] is True
+    assert "waiting" not in call.metadata
+    session.set_trace_tool_state(message.id, "a", "waiting_resources", waiting=snapshot)
+    session.append_trace_tool_results(message.id, [ToolExecutionResult(
+        call_id="a", tool_name="read_file", summary="停止", content="停止", is_error=True,
+        error_code="tool_result_interrupted")])
+    assert "waiting" not in call.metadata
+
+
+@pytest.mark.parametrize("transition", ["cancel", "recover"])
+def test_resource_wait_closes_at_round_cancel_or_interrupted_restore(
+    openai_provider_config, tmp_path, transition,
+):
+    _, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    message = session.create_assistant_message()
+    call = _call("waiting", state="waiting_resources")
+    call.metadata.update(started=False, waiting={"reason": "resource_conflict", "blockers": []})
+    message.trace.entries = [call]
+    if transition == "cancel":
+        session.cancel_message(message.id)
+    else:
+        session._recover_interrupted_history(session.state, session.transcript)
+    assert call.metadata["state"] == "cancelled"
+    assert call.metadata["started"] is False
+    assert "waiting" not in call.metadata

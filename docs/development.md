@@ -128,8 +128,8 @@ uv run pyinstaller --clean --noconfirm lancher.spec
 
 ## 给工具声明资源
 
-新工具可实现 `resource_claims(arguments, context)`，返回 `ResourceClaim`；声明由工具代码提供，不能信任模型自己提供的安全标签。相同文件的共享读可以并行，独占写与它冲突；目录声明需要考虑 recursive。多个资源一次取得，租约转交给进程以后由退出清理释放。
+新工具可实现 `resource_claims(arguments, context)`，返回 `ResourceClaim`；声明由工具代码提供，不能信任模型自己提供的安全标签。相同文件的共享读可以并行，独占写与它冲突；目录声明需要考虑 recursive。多个资源一次取得，调用返回后释放 `lifetime=invocation` 部分，`lifetime=process` 部分由真实进程保留到退出。没有真实长进程的工具仍在调用结束释放全部资源。
 
-没有资源声明时默认项目独占。MCP 的 readOnlyHint 只决定阶段与权限能力，不能证明它与其他操作没有资源冲突。新增后端要实现现有 ProcessBackend，不在 Tool.execute 里另藏不受Session管理的长进程。
+没有资源声明时默认在本次调用期间项目独占；未知Shell返回后台句柄后释放调用期锁，未声明MCP在本次调用结束释放。profile资源默认 `process`，应按真实持续占用明确配置；允许默认后台服务与后续请求共存，不等于后台命令没有文件副作用。MCP 的 readOnlyHint 只决定阶段与权限能力，不能证明它与其他操作没有资源冲突。新增后端要实现现有 ProcessBackend，不在 Tool.execute 里另藏不受Session管理的长进程。
 
 先用 [工具执行](workflows/tool-execution.md) 的场景确认归属、取消和提交边界，再写测试：取消发生在资源排队、审批通过后、系统创建期间和文件提交边界，都应有明确结果。事件写入失败时阻止新副作用，停止现存进程仍要完成。

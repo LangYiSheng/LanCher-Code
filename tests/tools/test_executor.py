@@ -15,7 +15,7 @@ from lancher_code.models import (
     ToolPermissionMetadata,
 )
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
-from lancher_code.execution.contracts import ResourceClaim
+from lancher_code.execution.contracts import ResourceClaim, ResourceOwner
 from lancher_code.execution.contracts import ExecutionConfig, ExecutionLimits
 from lancher_code.execution.runtime import ExecutionRuntime
 from lancher_code.execution.scheduler import get_project_scheduler, path_claim, project_claim
@@ -430,6 +430,183 @@ class FileControlledTool(ControlledTool):
 
 
 @pytest.mark.asyncio
+async def test_default_background_command_releases_fallback_after_returning_handle(tmp_path: Path) -> None:
+    class BackgroundCommand:
+        definition = ToolDefinition("run_command", "", category="command")
+        lease = None
+
+        async def execute(self, arguments, context):
+            self.lease = context.resource_lease
+            self.lease.transfer()
+            self.lease.bind_process("server")
+            return ToolExecutionResult("", "run_command", content="后台句柄", metadata={"process_id": "server"})
+
+    command = BackgroundCommand()
+    file = FileControlledTool()
+    file.release.set()
+    registry = ToolRegistry()
+    registry.register(command)
+    registry.register(file)
+    executor = ToolExecutor(registry, cwd=tmp_path)
+    result, = await executor.execute_calls([_call("run_command", {"command": "python server.py",
+        "description": "启动服务", "lifetime": "session"})], permission_policy="bypass")
+    assert result.ok and command.lease.transferred
+    try:
+        assert (await asyncio.wait_for(executor.execute_calls([
+            _call("write_file", {"path": "client.py", "content": "请求服务"})], permission_policy="bypass"), 1))[0].ok
+        assert command.lease.released
+    finally:
+        await command.lease.release()
+
+
+@pytest.mark.asyncio
+async def test_approved_call_reports_real_waiting_resource_and_clears_it_at_start(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    tool = FileControlledTool()
+    tool.release.set()
+    registry.register(tool)
+    scheduler = get_project_scheduler(tmp_path)
+    owner = await scheduler.reserve([project_claim(tmp_path)],
+        owner=ResourceOwner("background-session", "background-invocation", "run_command", "server"))
+    updates = asyncio.Queue()
+
+    async def on_state(call, invocation):
+        await updates.put(invocation.to_dict())
+
+    async def resolver(request):
+        return PermissionResolution(request.request_id, "allow_once")
+
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path).execute_calls(
+        [_call("write_file", {"path": "a", "content": "new"})], permission_resolver=resolver,
+        on_invocation_state=on_state))
+    try:
+        states = []
+        while True:
+            update = await asyncio.wait_for(updates.get(), 1)
+            states.append(update["state"])
+            if update["waiting"].get("blockers"):
+                break
+        assert "awaiting_permission" in states and update["state"] == "waiting_resources"
+        assert update["waiting"]["blockers"][0]["process_id"] == "server"
+        assert not tool.entered.is_set()
+        await owner.release()
+        assert (await asyncio.wait_for(task, 1))[0].ok
+        remaining = []
+        while not updates.empty():
+            remaining.append(updates.get_nowait())
+        assert [item["state"] for item in remaining] == ["running", "succeeded"]
+        assert all(item["waiting"] == {} for item in remaining)
+    finally:
+        await owner.release()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_same_batch_predecessor_is_queued_before_permission_or_resource_wait(tmp_path: Path) -> None:
+    tool = FileControlledTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    updates = asyncio.Queue()
+
+    async def on_state(call, invocation):
+        await updates.put((call.call_id, invocation.to_dict()))
+
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path).execute_calls([
+        _call("write_file", {"path": "a", "content": "first"}),
+        _call("write_file", {"path": "a", "content": "second"}, index=1)],
+        permission_policy="bypass", on_invocation_state=on_state))
+    try:
+        await asyncio.wait_for(tool.entered.wait(), 1)
+        before = []
+        while not updates.empty():
+            before.append(updates.get_nowait())
+        second = [item for call_id, item in before if call_id == "call-1"]
+        assert len(second) == 1 and second[0]["state"] == "queued"
+        assert second[0]["waiting"]["reason"] == "predecessors"
+        assert second[0]["waiting"]["blockers"][0]["invocation_id"]
+        tool.release.set()
+        assert all(result.ok for result in await asyncio.wait_for(task, 1))
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_arriving_in_running_state_callback_prevents_real_execution(tmp_path: Path) -> None:
+    tool = FileControlledTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    token = CancellationToken()
+
+    async def on_state(call, invocation):
+        if invocation.state == "running":
+            token.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await ToolExecutor(registry, cwd=tmp_path).execute_calls([
+            _call("write_file", {"path": "a", "content": "不能执行"})],
+            permission_policy="bypass", cancellation_token=token, on_invocation_state=on_state)
+    assert not tool.entered.is_set()
+    scheduler = get_project_scheduler(tmp_path)
+    assert scheduler.active_count == scheduler.waiting_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed_index", [0, 1])
+async def test_completed_predecessor_disappears_while_other_predecessor_still_runs(
+    tmp_path: Path, completed_index: int,
+) -> None:
+    releases = {name: asyncio.Event() for name in ["first", "second", "third"]}
+    entered = {name: asyncio.Event() for name in releases}
+    queued = asyncio.Queue()
+
+    class MultiResourceTool:
+        definition = ToolDefinition("write_file", "", category="write")
+
+        def resource_claims(self, arguments, context):
+            return tuple(path_claim(context.cwd / path, write=True) for path in arguments["locks"])
+
+        async def execute(self, arguments, context):
+            name = arguments["label"]
+            entered[name].set()
+            await releases[name].wait()
+            return ToolExecutionResult("", "write_file", content=name)
+
+    async def on_state(call, invocation):
+        if call.call_id == "call-2" and invocation.state == "queued":
+            await queued.put(invocation.to_dict())
+
+    registry = ToolRegistry()
+    registry.register(MultiResourceTool())
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path).execute_calls([
+        _call("write_file", {"label": "first", "locks": ["a"], "path": "a", "content": "a"}),
+        _call("write_file", {"label": "second", "locks": ["b"], "path": "b", "content": "b"}, index=1),
+        _call("write_file", {"label": "third", "locks": ["a", "b"], "path": "a", "content": "c"}, index=2)],
+        permission_policy="bypass", on_invocation_state=on_state))
+    try:
+        await asyncio.wait_for(entered["first"].wait(), 1)
+        await asyncio.wait_for(entered["second"].wait(), 1)
+        before = await asyncio.wait_for(queued.get(), 1)
+        assert len(before["waiting"]["blockers"]) == 2
+        ids = [item["invocation_id"] for item in before["waiting"]["blockers"]]
+        names = ["first", "second"]
+        releases[names[completed_index]].set()
+        after = await asyncio.wait_for(queued.get(), 1)
+        assert [item["invocation_id"] for item in after["waiting"]["blockers"]] == [ids[1 - completed_index]]
+        assert ids[0] != ids[1] and not entered["third"].is_set()
+        releases[names[1 - completed_index]].set()
+        await asyncio.wait_for(entered["third"].wait(), 1)
+        releases["third"].set()
+        assert all(result.ok for result in await asyncio.wait_for(task, 1))
+    finally:
+        for event in releases.values():
+            event.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_independent_file_writes_start_in_parallel(tmp_path: Path) -> None:
     tool = FileControlledTool()
     registry = ToolRegistry()
@@ -608,6 +785,29 @@ class RemoteControlledTool(ControlledTool):
     def __init__(self, *, read_only: bool = False):
         super().__init__(ToolDefinition("mcp__test__operation", "", category="read" if read_only else "command",
             permission=ToolPermissionMetadata("external", "mcp__test__operation", "远端操作")))
+
+
+@pytest.mark.asyncio
+async def test_remote_cancel_during_running_notification_is_not_unknown_outcome(tmp_path: Path) -> None:
+    tool = RemoteControlledTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    runtime = ExecutionRuntime(tmp_path)
+    token = CancellationToken()
+    states = []
+
+    async def on_state(call, invocation):
+        states.append(invocation.to_dict())
+        if invocation.state == "running":
+            token.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime).execute_calls([
+            _call(tool.definition.name, {})], permission_policy="bypass",
+            cancellation_token=token, on_invocation_state=on_state)
+    assert not tool.entered.is_set()
+    assert states[-1]["state"] == "cancelled" and states[-1]["error_code"] is None
+    assert runtime.list_invocations(None)[0]["state"] == "cancelled"
 
 
 @pytest.mark.asyncio

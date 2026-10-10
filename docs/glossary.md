@@ -22,7 +22,7 @@
 | Invocation | 一次工具请求的应用身份与状态；保留模型的调用 ID，和真实进程生命周期分开 |
 | Process | 所属 Session 托管的真实进程，以应用 UUID 标识；PID 仅作诊断信息 |
 | SessionRuntime | 绑定原对话状态、写入者与后台资源；界面切换后仍能保存原会话事件 |
-| ResourceClaim / Lease | 工具的资源需求及实际授予租约；进程接管租约后到退出才释放 |
+| ResourceClaim / Lease | 工具的资源需求及实际授予租约；invocation资源在调用结束释放，process资源由真实进程保留到退出 |
 | generation | Session 执行代次；停止后拒绝旧审批、旧执行请求和迟到回调 |
 | 输出游标 | 累计 UTF-8 解码字符位置；模型与界面各自续读，不消费另一观察者的数据 |
 | 收件箱 | 后台完成事件在 Session 的投影；下次正常请求才交给模型，不自动开轮 |

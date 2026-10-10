@@ -8,6 +8,7 @@ from typing import Literal
 
 ResourceKind = Literal["path", "process", "project", "external"]
 ResourceMode = Literal["shared", "exclusive"]
+ResourceLifetime = Literal["invocation", "process"]
 ProcessLifetime = Literal["turn", "session"]
 ProcessTransport = Literal["pipe", "pty"]
 
@@ -18,6 +19,16 @@ class ResourceClaim:
     key: str
     mode: ResourceMode = "exclusive"
     recursive: bool = False
+    lifetime: ResourceLifetime = "process"
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceOwner:
+    """排队诊断只携带身份，不复制命令正文或进程输入。"""
+    session_id: str | None = None
+    invocation_id: str | None = None
+    tool_name: str | None = None
+    process_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +118,8 @@ class InvocationInfo:
     updated_at: str | None = None
     error_code: str | None = None
     process_id: str | None = None
+
+    waiting: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

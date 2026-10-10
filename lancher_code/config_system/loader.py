@@ -157,15 +157,18 @@ def _load_execution(raw: Any) -> ExecutionConfig:
         for claim in resources:
             if not isinstance(claim, dict) or claim.get('kind') not in {'path', 'process', 'project', 'external'}:
                 raise ConfigError(f'{label}.resources.kind 无效。')
-            if set(claim) - {'kind', 'key', 'mode', 'recursive'}:
+            if set(claim) - {'kind', 'key', 'mode', 'recursive', 'lifetime'}:
                 raise ConfigError(f'{label}.resources 含有未知配置项。')
             key = _require_non_empty_string(claim, 'key', f'{label}.resources.key')
             mode, recursive = claim.get('mode', 'exclusive'), claim.get('recursive', False)
+            lifetime = claim.get('lifetime', 'process')
             if mode not in {'shared', 'exclusive'} or type(recursive) is not bool:
                 raise ConfigError(f'{label}.resources 的 mode 或 recursive 无效。')
             if claim['kind'] != 'path' and recursive:
                 raise ConfigError('recursive 只适用于路径资源。')
-            claims.append(ResourceClaim(claim['kind'], key, mode, recursive))
+            if not isinstance(lifetime, str) or lifetime not in {'invocation', 'process'}:
+                raise ConfigError(f'{label}.resources.lifetime 必须为 invocation 或 process。')
+            claims.append(ResourceClaim(claim['kind'], key, mode, recursive, lifetime))
         probe_raw = item.get('readiness')
         probe = None
         if probe_raw is not None:

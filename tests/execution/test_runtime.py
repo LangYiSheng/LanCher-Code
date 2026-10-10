@@ -4,15 +4,17 @@ import asyncio
 import json
 import os
 import shlex
+import shutil
 import sys
 from uuid import uuid4
 
 import pytest
 
-from lancher_code.execution.contracts import CommandProfile, ExecutionConfig, ProcessInfo
+from lancher_code.execution.contracts import CommandProfile, ExecutionConfig, ExecutionLimits, ProcessInfo, ResourceClaim
 from lancher_code.execution.runtime import ExecutionRuntime
+from lancher_code.execution.scheduler import get_project_scheduler
 from lancher_code.errors import ConfigError
-from lancher_code.models import StreamEvent, ToolCall, ToolCallChunk, ToolDefinition, ToolPermissionMetadata
+from lancher_code.models import PermissionResolution, StreamEvent, ToolCall, ToolCallChunk, ToolDefinition, ToolPermissionMetadata
 from lancher_code.session import SessionController
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.core.executor import ToolExecutor
@@ -33,8 +35,9 @@ class IdleProvider:
         yield StreamEvent(kind='message_end')
 
 
-def setup_runtime(tmp_path, provider_config, provider=None):
-    runtime = ExecutionRuntime(tmp_path, ExecutionConfig(command_profiles=[CommandProfile('测试脚本', '*')]))
+def setup_runtime(tmp_path, provider_config, provider=None, *, execution_config=None):
+    config = execution_config or ExecutionConfig(command_profiles=[CommandProfile('测试脚本', '*')])
+    runtime = ExecutionRuntime(tmp_path, config)
     session = SessionController(provider_config, cwd=tmp_path, initial_permission_policy='bypass')
     registry = create_default_tool_registry()
     executor = ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime)
@@ -278,6 +281,158 @@ async def test_restart_marks_unknown_execution_lost_without_replaying(tmp_path, 
     finally:
         await next_runner.shutdown()
         restored.close()
+
+
+@pytest.mark.parametrize('client', ['python', 'curl'])
+@pytest.mark.asyncio
+async def test_unknown_background_http_server_allows_approved_clients_and_file_tools(
+    tmp_path, openai_provider_config, client,
+):
+    """未知后台 Shell 只串行启动调用；返回句柄后，已批准的请求和文件工具仍能工作。"""
+    curl = shutil.which('curl.exe' if os.name == 'nt' else 'curl')
+    if client == 'curl' and curl is None:
+        pytest.skip('当前平台没有安装 curl，Python 客户端场景仍覆盖真实 HTTP 请求。')
+    config = ExecutionConfig(limits=ExecutionLimits(stop_grace_seconds=.05, drain_timeout_seconds=1))
+    runtime, session, executor, runner = setup_runtime(tmp_path, openai_provider_config, execution_config=config)
+    session.create_user_message('后台服务启动后继续检查页面')
+    (tmp_path / 'index.html').write_text('HTTP-RESOURCE-SCOPE', encoding='utf-8')
+    approved_commands = []
+
+    async def approve(request):
+        approved_commands.append(request.command)
+        return PermissionResolution(request.request_id, 'allow_once')
+
+    async def execute(name, arguments):
+        result, = await executor.execute_calls(
+            [ToolCall(0, uuid4().hex, name, arguments, json.dumps(arguments))],
+            session_id=session.session_id, session_workspace=session.paths.workspace,
+            session_root=session.paths.root, turn_id='http-check', permission_policy='default',
+            permission_resolver=approve,
+        )
+        assert result.ok, result.error_message
+        return result
+
+    process_id = None
+    try:
+        script = ("from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler;"
+                  "server=ThreadingHTTPServer(('127.0.0.1',0),SimpleHTTPRequestHandler);"
+                  "print('SERVER-PORT='+str(server.server_port),flush=True);server.serve_forever()")
+        server = await asyncio.wait_for(execute('run_command', {
+            'description': '启动本地 HTTP 服务', 'command': python_command(script),
+            'yield_ms': 0, 'lifetime': 'session',
+        }), 5)
+        process_id = server.metadata['process_id']
+        assert server.metadata['status'] == 'running'
+        async with asyncio.timeout(5):
+            while True:
+                lines = runtime.processes.read(process_id, session.session_id).text.splitlines()
+                ports = [line.removeprefix('SERVER-PORT=') for line in lines if line.startswith('SERVER-PORT=')]
+                if ports:
+                    port = int(ports[0])
+                    break
+                await asyncio.sleep(.01)
+        url = f'http://127.0.0.1:{port}/'
+        if client == 'python':
+            client_command = python_command(
+                f"import urllib.request;print(urllib.request.urlopen({url!r},timeout=3).read().decode())")
+        elif os.name == 'nt':
+            client_command = f"& '{curl.replace(chr(39), chr(39)*2)}' --silent --show-error --fail --max-time 3 {url}"
+        else:
+            client_command = f'{shlex.quote(curl)} --silent --show-error --fail --max-time 3 {url}'
+        response = await asyncio.wait_for(execute('run_command', {
+            'description': '已批准的 HTTP 客户端', 'command': client_command, 'yield_ms': 5000,
+        }), 7)
+        assert client_command in approved_commands
+        assert response.metadata['exit_code'] == 0 and 'HTTP-RESOURCE-SCOPE' in response.content
+        assert runtime.processes.get(process_id, session.session_id).status == 'running'
+        read = await asyncio.wait_for(execute('read_file', {'path': 'index.html'}), 2)
+        assert 'HTTP-RESOURCE-SCOPE' in read.content
+        await asyncio.wait_for(execute('write_file', {'path': 'client-check.txt', 'content': '文件工具仍可写入'}), 2)
+        assert (tmp_path / 'client-check.txt').read_text(encoding='utf-8') == '文件工具仍可写入'
+        assert runtime.processes.get(process_id, session.session_id).status == 'running'
+        await runtime.processes.stop(process_id, session.session_id)
+        assert not runtime.processes.active_session(session.session_id)
+        assert get_project_scheduler(tmp_path).active_count == 0
+    finally:
+        await runner.shutdown()
+        session.close()
+
+
+@pytest.mark.parametrize('resource_kind', ['project', 'path'])
+@pytest.mark.asyncio
+async def test_explicit_process_profile_blocks_until_real_exit_and_reports_process_owner(
+    tmp_path, openai_provider_config, resource_kind,
+):
+    """显式资源约定持续到真实退出；等待信息必须指向后台进程，而非已完成的调用。"""
+    held = tmp_path / 'held'
+    held.mkdir()
+    server_command = python_command("print('PROFILE-READY',flush=True);input();print('PROFILE-EXIT')")
+    key = str(tmp_path) if resource_kind == 'project' else 'held'
+    claim = ResourceClaim(resource_kind, key, recursive=True)
+    config = ExecutionConfig(limits=ExecutionLimits(stop_grace_seconds=.05, drain_timeout_seconds=1),
+        command_profiles=[CommandProfile('显式进程资源', server_command, resources=(claim,))])
+    runtime, session, executor, runner = setup_runtime(tmp_path, openai_provider_config, execution_config=config)
+    session.create_user_message('等待已声明资源的后台进程退出')
+    waiting = None
+    process_id = None
+
+    async def execute(name, arguments, *, call_id=None, on_started=None):
+        result, = await executor.execute_calls(
+            [ToolCall(0, call_id or uuid4().hex, name, arguments, json.dumps(arguments))],
+            session_id=session.session_id, session_workspace=session.paths.workspace,
+            session_root=session.paths.root, turn_id='profile-turn', permission_policy='bypass',
+            on_call_started=on_started,
+        )
+        assert result.ok, result.error_message
+        return result
+
+    async def after_real_cleanup(call):
+        assert runtime.processes._processes[process_id].done.is_set()
+        assert runtime.processes.get(process_id, session.session_id).exit_code == 0
+
+    try:
+        server = await asyncio.wait_for(execute('run_command', {
+            'description': '持有已声明资源', 'command': server_command, 'yield_ms': 0, 'lifetime': 'session',
+        }), 5)
+        process_id = server.metadata['process_id']
+        waiter_id = uuid4().hex
+        waiting = asyncio.create_task(execute('write_file', {'path': 'held/result.txt', 'content': '退出后写入'},
+            call_id=waiter_id, on_started=after_real_cleanup))
+        async with asyncio.timeout(5):
+            while True:
+                invocation = next((item for item in runtime.list_invocations(session.session_id)
+                                   if item['provider_call_id'] == waiter_id), None)
+                if invocation and invocation['state'] == 'waiting_resources' and invocation['waiting'].get('blockers'):
+                    break
+                await asyncio.sleep(.01)
+        blocker, = invocation['waiting']['blockers']
+        assert invocation['waiting']['reason'] == 'resource_conflict'
+        assert blocker['process_id'] == process_id
+        assert blocker['invocation_id'] == server.metadata['origin_invocation_id']
+        assert blocker['session_id'] == session.session_id and blocker['tool_name'] == 'run_command'
+        assert blocker['resources'][0]['kind'] == resource_kind
+        assert blocker['resources'][0]['lifetime'] == 'process'
+        assert not waiting.done() and not (held / 'result.txt').exists()
+        if resource_kind == 'path':
+            await asyncio.wait_for(execute('write_file', {'path': 'independent.txt', 'content': '独立路径可写'}), 2)
+            assert not waiting.done()
+        assert runtime.processes.get(process_id, session.session_id).status == 'running'
+        # process_write 只需要 stdin 管理锁，能让持有项目资源的服务自行结束。
+        await asyncio.wait_for(execute('process_write', {'process_id': process_id, 'text': '\n'}), 3)
+        ended = await runtime.processes.wait(process_id, session.session_id, timeout_ms=5000)
+        assert ended.status == 'exited' and ended.exit_code == 0
+        await asyncio.wait_for(waiting, 5)
+        assert (held / 'result.txt').read_text(encoding='utf-8') == '退出后写入'
+        completed = next(item for item in runtime.list_invocations(session.session_id) if item['provider_call_id'] == waiter_id)
+        assert completed['state'] == 'succeeded' and completed['waiting'] == {}
+        assert not runtime.processes.active_session(session.session_id)
+        assert get_project_scheduler(tmp_path).active_count == 0
+    finally:
+        await runner.shutdown()
+        if waiting is not None:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+        session.close()
 
 
 @pytest.mark.asyncio

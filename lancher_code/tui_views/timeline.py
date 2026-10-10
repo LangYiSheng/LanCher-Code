@@ -127,11 +127,52 @@ TOOL_LABELS = {
 }
 STATE_LABELS = {
     "queued": "等待执行", "running": "执行中", "awaiting_permission": "待批准",
+    "waiting_resources": "等待资源",
     "complete": "✓ 完成", "error": "× 失败", "cancelled": "已停止", "skipped": "已跳过",
     "not_executed": "未执行", "unknown": "结果未知",
 }
-ACTIVE_STATES = {"queued", "running", "awaiting_permission"}
-ISSUE_STATES = {"error", "cancelled", "skipped", "awaiting_permission", "not_executed", "unknown"}
+ACTIVE_STATES = {"queued", "running", "awaiting_permission", "waiting_resources"}
+ISSUE_STATES = {"error", "cancelled", "skipped", "awaiting_permission", "waiting_resources", "not_executed", "unknown"}
+
+
+def waiting_description(waiting: object, state: str) -> list[str]:
+    """调度器给出事实，展示层只翻译原因，不从运行中的任务猜测阻塞者。"""
+    if not isinstance(waiting, dict):
+        waiting = {}
+    lines = ["审批已通过，尚未开始执行。"] if state == "waiting_resources" else []
+    reason = waiting.get("reason")
+    reasons = {
+        "resource_conflict": "等待冲突资源释放。",
+        "capacity": "等待普通工具并发名额。",
+        "fifo": "前方有访问冲突资源的调用，按排队顺序等待。",
+        "predecessors": "等待本批次前序调用完成；尚未进行当前调用的审批。",
+    }
+    if reason in reasons:
+        lines.append(reasons[reason])
+    blockers = waiting.get("blockers", [])
+    if reason == "capacity" and isinstance(blockers, list) and "limit" in waiting:
+        lines.append(f"并发名额：{len(blockers)} / {waiting['limit']}")
+    for blocker in blockers if isinstance(blockers, list) else []:
+        if not isinstance(blocker, dict):
+            continue
+        process_id = blocker.get("process_id")
+        if process_id:
+            lines.append(f"阻塞进程：{process_id}")
+            lines.append(f"在所属会话中使用 /tasks show {process_id} 查看或停止。")
+        elif blocker.get("invocation_id"):
+            lines.append(f"阻塞调用：{blocker.get('tool_name') or '工具'} · {blocker['invocation_id']}")
+        if blocker.get("session_id"):
+            lines.append(f"所属会话：{blocker['session_id']}")
+        resources = blocker.get("resources", [])
+        for resource in resources if isinstance(resources, list) else []:
+            if not isinstance(resource, dict):
+                continue
+            kind = {"project": "项目", "path": "路径", "external": "外部资源", "process": "进程控制"}.get(
+                str(resource.get("kind")), str(resource.get("kind", "资源")))
+            mode = "共享" if resource.get("mode") == "shared" else "独占"
+            lifetime = "本次调用期间" if resource.get("lifetime") == "invocation" or not process_id else "进程运行期间"
+            lines.append(f"资源：{kind}{mode} · {lifetime} · {resource.get('key', '')}")
+    return lines
 
 
 def call_state(call: TraceEntry, result: TraceEntry | None, status: str) -> str:
@@ -196,6 +237,10 @@ class ToolCallWidget(TraceSection):
         if self.body.display:
             details = Text(style=colors["muted"], overflow="fold")
             details.append(self.call.tool_name or name)
+            waiting = self.call.metadata.get("waiting")
+            if state == "waiting_resources" or waiting:
+                for line in waiting_description(waiting, state):
+                    details.append("\n" + line, style=colors["warning"])
             if self.call.arguments:
                 details.append("\n" + json.dumps(self.call.arguments, ensure_ascii=False, indent=2, default=str))
             if self.result is not None:
@@ -286,7 +331,7 @@ class ToolActivityWidget(TraceSection):
         active = [state for state in states if state in ACTIVE_STATES]
         labels = []
         if active:
-            for state in ("running", "awaiting_permission", "queued", "complete"):
+            for state in ("running", "waiting_resources", "awaiting_permission", "queued", "complete"):
                 count = states.count(state)
                 if count:
                     labels.append(f"{count} 项{STATE_LABELS[state].removeprefix('✓ ')}")

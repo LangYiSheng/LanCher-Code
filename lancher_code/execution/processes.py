@@ -148,6 +148,10 @@ class ProcessSupervisor:
             if resource_lease is not None:
                 resource_lease.transfer()
                 entry.lease = resource_lease
+                bind_process = getattr(resource_lease, "bind_process", None)
+                if callable(bind_process):
+                    # 等待者需要知道现在由哪个真实进程占用资源，不能继续只显示启动调用。
+                    bind_process(process_id)
         spawn_task = asyncio.create_task(spawn_backend(spec.command, cwd, transport=spec.transport,
                                                        columns=spec.columns, rows=spec.rows))
         token_task = asyncio.create_task(cancellation_token.wait()) if cancellation_token is not None else None

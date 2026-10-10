@@ -70,6 +70,8 @@ run_user_turn(text)
        f. 有工具调用：
           · 写 transcript、发 tool_call_started 事件
           · ToolExecutor.execute_calls(...) 执行
+          · on_invocation_state：已提交状态 → 对话trace与progress；资源等待带真实阻塞快照
+          · on_call_started：进入执行阶段；开始与终态清除旧等待说明
           · 收集 discovered_tool_names（MCP 延迟加载）
           · 发 tool_result_received 事件
           · 未知工具熔断检查（连续 N 次 tool_not_found 停止）
@@ -96,6 +98,7 @@ run_user_turn(text)
 ## 关键设计
 
 - **取消语义**：取消令牌与 Session generation 贯穿审批、资源排队和执行；停止本轮会收尾本轮进程，保留明确交给 Session 的后台进程。取消或失败暂停队列；应用退出通过执行 Runtime 清理所有托管资源。
+- **取消事实**：trace绑定稳定invocation_id；运行通知中取消但尚未进入远端execute时，按已提交cancelled终态保留未启动。真正进入远端写工具后的interrupted保留结果未知，不把运行标签直接等同远端请求已发出。
 - **停止范围**：`stop_session()` 等到本轮及会话后台全部回收；期间拒绝新轮次与文件执行。用户实际提交的进程输入由独立 Runtime 控制任务持有，关闭详情页不撤销输入。
 - **权限挂起**：工具需要确认时，`_request_permission()` 创建 Future 并发送 `permission_request_created`；UI 挂载面板后继续消费事件，用户决议按请求 ID 回传。面板通过 closed 事件移除，过期请求无效。
 - **补充边界**：当前响应结束或正在运行的并发工具组结束后生效；后续工具补齐 `steering_superseded` 结果而不执行。撤销旧审批使用独立 superseded 决议，不写规则，也不伪装为用户拒绝。

@@ -62,7 +62,9 @@ execution:
     max_read_chars: 16000
     stop_grace_seconds: 1.0
     drain_timeout_seconds: 3.0
-  # 只有你填写的命令约定才会缩小资源范围；未知命令仍独占项目。
+  # 未知命令在启动调用期间独占项目；返回后台句柄后释放这把临时锁。
+  # 明确声明的资源默认 lifetime: process，持续到真实进程退出。
+  # 仅启动期间需要的资源可配置 lifetime: invocation。
   # 约定不限制 Shell 实际副作用，建议精确匹配已知脚本。
   command_profiles: []
   # 示例（确定脚本只写 .cache 且监听 5173 后再启用）：
@@ -70,5 +72,5 @@ execution:
   #   command_match: npm run dev
   #   resources:
   #     - {kind: path, key: .cache, mode: exclusive, recursive: true}
-  #     - {kind: external, key: 'port:5173', mode: exclusive}
+  #     - {kind: external, key: 'port:5173', mode: exclusive, lifetime: process}
   #   readiness: {kind: tcp, host: 127.0.0.1, port: 5173, timeout_ms: 30000}

@@ -151,6 +151,8 @@ class ExecutionRuntime:
     def update_invocation(self, info: InvocationInfo, state: str, **changes) -> None:
         info.state = state
         info.updated_at = datetime.now(timezone.utc).isoformat()
+        if state != 'waiting_resources':
+            info.waiting = {}
         for key, value in changes.items():
             if not hasattr(info, key):
                 raise ValueError(f"未知调用字段：{key}")
@@ -204,15 +206,18 @@ class ExecutionRuntime:
                         path = Path(key)
                         key = str((path if path.is_absolute() else self.project_root / path).resolve())
                     if claim.kind == 'path':
-                        claims.append(path_claim(Path(key), write=claim.mode == 'exclusive', recursive=claim.recursive))
+                        claims.append(path_claim(Path(key), write=claim.mode == 'exclusive', recursive=claim.recursive,
+                                                 lifetime=claim.lifetime))
                     elif claim.kind == 'project':
                         path = Path(key)
                         project = project_claim(path if path.is_absolute() else self.project_root / path)
-                        claims.append(ResourceClaim('project', project.key, claim.mode, True))
+                        claims.append(ResourceClaim('project', project.key, claim.mode, True, claim.lifetime))
                     else:
-                        claims.append(ResourceClaim(claim.kind, key, claim.mode, claim.recursive))
+                        claims.append(ResourceClaim(claim.kind, key, claim.mode, claim.recursive, claim.lifetime))
                 return tuple(claims)
-        return (project_claim(self.project_root),)
+        # 未声明命令只在启动调用期间保守排序；后台句柄返回后不能锁住整个项目。
+        # 明确配置的端口、输出目录等资源才随真实进程长期保留。
+        return (project_claim(self.project_root, lifetime='invocation'),)
 
     def command_readiness(self, command: str):
         command = command.strip()
@@ -251,7 +256,7 @@ class ExecutionRuntime:
         terminal = {"succeeded", "failed", "cancelled", "superseded", "interrupted"}
         for info in list(binding.state.execution["invocations"].values()):
             if info["state"] not in terminal:
-                self.record_event(session_id, "invocation.interrupted", dict(info, state="interrupted"),
+                self.record_event(session_id, "invocation.interrupted", dict(info, state="interrupted", waiting={}),
                                   turn_id=info.get("turn_id"))
 
     async def close(self) -> None:

@@ -266,22 +266,27 @@ async def test_restart_marks_records_lost_without_pid_adoption(tmp_path):
     await manager.close()
 
 
+@pytest.mark.parametrize("supports_binding", [False, True])
 @pytest.mark.asyncio
-async def test_process_capacity_and_resource_lease_retained_until_exit(tmp_path):
+async def test_process_capacity_and_resource_lease_retained_until_exit(tmp_path, supports_binding):
     manager = supervisor(tmp_path, max_processes_per_session=1)
     sid = uuid4().hex
     class Lease:
         transferred = False
         released = False
+        process_id = None
         def transfer(self):
             self.transferred = True
         async def release(self):
             self.released = True
     lease = Lease()
+    if supports_binding:
+        lease.bind_process = lambda process_id: setattr(lease, "process_id", process_id)
     try:
         info = await manager.start(ProcessSpec(command("import time;time.sleep(30)"), "锁", tmp_path, yield_ms=0),
             session_id=sid, turn_id="turn", invocation_id="invoke", resource_lease=lease)
         assert lease.transferred and not lease.released
+        assert lease.process_id == (info.process_id if supports_binding else None)
         with pytest.raises(RuntimeError):
             await start(manager, tmp_path, "print(1)", session_id=sid)
         await manager.stop(info.process_id, sid)
@@ -296,14 +301,21 @@ async def test_stop_process_tree_with_inherited_pipes(tmp_path):
     pid_file = tmp_path / "child.pid"
     script = ("import subprocess,sys,time,pathlib;"
               "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
-              f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid));time.sleep(30)")
+              f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid)+'\\n');time.sleep(30)")
     try:
         info, sid = await start(manager, tmp_path, script, yield_ms=0)
+        child = None
         for _ in range(100):
-            if pid_file.is_file():
+            try:
+                raw_pid = pid_file.read_text()
+            except FileNotFoundError:
+                raw_pid = ""
+            # 文件创建先于写入；末尾换行代表完整记录，不能把空内容或半个 PID 当成就绪。
+            if raw_pid.endswith("\n") and raw_pid.strip().isdecimal() and int(raw_pid.strip()) > 0:
+                child = int(raw_pid.strip())
                 break
             await asyncio.sleep(.05)
-        child = int(pid_file.read_text())
+        assert child is not None, "子进程没有及时保存完整 PID。"
         if os.name == "nt":
             kernel = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel.OpenProcess.restype = ctypes.c_void_p

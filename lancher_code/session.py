@@ -384,11 +384,19 @@ class SessionController:
         return message
 
     @persist_change()
-    def set_trace_tool_state(self, message_id: str, call_id: str, state: str) -> SessionMessage:
+    def set_trace_tool_state(self, message_id: str, call_id: str, state: str,
+                             *, waiting: dict | None = None, invocation_id: str | None = None) -> SessionMessage:
         message = self.get_message(message_id)
         for entry in reversed(message.trace.entries):
             if entry.kind == "tool_call" and entry.call_id == call_id:
                 entry.metadata["state"] = state
+                if invocation_id is not None:
+                    entry.metadata["invocation_id"] = invocation_id
+                if waiting and state in {"queued", "waiting_resources"}:
+                    # 等待快照属于这次状态，后续调度变化不能改写已保存的说明。
+                    entry.metadata["waiting"] = copy.deepcopy(waiting)
+                else:
+                    entry.metadata.pop("waiting", None)
                 if state == "running":
                     entry.metadata["started"] = True
                 break
@@ -410,10 +418,14 @@ class SessionController:
                 state = 'unknown'
             metadata = {**result.metadata, "content": result.content, "state": state,
                         "error_code": result.error_code, "error_message": result.error_message}
+            metadata.pop("waiting", None)
             if call_entry is not None:
                 call_entry.metadata["state"] = state
+                call_entry.metadata.pop("waiting", None)
                 metadata["group_id"] = call_entry.metadata.get("group_id")
                 metadata["started"] = call_entry.metadata.get("started", False)
+                if call_entry.metadata.get("invocation_id"):
+                    metadata["invocation_id"] = call_entry.metadata["invocation_id"]
             message.trace.entries.append(
                 TraceEntry(
                     kind="tool_result",
@@ -481,6 +493,11 @@ class SessionController:
     @persist_change()
     def cancel_message(self, message_id: str, notice_text: str = "本轮已取消。") -> SessionMessage:
         message = self.finish_trace_segment(message_id, "cancelled")
+        for entry in message.trace.entries:
+            if entry.kind == "tool_call":
+                if entry.metadata.get("state") in {"queued", "running", "awaiting_permission", "waiting_resources"}:
+                    entry.metadata["state"] = "cancelled"
+                entry.metadata.pop("waiting", None)
         if message.timeline_version == 1 and not self._has_last_notice(message, notice_text):
             self.append_trace_notice(message_id, notice_text)
         message.status = "cancelled"
@@ -826,8 +843,9 @@ class SessionController:
                 for entry in list(message.trace.entries):
                     if entry.kind in {"text", "thinking"} and entry.metadata.get("state") == "streaming":
                         entry.metadata["state"] = "cancelled"
-                    elif entry.kind == "tool_call" and entry.metadata.get("state") in {"queued", "running", "awaiting_permission"}:
+                    elif entry.kind == "tool_call" and entry.metadata.get("state") in {"queued", "running", "awaiting_permission", "waiting_resources"}:
                         entry.metadata["state"] = "cancelled"
+                        entry.metadata.pop("waiting", None)
                         message.trace.entries.append(TraceEntry(
                             kind="tool_result", call_id=entry.call_id, tool_name=entry.tool_name,
                             text="工具结果未完成", ok=False,
