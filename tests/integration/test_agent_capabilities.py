@@ -9,10 +9,11 @@ from provider_helpers import complete_test_response
 
 from lancher_code.agent.runner import TurnRunner
 from lancher_code.agent.skills import SkillError, SkillsService
+from lancher_code.config.models import RuntimeConfig
 from lancher_code.contracts.messages import StreamEvent
-from lancher_code.contracts.tools import DeferredToolGroup, ToolCallChunk
+from lancher_code.contracts.tools import DeferredToolGroup, ToolCallChunk, ToolDefinition, ToolExecutionResult, ToolPermissionMetadata
 from lancher_code.context.prompts import build_deferred_tools_prompt
-from lancher_code.errors import ContextCompactionError, ProviderRequestError
+from lancher_code.errors import ConfigError, ContextCompactionError, ProviderRequestError
 from lancher_code.mcp.manager import MCPServerStatus
 from lancher_code.sessions.controller import SessionController
 from lancher_code.sessions.storage import SessionRepositoryError
@@ -88,6 +89,15 @@ def history(session):
     return '\n'.join(block.text for message in session.transcript for block in message.blocks)
 
 
+def request_text(request):
+    return '\n'.join([*request.system, *(block.text for message in request.messages for block in message.blocks)])
+
+
+def tool_history(session):
+    return '\n'.join(block.text for message in session.transcript for block in message.blocks
+                     if block.kind == 'tool_result')
+
+
 def add_history(session):
     session.create_user_message('旧任务：' + 'x' * 50_000)
     old = session.create_assistant_message()
@@ -103,9 +113,9 @@ async def test_explicit_skill_persists_across_turns_and_session_restore_without_
     try:
         assert (await collect(runner, '$review 检查代码'))[-1].kind == 'turn_completed'
         assert (await collect(runner, '继续'))[-1].kind == 'turn_completed'
-        assert all(BODY in '\n'.join(request.system) for request in provider.requests)
-        assert all('PROJECT_RULE_SENTINEL' in '\n'.join(request.system) for request in provider.requests)
-        assert BODY not in history(session)
+        assert all(BODY in request_text(request) for request in provider.requests)
+        assert all('PROJECT_RULE_SENTINEL' in request_text(request) for request in provider.requests)
+        assert BODY not in tool_history(session)
         session_id = session.session_id
     finally:
         await close(runner, session)
@@ -114,23 +124,189 @@ async def test_explicit_skill_persists_across_turns_and_session_restore_without_
         restored.resume_session(session_id)
         assert session.context_state.skill_activations['project/review']['loaded']
         await collect(restored, '继续之前的审核')
-        assert BODY in '\n'.join(provider.requests[0].system)
+        assert BODY in request_text(provider.requests[0])
     finally:
         await close(restored, session)
+
+
+async def test_skill_and_phase_changes_preserve_previous_request_prefix(tmp_path, openai_provider_config):
+    skill(tmp_path)
+    runner, session, provider = make_runner(tmp_path, openai_provider_config, [final(), final(), final()])
+    try:
+        await collect(runner, '先解释架构')
+        await collect(runner, '$review 审核')
+        first, loaded = provider.requests
+        assert loaded.system == first.system
+        assert loaded.messages[:len(first.messages)] == first.messages
+        assert BODY not in '\n'.join(loaded.system)
+        assert request_text(loaded).count(BODY) == 1
+        runner.set_phase('discuss')
+        await collect(runner, '继续讨论')
+        latest = provider.requests[-1]
+        assert latest.system == loaded.system
+        assert latest.messages[:len(loaded.messages)] == loaded.messages
+        assert latest.tools == loaded.tools
+        assert latest.work_phase == 'discuss'
+        assert 'discuss' in latest.messages[-1].blocks[0].text
+    finally:
+        await close(runner, session)
+
+
+async def test_context_usage_preview_never_publishes_or_persists_host_events(tmp_path, openai_provider_config):
+    skill(tmp_path)
+    runner, session, _provider = make_runner(tmp_path, openai_provider_config, [])
+    try:
+        before = copy.deepcopy(session.context_state)
+        for _ in range(3):
+            assert runner.capabilities.context_usage()['tokens'] > 0
+        assert session.context_state == before
+        assert session.session_id is None
+        assert session.transcript == []
+    finally:
+        await close(runner, session)
+
+
+async def test_runtime_experiment_applies_through_core_and_rebuilds_prefix(tmp_path, openai_provider_config):
+    runner, session, provider = make_runner(tmp_path, openai_provider_config, [final(), final()])
+    try:
+        await collect(runner, '常规任务')
+        old_epoch = session.context_state.prefix_state['epoch']
+        assert not provider.requests[0].experimental_mcp_tool_append
+        notice = runner.apply_runtime_settings(RuntimeConfig(experimental_mcp_tool_append=True))
+        assert '实验' in notice
+        await collect(runner, '开启实验后继续')
+        assert provider.requests[1].experimental_mcp_tool_append
+        assert session.context_state.prefix_state['epoch'] != old_epoch
+    finally:
+        await close(runner, session)
+
+
+async def test_runtime_experiment_change_is_rejected_while_running(tmp_path, openai_provider_config):
+    runner, session, provider = make_runner(tmp_path, openai_provider_config, [final()])
+    provider.gate = asyncio.Event()
+    task = asyncio.create_task(collect(runner, '进行中的任务'))
+    try:
+        await asyncio.wait_for(provider.entered.wait(), 5)
+        before = copy.deepcopy(session.context_state)
+        with pytest.raises(ConfigError, match='响应或压缩'):
+            runner.apply_runtime_settings(RuntimeConfig(experimental_mcp_tool_append=True))
+        assert session.context_state == before
+    finally:
+        provider.gate.set()
+        await task
+        await close(runner, session)
+
+
+@pytest.mark.parametrize('experimental', [False, True])
+async def test_mcp_refresh_during_model_stream_rejects_old_tool_call(tmp_path, openai_provider_config, experimental):
+    executions = []
+
+    class VersionedTool:
+        def __init__(self, version):
+            self.definition = ToolDefinition(name='mcp__demo__mutable', description=version,
+                                             input_schema={'type': 'object'})
+
+        async def execute(self, arguments, context):
+            executions.append(self.definition.description)
+            return ToolExecutionResult('', self.definition.name, content='已执行')
+
+    calls = [StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
+        call_index=0, provider_call_id='old-call', name_delta='mcp__demo__mutable', arguments_delta='{}')),
+        StreamEvent(kind='message_end', response_complete=True)]
+    runner, session, provider = make_runner(tmp_path, openai_provider_config, [calls, final()])
+    registry = runner._tool_registry
+    registry.replace_deferred_server('demo', [VersionedTool('旧定义')], title='demo', description=None)
+    runner.apply_runtime_settings(RuntimeConfig(experimental_mcp_tool_append=experimental))
+    provider.gate = asyncio.Event()
+    task = asyncio.create_task(collect(runner, '调用工具'))
+    try:
+        await asyncio.wait_for(provider.entered.wait(), 5)
+        assert next(tool for tool in provider.requests[0].tools if tool.name == 'mcp__demo__mutable').description == '旧定义'
+        registry.replace_deferred_server('demo', [VersionedTool('新定义')], title='demo', description=None)
+        provider.gate.set()
+        events = await asyncio.wait_for(task, 10)
+        result = next(event.tool_result for event in events if event.kind == 'tool_result_received')
+        assert result.error_code == 'tool_changed'
+        assert result.metadata['outcome'] == 'not_started'
+        assert executions == []
+        assert events[-1].kind == 'turn_completed'
+    finally:
+        provider.gate.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await close(runner, session)
+
+
+async def test_started_remote_write_stays_unknown_after_server_removed_and_cancel(tmp_path, openai_provider_config):
+    entered = asyncio.Event()
+    executions = []
+
+    class RemoteWrite:
+        definition = ToolDefinition(name='mcp__demo__write', description='远端写入',
+                                    input_schema={'type': 'object'}, category='write',
+                                    permission=ToolPermissionMetadata(source='external', rule_key='demo:write',
+                                    display_name='demo write', server_name='demo', remote_tool_name='write'))
+
+        async def execute(self, arguments, context):
+            executions.append('started')
+            entered.set()
+            await asyncio.Event().wait()
+
+    calls = [StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
+        call_index=0, provider_call_id='write-call', name_delta='mcp__demo__write', arguments_delta='{}')),
+        StreamEvent(kind='message_end', response_complete=True)]
+    runner, session, _provider = make_runner(tmp_path, openai_provider_config, [calls])
+    runner.set_permission_policy('bypass')
+    registry = runner._tool_registry
+    registry.replace_deferred_server('demo', [RemoteWrite()], title='demo', description=None)
+    task = asyncio.create_task(collect(runner, '执行远端写入'))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        registry.unregister_deferred_server('demo')
+        assert runner.cancel_active_turn()
+        events = await asyncio.wait_for(task, 10)
+        assert events[-1].kind == 'turn_cancelled'
+        assert executions == ['started']
+        results = [block for message in session.transcript for block in message.blocks if block.kind == 'tool_result']
+        assert len(results) == 1
+        assert '远端操作结果未知' in results[0].text
+        entry = next(item for item in session.state.messages[-1].trace.entries if item.kind == 'tool_result')
+        assert entry.metadata['outcome'] == 'unknown' and entry.metadata['started']
+    finally:
+        runner.cancel_active_turn()
+        await asyncio.gather(task, return_exceptions=True)
+        await close(runner, session)
+
+
+async def test_deleting_active_skill_after_reload_rebuilds_and_removes_old_body(tmp_path, openai_provider_config):
+    skill(tmp_path)
+    runner, session, provider = make_runner(tmp_path, openai_provider_config, [final(), final()])
+    try:
+        await collect(runner, '$review 检查')
+        previous = session.context_state.prefix_state['epoch']
+        (tmp_path / '.lancher' / 'skills' / 'review' / 'SKILL.md').unlink()
+        runner.capabilities.reload_skills()
+        await collect(runner, '继续')
+        assert BODY not in request_text(provider.requests[-1])
+        assert '已不在技能目录' in request_text(provider.requests[-1])
+        assert session.context_state.prefix_state['epoch'] != previous
+    finally:
+        await close(runner, session)
 
 
 async def collect(runner, text):
     return [event async for event in runner.run_user_turn(text)]
 
 
-async def test_model_load_adds_body_only_to_next_system_request(tmp_path, openai_provider_config):
+async def test_model_load_appends_body_only_to_next_request(tmp_path, openai_provider_config):
     skill(tmp_path)
     runner, session, provider = make_runner(tmp_path, openai_provider_config, [load(), final()])
     try:
         assert (await collect(runner, '帮我审核代码'))[-1].kind == 'turn_completed'
-        assert BODY not in '\n'.join(provider.requests[0].system)
-        assert BODY in '\n'.join(provider.requests[1].system)
-        assert BODY not in history(session)
+        assert BODY not in request_text(provider.requests[0])
+        assert BODY in request_text(provider.requests[1])
+        assert provider.requests[1].system == provider.requests[0].system
+        assert provider.requests[1].messages[:len(provider.requests[0].messages)] == provider.requests[0].messages
+        assert BODY not in tool_history(session)
         assert '已加载技能 project/review' in history(session)
     finally:
         await close(runner, session)
@@ -148,14 +324,14 @@ async def test_successful_compaction_reclaims_body_and_reloads_explicit_only_ref
         activation = session.context_state.skill_activations['project/review']
         assert activation['body'] == '' and not activation['loaded']
         request = session.build_request([], allow_tool_calls=True)
-        assert BODY not in '\n'.join(request.system)
-        assert '<skill_reference' in '\n'.join(request.system)
-        assert 'PROJECT_RULE_SENTINEL' in '\n'.join(request.system)
+        assert BODY not in request_text(request)
+        assert '<skill_reference' in request_text(request)
+        assert 'PROJECT_RULE_SENTINEL' in request_text(request)
         await collect(runner, '继续审核')
-        assert BODY not in '\n'.join(provider.requests[-2].system)
-        assert BODY in '\n'.join(provider.requests[-1].system)
+        assert BODY not in request_text(provider.requests[-2])
+        assert BODY in request_text(provider.requests[-1])
         assert session.context_state.skill_activations['project/review']['activation_kind'] == 'explicit'
-        assert BODY not in history(session)
+        assert BODY not in tool_history(session)
     finally:
         await close(runner, session)
 
@@ -181,7 +357,7 @@ async def test_failed_compaction_preserves_skill_snapshot(tmp_path, openai_provi
         with pytest.raises((ContextCompactionError, ProviderRequestError, SessionRepositoryError)):
             await runner.compact_context()
         assert session.context_state.skill_activations == before
-        assert BODY in '\n'.join(session.build_request([], allow_tool_calls=True).system)
+        assert BODY in request_text(session.build_request([], allow_tool_calls=True))
     finally:
         await close(runner, session)
 
@@ -211,11 +387,11 @@ async def test_explicit_only_disabled_and_new_session_isolation(tmp_path, openai
     runner, session, provider = make_runner(tmp_path, openai_provider_config, [load(), final()])
     try:
         await collect(runner, '帮我审核')
-        assert BODY not in '\n'.join(provider.requests[-1].system)
+        assert BODY not in request_text(provider.requests[-1])
         assert '需要用户通过 $review 显式指定' in history(session)
         runner.capabilities.skills.apply_explicit('$review')
         runner.capabilities.set_skill_enabled('review', False)
-        assert BODY not in '\n'.join(session.build_request([], allow_tool_calls=True).system)
+        assert BODY not in request_text(session.build_request([], allow_tool_calls=True))
         with pytest.raises(SkillError, match='禁用'):
             runner.capabilities.skills.apply_explicit('$review')
         runner.new_session()

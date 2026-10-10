@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import asdict
 from datetime import datetime
 
@@ -10,6 +11,7 @@ from lancher_code.context.models import (
     ContextManagementState,
     ContextUsageAnchor,
 )
+from lancher_code.context.prefix import validate_prefix_state, validate_prefix_transcript
 from lancher_code.contracts.messages import ContentBlock, ConversationMessage
 from lancher_code.permissions.models import PermissionRule
 from lancher_code.sessions.models import (
@@ -21,7 +23,7 @@ from lancher_code.sessions.models import (
     TraceEntry,
 )
 from lancher_code.sessions.projection import project_events
-from lancher_code.sessions.storage import SessionRepositoryError
+from lancher_code.sessions.storage import SessionRepositoryError, reject_json_constant, unique_json_object
 from lancher_code.usage.ledger import RequestUsageRecord
 from lancher_code.usage.models import MessageUsage
 
@@ -97,6 +99,7 @@ class SessionCodec:
                         if activity is None or activity.message_id != message.id:
                             raise ValueError('压缩活动轨迹关联无效。')
             transcript = [cls.decode_transcript(item) for item in data['transcript']]
+            validate_prefix_transcript(state.context_management.prefix_state, transcript)
             rules = cls._decode_permission_rules({'rules': data['rules']})
             model_ref = data['model_ref']
             if model_ref is not None and (not isinstance(model_ref, str) or not model_ref.strip()):
@@ -276,6 +279,8 @@ class SessionCodec:
             "automatic_compaction_disabled": context.automatic_compaction_disabled,
             "skill_activations": copy.deepcopy(context.skill_activations),
             "disabled_skills": list(context.disabled_skills),
+            "prefix_state": copy.deepcopy(context.prefix_state),
+            "frozen_tool_previews": dict(context.frozen_tool_previews),
         }
 
     @staticmethod
@@ -319,6 +324,11 @@ class SessionCodec:
         files = [ContextFileSnapshot(**item) for item in raw_files]
         activations = value.get('skill_activations', {})
         disabled_skills = value.get('disabled_skills', [])
+        prefix = validate_prefix_state(value.get('prefix_state', {}))
+        previews = value.get('frozen_tool_previews', {})
+        if (not isinstance(previews, dict) or any(not isinstance(key, str) or not key
+                or rendered is not None and not isinstance(rendered, str) for key, rendered in previews.items())):
+            raise ValueError('冻结工具预览无效。')
         if not isinstance(activations, dict) or len(activations) > 128:
             raise ValueError('技能激活记录无效。')
         for skill_id, item in activations.items():
@@ -346,6 +356,8 @@ class SessionCodec:
             automatic_compaction_disabled=disabled,
             skill_activations=copy.deepcopy(activations),
             disabled_skills=list(dict.fromkeys(disabled_skills)),
+            prefix_state=prefix,
+            frozen_tool_previews=dict(previews),
         )
 
     @staticmethod
@@ -449,10 +461,23 @@ class SessionCodec:
                 if block.kind == 'thinking':
                     # 某些提供方不给可读思考，只返回可验证签名。这种真实
                     # 内容仍需原样保存；单纯空块则不能冒充完整协议。
-                    if not block.text.strip() and not block.signature:
+                    if not block.text.strip() and not block.signature and block.data is None:
                         raise ValueError('思考内容与签名不能同时为空。')
                     if block.data is not None:
-                        raise ValueError('可读思考不能包含屏蔽思考密文。')
+                        if block.thinking_protocol != 'openai' or block.signature is not None or block.thinking_field is not None:
+                            raise ValueError('opaque reasoning 必须属于独立 OpenAI Responses 内容块。')
+                        try:
+                            opaque = json.loads(block.data, parse_constant=reject_json_constant, object_pairs_hook=unique_json_object)
+                        except (ValueError, TypeError) as exc:
+                            raise ValueError('opaque reasoning 不是有效 JSON。') from exc
+                        if (not isinstance(opaque, dict) or opaque.get('type') != 'reasoning'
+                                or not isinstance(opaque.get('id'), str) or not opaque['id']
+                                or not isinstance(opaque.get('summary'), list)
+                                or any(not isinstance(item, dict) or item.get('type') != 'summary_text'
+                                       or not isinstance(item.get('text'), str) for item in opaque['summary'])
+                                or opaque.get('encrypted_content') is not None
+                                and (not isinstance(opaque['encrypted_content'], str) or not opaque['encrypted_content'])):
+                            raise ValueError('opaque reasoning 内容或来源字段无效。')
                 elif not block.data or block.text or block.signature is not None or block.thinking_field is not None:
                     raise ValueError('屏蔽思考必须包含独立的非空密文。')
             elif any(item is not None for item in (

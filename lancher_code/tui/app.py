@@ -859,6 +859,11 @@ class LanCherTextualApp(App[int]):
         await self._completion.refresh()
         return notice
 
+    def _apply_runtime_settings(self, runtime) -> str:
+        notice = self._turn_runner.apply_runtime_settings(runtime)
+        self._refresh_context_usage()
+        return notice
+
 
     async def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         self._command_preserve_input = False
@@ -940,6 +945,8 @@ class LanCherTextualApp(App[int]):
                 on_model_selected=self._handle_model_selected,
                 on_ui_saved=self._apply_ui_settings,
                 on_mcp_saved=self._apply_mcp_settings,
+                on_runtime_validate=self._turn_runner.validate_runtime_settings,
+                on_runtime_saved=self._apply_runtime_settings,
             ), self._handle_settings_result)
             return None
 
@@ -1112,7 +1119,12 @@ class LanCherTextualApp(App[int]):
                 self.notify(f"设置已保存，当前模型更新失败：{exc}", title="模型", severity="error", timeout=10)
                 self._status_hint = "模型更新失败"
             else:
-                self._status_hint = "设置已保存 · MCP 待应用" if result.mcp_pending else "设置已保存"
+                pending = []
+                if result.mcp_pending:
+                    pending.append('MCP 待应用')
+                if result.system_pending:
+                    pending.append('系统设置待应用')
+                self._status_hint = '设置已保存' + (' · ' + ' · '.join(pending) if pending else '')
         else:
             self._status_hint = "就绪"
         self._refresh_status_bar()

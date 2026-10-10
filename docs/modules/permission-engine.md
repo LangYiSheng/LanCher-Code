@@ -94,7 +94,7 @@ JSON Schema 校验在权限询问和资源申请之前。审批不占资源锁�
 
 ## 与其他模块的关系
 
-- `tools/core/registry.py`：按阶段过滤普通工具与延迟发现索引。
+- `tools/core/registry.py`：提供阶段过滤的搜索接口；请求通过核心保留已发布定义，实际执行继续受阶段校验。
 - `tools/core/executor.py`：每个调用前判定，处理确认、补充撤销和结果配对。
 - `app.py`：构造项目和用户权限存储。
 - `tui/app.py`、`permission.py`：内联权限面板与决议回调。

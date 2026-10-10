@@ -38,8 +38,15 @@ def project_tool_results(
     for message in candidate:
         for block in message.blocks:
             replacement = state.replacements.get(block.call_id)
-            if block.kind == "tool_result" and replacement is not None:
-                block.text = _build_tool_preview(block.text, replacement, token_budget=preview_tokens)
+            if block.kind != 'tool_result':
+                continue
+            key = block.call_id + ':' + hashlib.sha256(block.text.encode('utf-8')).hexdigest()
+            if key not in state.frozen_tool_previews:
+                state.frozen_tool_previews[key] = (_build_tool_preview(block.text, replacement, token_budget=preview_tokens)
+                                                  if replacement is not None else None)
+            frozen = state.frozen_tool_previews[key]
+            if frozen is not None:
+                block.text = frozen
     return candidate
 
 
@@ -91,9 +98,12 @@ async def offload_tool_results(
         relative_path = replacement if replacement is not None else (
             directory / (hashlib.sha256(call_id.encode("utf-8")).hexdigest() + ".txt")
         ).relative_to(root).as_posix()
-        preview_costs[call_id] = estimate_text_tokens(
-            _build_tool_preview(block.text, relative_path, token_budget=preview_tokens)
-        )
+        frozen_key = call_id + ':' + hashlib.sha256(block.text.encode('utf-8')).hexdigest()
+        preview = state.frozen_tool_previews.get(frozen_key)
+        if frozen_key in state.frozen_tool_previews:
+            preview_costs[call_id] = estimate_text_tokens(block.text if preview is None else preview)
+        else:
+            preview_costs[call_id] = estimate_text_tokens(_build_tool_preview(block.text, relative_path, token_budget=preview_tokens))
 
     def current_cost(call_id: str) -> int:
         return preview_costs[call_id] if call_id in selected or call_id in state.replacements else raw_costs[call_id]

@@ -334,10 +334,11 @@ async def test_openai_provider_serializes_multi_block_user_content(openai_provid
 
 
 @pytest.mark.asyncio
-async def test_openai_provider_omits_tools_in_second_pass(openai_provider_config) -> None:
+async def test_openai_provider_keeps_schema_and_disables_calls_in_second_pass(openai_provider_config) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
-        assert "tools" not in payload
+        assert payload["tools"][0]["function"]["name"] == "read_file"
+        assert payload["tool_choice"] == "none"
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},

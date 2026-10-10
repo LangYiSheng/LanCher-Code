@@ -19,7 +19,7 @@
 
 实际完成事件立即更新 TUI；一批结果按请求顺序交给模型。资源相互冲突的同批调用先排序，独立调用可以并行。`is_concurrency_safe` 已移除，未知工具默认在本次调用期间项目独占，不用类别猜副作用；未知Shell返回后台任务后释放该调用期锁。
 
-工具可以实现 `resource_claims(arguments, context)`，返回可信的 `ResourceClaim` 列表；模型参数不能覆盖这个声明。每项资源可设置 `lifetime=invocation/process`：调用期资源随工具返回释放，持续资源由真实进程保留到退出；没有长进程的工具在调用结束释放全部资源。命令profile的资源默认process，未知命令的默认项目锁则明确invocation，允许服务器返回后台身份后继续执行请求和文件工具，不证明后台没有文件副作用。没有声明的 MCP，即使提供 `readOnlyHint`，也在本次调用期间保守使用项目独占；该提示影响工作阶段可见性，不足以证明并发独立。
+工具可以实现 `resource_claims(arguments, context)`，返回可信的 `ResourceClaim` 列表；模型参数不能覆盖这个声明。每项资源可设置 `lifetime=invocation/process`：调用期资源随工具返回释放，持续资源由真实进程保留到退出；没有长进程的工具在调用结束释放全部资源。命令profile的资源默认process，未知命令的默认项目锁则明确invocation，允许服务器返回后台身份后继续执行请求和文件工具，不证明后台没有文件副作用。没有声明的 MCP，即使提供 `readOnlyHint`，也在本次调用期间保守使用项目独占；该提示影响工作阶段的执行资格，不足以证明并发独立。
 
 执行器通过 `on_invocation_state(call, info)` 在状态持久化成功后通知Runner；`waiting` 保存实际冲突、并发额度或FIFO原因与阻塞者。TUI区分已批准的资源等待和未审批的前序等待，`on_call_started` 标记进入执行阶段；开始执行或进入终态清除旧等待信息。运行通知仍可能在真正调用 `execute` 前被取消，Runner按trace绑定的稳定invocation_id查询终态，区分未派发和已进入远端工具的未知结果。
 
@@ -38,7 +38,7 @@
 | `grep` | `builtin/grep.py` | 正则搜索，有模型和界面输出预算 |
 | `write_plan_file` | `builtin/write_plan_file.py` | 计划阶段写本 Session `workspace/plan.md`，更新计划快照 |
 | `tool_search` | `builtin/tool_search.py` | 查找并加载延迟 MCP 工具，下一次模型请求才使用 |
-| `load_skill` | `builtin/skills.py` | 加载已登记技能，正文经回调交给核心系统投影；工具结果只保留确认 |
+| `load_skill` | `builtin/skills.py` | 加载已登记技能，正文经回调交给核心尾部事件投影；工具结果只保留确认 |
 | `read_skill_resource` | `builtin/skills.py` | 按已登记技能的相对目录读取 UTF-8 资料或源码，按行分页、不执行脚本 |
 
 当前 Session workspace 文件操作在各阶段自动批准，显式拒绝优先；源码修改仅执行阶段允许。控制记录和多硬链接文件受保护，bypass 无法放行。文件权限是应用层路径约束，不能据此声称 Shell 获得系统沙箱。

@@ -30,6 +30,14 @@ def project_events(events, *, decode_compaction, apply_execution_event):
                 item['content'] = data['content']
         elif kind == 'transcript.appended':
             result['transcript'].extend(copy.deepcopy(data['messages']))
+        elif kind == 'context.prefix_updated':
+            if type(data.get('replace')) is not bool:
+                raise ValueError('固定前缀提交缺少替换标记。')
+            if data['replace']:
+                result['transcript'] = copy.deepcopy(data['messages'])
+            else:
+                result['transcript'].extend(copy.deepcopy(data['messages']))
+            result['state']['context_management'] = copy.deepcopy(data['context_management'])
         elif kind == 'transcript.updated':
             result['transcript'][data['index']] = copy.deepcopy(data['message'])
         elif kind in {'context.compacted', 'context.replaced'}:

@@ -8,6 +8,7 @@ from lancher_code.contracts.tools import ToolCall, ToolExecutionResult
 from lancher_code.execution.contracts import InvocationInfo
 from lancher_code.sessions.controller import SessionController
 from lancher_code.tools.core.executor import ToolExecutor, PermissionResolver
+from lancher_code.tools.core.base import Tool
 from lancher_code.tools.core.registry import ToolRegistry
 
 
@@ -16,6 +17,7 @@ async def execute_batch(*, session: SessionController, executor: ToolExecutor,
                         pending: list[ToolCall], message_id: str, turn_id: str, generation: int,
                         phase: WorkPhase, policy: PermissionPolicy, cancellation_token: CancellationToken,
                         permission_resolver: PermissionResolver, available_tool_names: set[str],
+                        expected_tool_bindings: dict[str, Tool],
                         should_interrupt: Callable[[], bool], is_current: Callable[[], bool],
                         emit: Callable[[TurnEvent], Awaitable[None]]) -> list[ToolExecutionResult]:
     """一批调用的事件、结果落盘及幂等回调使用同一个边界。"""
@@ -72,6 +74,7 @@ async def execute_batch(*, session: SessionController, executor: ToolExecutor,
         generation=generation,
         permission_resolver=permission_resolver,
         available_tool_names=available_tool_names,
+        expected_tool_bindings=expected_tool_bindings,
         should_interrupt=should_interrupt,
         on_call_started=report_started,
         on_invocation_state=report_invocation_state,
@@ -116,7 +119,8 @@ def close_pending_tool_calls(session: SessionController, registry: ToolRegistry,
             # execute 后才把取消记为 interrupted / outcome_unknown。
             started = False
             entry.metadata['started'] = False
-        unknown_remote = started and external
+        # 目录可能已经断线或被刷新，已启动调用的真实分类以执行器记录为准。
+        unknown_remote = bool(invocation and invocation.get('error_code') == 'mcp_outcome_unknown') or started and external
         message = (f'{reason}，远端操作结果未知；停止本地等待不能证明远端已撤销。请先检查远端状态，勿直接重复提交。'
                    if unknown_remote else
                    f'{reason}，未获得此工具调用的完整结果。操作可能已部分执行，请先检查当前状态，勿直接重复执行。'

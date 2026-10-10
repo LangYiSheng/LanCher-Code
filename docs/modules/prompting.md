@@ -1,90 +1,68 @@
-# 模块：提示词构建（Prompting）
+# 模块：提示词构建与请求前缀
 
-## 作用
+提示词模块组织主机规则、项目约定、Skills、工具目录与对话。请求前缀由智能体核心保存和更新，TUI 只展示估算与提交操作。
 
-提示词构建模块负责把所有"写给模型看"的文本组织起来：
+## 固定前缀和尾部事件
 
-- 系统提示（角色、行为准则、工具使用指南、代码质量规范、安全边界）
-- 环境上下文（系统、cwd、日期）
-- 工作阶段与独立权限策略，以及计划状态的动态提醒
-- MCP 延迟工具索引
-- 核心提供的项目 AGENTS.md、Skills 目录、激活正文或待重载引用
-- 用户消息的组装
-
-实现位置：`lancher_code/context/prompts.py`。
-
-## 核心函数
-
-| 函数 | 作用 |
-|---|---|
-| `build_system_prompt()` | 固定的角色/行为/工具/质量/安全/任务/输出风格提示（多段拼接） |
-| `build_environment_prompt(context)` | 当前系统标签、工作目录、日期 |
-| `build_prompt_context(...)` | 组装 `PromptContext`（含 `os_label`、`plan_exists` 等） |
-| `build_chat_request_payload(...)` | 最终拼装：`system = [系统提示, 环境提示, 动态提醒?, agent_context..., 延迟工具索引?]` + `messages` + `tools` |
-| `build_user_message(text, dynamic_context)` | 用户消息 = `<system-reminder>` 块 + 文本块 |
-| `build_dynamic_context_prompt(context)` | 根据工作阶段生成讨论、计划与退出计划提醒 |
-| `build_deferred_tools_prompt(groups)` | `<deferred_tools>` 索引（Server 名 + 工具名，HTML 转义） |
-
-## Plan Mode 动态提醒
-
-`build_plan_mode_prompt()` 根据会话状态返回不同提醒：
-
-| 状态 | 提醒内容 |
-|---|---|
-| 首次进入 plan（`pending_plan_entry_kind=initial`） | 完整约束：源码只读探索，当前Session workspace可写；最终计划由专用工具确认快照 |
-| 重新进入且本会话有计划快照（`reentry`） | 注入该快照，继续修改本会话版本；旧磁盘文件不代表用户批准 |
-| 持续多轮（每 5 轮刷新一次） | 重新强调完整约束 |
-| 常规 plan 轮次 | 简短的持续生效提醒 |
-| 退出 plan 后第一轮（`pending_plan_exit_notice`） | 提示规划已结束，可参考计划文件 |
-
-判断逻辑：`_is_plan_mode_refresh_turn()` —— `(plan_mode_turn_count + 1) % 5 == 1` 且大于 1 时刷新。
-
-讨论阶段追加只读调查提醒；工作阶段始终注入系统约束，审批策略独立显示。工具发现、请求构造及执行器也检查阶段，限制不依赖提示词自律。模型不能自行切到执行；确认执行请求由 UI 与服务层校验计划快照后提交。
-
-## 动态提醒的注入与剥离
+`context/prefix.py` 为当前请求周期建立一个固定系统前缀：基础行为规则、稳定系统环境、初始项目约定与能力目录。首次请求记录当前日期、阶段和权限；后续变化追加成带 `epoch`、`seq` 的 `<host_update>` 尾部记录，不反复改写旧用户消息。
 
 ```text
-SessionController.create_user_message()
-  → build_dynamic_context_prompt(...) 生成 <system-reminder> 文本
-  → 作为用户消息第一个 block 存入 transcript
-
-context.request.build_request()（发送前）
-  → 移除旧 reminder 块
-  → 把最新的动态提醒插到最近一条用户消息头部
+同一周期的系统前缀 + 已有对话 + 已有主机事件
+  → 新用户任务 / 新工具结果
+  → 有变化时追加 host_update
+  → 下一次模型请求
 ```
 
-这样保证：**发送给模型的提醒永远是当前状态的最新版本**，而历史 transcript 中保留的是注入时刻的版本（用于展示）。
+主机事件可携带新 Skill 正文、项目 AGENTS.md 更新、技能和 MCP 目录变化、阶段与权限变化；间隔较长时补充时间。它是核心状态事实，不是新用户任务，不增加权限。模型使用同字段最新值，执行器仍按实时状态校验阶段、工具身份和权限。
 
-## 输出示例（payload 结构）
+技能正文不放在加载工具的结果里。`load_skill` 把正文快照交给核心，核心追加主机事件；跨轮继续复用正文和已有事件。项目约定通常在周期初始前缀中，后续文件更新也通过尾部事件提供。
 
-```python
-PromptPayload(
-    system=[
-        build_system_prompt(),          # 固定
-        build_environment_prompt(...),  # 环境
-        "<system-reminder>...</system-reminder>",  # 可选：动态提醒
-        "<project_instructions>...</project_instructions>",  # 可选：项目约定
-        "<active_skill>...</active_skill>",       # 可选：核心投影的技能正文
-        "<deferred_tools>...</deferred_tools>",     # 可选：MCP 索引
-    ],
-    messages=[ConversationMessage(...)],
-    tools=[ToolDefinition(...)],
-)
-```
+## 请求周期的重建
 
-## 与其他模块的关系
+| 条件 | 行为 |
+|---|---|
+| 新 Skill、AGENTS.md 更新、目录或阶段／权限变化 | 在当前周期追加主机事件 |
+| 新 MCP 工具被发现 | 常规模式加入 `tools`，保留已发现定义与顺序；实验模式投影原生追加事件 |
+| Skill 正文卸载、禁用、缺失或需要真正回收 | 重建前缀，清理旧正文事件 |
+| 压缩成功、模型／协议／窗口切换、实验模式切换 | 重建周期，采用新基线 |
+| 压缩失败、取消或提交回滚 | 保留原前缀、历史与技能状态 |
+| HUD 预览估算 | 在副本上计算，不提交新事件或改变周期 |
 
-- ← `sessions/controller.py`：组装请求、注入动态提醒
-- ← `agent/capabilities.py`：提供项目约定与技能上下文块；候选压缩请求使用候选技能状态
-- ← `context/summary.py`：压缩摘要有独立系统提示（`SUMMARY_SYSTEM_PROMPT`，不在本模块）
-- → `context/prompt_models.py`：产出 `PromptContext` / `PromptPayload`
+`SessionController` 持久化前缀状态、已发现工具及事件位置。正式请求准备后才提交状态；恢复会话时保留历史顺序，不重放远端操作。原生 OpenAI 模式移除或同名替换工具时也会重建，因为该追加协议只支持增加定义。
 
-## 注意事项
+## 常规与实验工具方式
 
-- `build_system_prompt()` 是**固定文本**，不含环境信息；环境信息在 `build_environment_prompt()` 中，二者分离（有对应测试保证）。
-- 延迟工具索引中的 Server 标题/描述会经过 HTML 转义（`escape`），防止注入。
-- MCP 索引有字符预算，未列出的已注册工具仍可搜索；技能目录有独立预算。技能正文由核心系统投影，不依靠工具结果保存，也不由 TUI 注入。
-- 平台标签：Windows → "Windows PowerShell"，Linux → "Linux shell"，macOS → "macOS shell"（`_runtime_label()`）。
+默认使用常规 `tools` 数组。MCP 延迟工具通过 `tool_search` 加载，完整参数定义从下一次请求开始进入数组，并跨用户轮保留。能力目录有字符预算，未列出的已注册工具仍可搜索。
 
+阶段和审批变化通过主机事件告知模型，已发布的工具 Schema 保持可见；定义可见不代表当前允许执行，执行器仍按最新阶段和权限拒绝违规调用。末轮或其他禁止继续调用工具的请求保留定义，使用 `tool_choice: none` 禁止调用，避免通过清空工具数组改变已有前缀。
 
-进程工具指南明确区分yield_ms与max_runtime_ms、turn与session归属、Pipe与PTY。收到running句柄不能宣称命令最终成功；后台输出仍通过process_read读取。后台完成摘要作为记录事实附在下一条协议用户消息中，与新任务指令区分，不因后台输出自动开轮。
+系统设置中的“原生 MCP 工具追加”实验项默认关闭。它让核心保存的工具变更由 Provider 投影为端点的原生协议，不改成通用 `mcp_call` 代理：
+
+- OpenAI 使用 Responses 与 `additional_tools`；要求端点接受该请求方式。
+- Claude 使用 `inline-tools-2026-09-15` beta 的 `tool_addition`／`tool_removal`。
+
+不支持的端点明确报错并提示关闭实验项，客户端不自动重放操作。设置变化在空闲时校验、保存并应用，下次请求重建周期。具体配置见 [配置说明](../configuration.md)。
+
+## 缓存边界
+
+稳定前缀和追加事件减少已有请求内容的变动，为供应商缓存提供条件，不保证实际命中率。
+
+官方 Anthropic 端点默认发送 `cache_control`；Claude 兼容端点只在开启实验项、由用户声明支持时发送。普通 OpenAI 兼容请求维持常规工具协议，实验方式仅对接受对应 Responses 扩展的端点启用。
+
+当前验证使用离线 Provider 传输 fixture，检查请求结构、流式工具结果与错误处理；尚未做真实模型 API 的兼容性或缓存命中率实测。真实请求用量仍由 usage 账本按上报值记录，不能把前缀稳定等同于已节省费用。
+
+## 实现职责
+
+| 入口 | 职责 |
+|---|---|
+| `context/prompts.py` | 基础角色、环境、阶段提示和有预算的 MCP 索引 |
+| `context/prefix.py` | 固定前缀、增量主机事件、工具基线和重建条件 |
+| `context/request.py` | 在副本上准备请求，投影历史和工具事件 |
+| `sessions/controller.py` | 正式请求状态提交与只读预览，保存和恢复 |
+| `agent/capabilities.py` | 项目约定与技能内容提供器 |
+| `agent/skill_context.py` | 技能激活与正文／引用状态 |
+| `providers/native_tools.py`、`responses.py` | 把核心工具事件投影到支持的端点协议 |
+
+讨论和计划阶段的只读边界、Session workspace 及计划确认依然由核心执行；模型不能自行切阶段或提升权限。旧 `<system-reminder>` 在迁入前缀模型时清理一次，后续不通过修改旧任务文本刷新状态。
+
+进程完成摘要仍是后台事实，附在后续正常任务中，不因后台输出自动启动新任务。新规则与技能也不自动执行脚本。相关生命周期见 [Skills 与项目约定](skills.md)、[上下文压缩](../workflows/context-compaction.md)。

@@ -65,8 +65,9 @@ def test_session_controller_builds_request_with_system_messages_and_tools(openai
     assert request.allow_tool_calls is True
     assert request.tools[0].name == "read_file"
     assert len(request.system) == 2
-    assert [message.role for message in request.messages] == ["user", "assistant", "user"]
+    assert [message.role for message in request.messages] == ["user", "assistant", "user", "user"]
     assert request.messages[0].blocks[0].text == "第一轮"
+    assert request.messages[-1].blocks[0].text.startswith("<host_update ")
 
 
 def test_session_controller_keeps_stable_system_prompt_between_requests(openai_provider_config) -> None:
@@ -92,8 +93,9 @@ def test_session_controller_system_and_environment_prompt_are_split(openai_provi
     assert "2026-06-28" not in system_prompt
     assert "<system-reminder>" not in system_prompt
     assert str(tmp_path.resolve()) in environment_prompt
-    assert "2026-06-28" in environment_prompt
-    assert "当前系统：" in environment_prompt
+    assert "2026-06-28" not in environment_prompt
+    assert "系统：" in environment_prompt
+    assert "2026-06-28" in request.messages[-1].blocks[0].text
 
 
 def test_session_controller_tracks_initial_plan_mode_prompt_and_turn_count(openai_provider_config, tmp_path: Path) -> None:
@@ -101,11 +103,12 @@ def test_session_controller_tracks_initial_plan_mode_prompt_and_turn_count(opena
     controller.set_work_phase("plan")
 
     controller.create_user_message("计划一下")
+    controller.build_request([], allow_tool_calls=True)
 
     assert controller.state.plan_mode_turn_count == 1
     assert controller.state.pending_plan_entry_kind is None
-    assert controller.transcript[0].blocks[0].text.startswith("<system-reminder>")
-    assert "用户刚进入 Plan Mode" in controller.transcript[0].blocks[0].text
+    assert controller.transcript[0].blocks[0].text == "计划一下"
+    assert "用户刚进入 Plan Mode" in controller.transcript[-1].blocks[0].text
 
 
 def test_session_controller_refreshes_full_plan_prompt_every_five_turns(openai_provider_config, tmp_path: Path) -> None:
@@ -114,6 +117,7 @@ def test_session_controller_refreshes_full_plan_prompt_every_five_turns(openai_p
 
     for index in range(6):
         controller.create_user_message(f"第 {index + 1} 轮")
+        controller.build_request([], allow_tool_calls=True)
 
     assert controller.state.plan_mode_turn_count == 6
     assert "Plan Mode 已持续多轮" in controller.transcript[-1].blocks[0].text
@@ -123,11 +127,13 @@ def test_session_controller_injects_exit_prompt_on_first_normal_turn_after_plan_
     controller = SessionController(openai_provider_config, cwd=tmp_path)
     controller.set_work_phase("plan")
     controller.create_user_message("计划一下")
+    controller.build_request([], allow_tool_calls=True)
 
     controller.set_work_phase("execute")
     assert controller.state.pending_plan_exit_notice is True
 
     controller.create_user_message("开始实现")
+    controller.build_request([], allow_tool_calls=True)
 
     assert "规划模式已结束" in controller.transcript[-1].blocks[0].text
     assert controller.state.pending_plan_exit_notice is False
@@ -144,10 +150,11 @@ def test_session_controller_does_not_trust_project_plan_file_as_session_snapshot
 
     controller.set_work_phase("plan")
     controller.create_user_message("继续规划")
+    controller.build_request([], allow_tool_calls=True)
 
-    assert "用户刚进入 Plan Mode" in controller.transcript[0].blocks[0].text
+    assert "用户刚进入 Plan Mode" in controller.transcript[-1].blocks[0].text
     assert controller.plan_snapshot is None
-    assert "正在重新进入 Plan Mode" not in controller.transcript[0].blocks[0].text
+    assert "正在重新进入 Plan Mode" not in controller.transcript[-1].blocks[0].text
 
 
 def test_session_controller_appends_trace_tool_calls_and_results(openai_provider_config) -> None:
@@ -360,8 +367,9 @@ def test_session_controller_skips_error_and_streaming_assistant_messages_from_tr
 
     request = controller.build_request([], allow_tool_calls=True)
 
-    assert [message.role for message in request.messages] == ["user", "user"]
-    assert [message.blocks[-1].text for message in request.messages] == ["失败轮次消息", "下一轮"]
+    assert [message.role for message in request.messages] == ["user", "user", "user"]
+    assert [message.blocks[-1].text for message in request.messages[:2]] == ["失败轮次消息", "下一轮"]
+    assert request.messages[-1].blocks[0].text.startswith("<host_update ")
 
 
 def test_session_controller_for_claude_includes_thinking(claude_provider_config) -> None:

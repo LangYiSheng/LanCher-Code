@@ -48,11 +48,21 @@ class AgentCapabilities:
         instructions = project_instructions(self.project_root)
         return ([instructions] if instructions else []) + self.skills.context_blocks(state)
 
+    def visible_tools(self, discovered_names=None):
+        published = self._session.context_state.prefix_state.get('observed_tools', {})
+        discovered = set(published) | set(discovered_names or ())
+        current = self._registry.list_definitions(discovered_names=discovered)
+        by_name = {tool.name: tool for tool in current}
+        # 热刷新注册表不会重新排序已发送定义；新能力只追加在既有定义之后。
+        return [by_name[name] for name in published if name in by_name] + [
+            tool for tool in current if tool.name not in published
+        ]
+
     def context_usage(self) -> dict:
-        request = self._session.build_request(
-            self._registry.list_definitions(work_phase=self._session.work_phase),
+        request = self._session.preview_request(
+            self.visible_tools(),
             allow_tool_calls=True,
-            deferred_tool_groups=self._registry.list_deferred_index(work_phase=self._session.work_phase),
+            deferred_tool_groups=self._registry.list_deferred_index(),
         )
         estimate = self._session.context_estimate(request)
         return {'tokens': estimate.tokens, 'source': estimate.source}

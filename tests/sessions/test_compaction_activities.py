@@ -220,8 +220,8 @@ async def test_context_and_completed_activity_commit_in_same_final_event(openai_
     controller = SessionController(openai_provider_config, cwd=tmp_path)
     try:
         long_history(controller)
-        before = copy.deepcopy(controller.transcript)
         request = controller.build_request([], allow_tool_calls=True)
+        before = copy.deepcopy(controller.transcript)
         controller.update_context_usage(request, MessageUsage(input_tokens=30000, output_tokens=100))
         activity = controller.begin_compaction('manual', turn_id='manual-turn')
         controller._sessions.checkpoint()

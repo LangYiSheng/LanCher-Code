@@ -7,7 +7,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import Static
-from lancher_code.config.models import UIConfig
+from lancher_code.config.models import RuntimeConfig, UIConfig
 from lancher_code.config.settings import SettingsError, SettingsService, SettingsSnapshot
 from lancher_code.tui.settings.confirmation import DiscardChangesScreen
 
@@ -25,10 +25,12 @@ class DomainError(Message):
         self.message = message
 
 class DomainSaved(Message):
-    def __init__(self, domain: str, notice: str, *, restart_required: bool = False, ui: UIConfig | None = None) -> None:
+    def __init__(self, domain: str, notice: str, *, restart_required: bool = False,
+                 ui: UIConfig | None = None, runtime: RuntimeConfig | None = None) -> None:
         super().__init__()
         self.domain, self.notice = domain, notice
         self.restart_required, self.ui = restart_required, ui
+        self.runtime = runtime
 
 class SettingsDomainEditor(Vertical):
     domain: str

@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from lancher_code.context.budget import context_budget
 from lancher_code.context.compaction import compact_transcript
@@ -11,6 +12,7 @@ from lancher_code.context.models import ContextCompactionResult, ContextManageme
 from lancher_code.context.offload import project_tool_results
 from lancher_code.context.projection import project_historical_tool_exchanges
 from lancher_code.context.prompt_models import PromptContext
+from lancher_code.context.prefix import strip_host_events
 from lancher_code.context.request import build_request
 from lancher_code.context.tokens import TokenEstimate, estimate_request
 from lancher_code.contracts.control import CancellationToken
@@ -36,16 +38,23 @@ async def prepare_compaction(
     stream_request: Callable[[ChatRequest], AsyncIterator[StreamEvent]],
     request_factory: Callable[[ChatRequest], ChatRequest],
     prompt_context_factory: Callable[[ContextManagementState], PromptContext] | None = None,
+    experimental: bool = False,
 ) -> CompactionCandidate:
     class SummaryProvider:
         def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
             outgoing = copy.copy(request)
+            outgoing.experimental_mcp_tool_append = experimental
+            outgoing.prompt_cache_enabled = experimental or (
+                config.protocol == 'claude' and urlsplit(config.base_url).hostname == 'api.anthropic.com')
             outgoing.messages = project_historical_tool_exchanges(
                 request.messages, protocol=config.protocol, model=request.model,
             )
             return stream_request(outgoing)
 
     candidate_context = copy.deepcopy(context)
+    transcript = strip_host_events(transcript, context.prefix_state)
+    candidate_context.prefix_state = {}
+    candidate_context.frozen_tool_previews.clear()
     # 正文只由核心投影，不写进历史工具输出。成功候选回收正文，保留引用；
     # 提交失败时控制器回滚整个上下文，不能提前让正在使用的技能失效。
     for activation in candidate_context.skill_activations.values():
@@ -53,7 +62,7 @@ async def prepare_compaction(
         activation['loaded'] = False
     compacted = await compact_transcript(
         provider=SummaryProvider(), model=config.model,
-        transcript=project_tool_results(transcript, context, context_window=config.context_window),
+        transcript=project_tool_results(transcript, copy.deepcopy(context), context_window=config.context_window),
         visible_tools=visible_tools, state=candidate_context, context_window=config.context_window,
         cancellation_token=cancellation_token, request_factory=request_factory,
     )
@@ -74,6 +83,7 @@ async def prepare_compaction(
         transcript=compacted.transcript, state=candidate_context,
         dynamic_context=dynamic_context, tools=visible_tools, allow_tool_calls=True,
         deferred_tool_groups=deferred_tool_groups,
+        experimental=experimental,
     )
     after_estimate = estimate_request(request, candidate_context)
     budget = context_budget(config.context_window, request.max_output_tokens)

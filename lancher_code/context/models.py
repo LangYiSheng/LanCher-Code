@@ -40,6 +40,9 @@ class ContextManagementState:
     # 激活正文与引用属于会话上下文；界面不参与其加载和生命周期判断。
     skill_activations: dict[str, dict[str, object]] = field(default_factory=dict)
     disabled_skills: list[str] = field(default_factory=list)
+    # 固定提示前缀、不可变增量文本和工具变化均随会话持久化。
+    prefix_state: dict[str, object] = field(default_factory=dict)
+    frozen_tool_previews: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)

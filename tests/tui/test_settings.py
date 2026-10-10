@@ -1,4 +1,5 @@
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 import yaml
@@ -7,6 +8,7 @@ from textual.app import App
 from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, Tree
 
 from lancher_code.config.loader import load_config
+from lancher_code.errors import ConfigError
 from lancher_code.permissions.models import PermissionRule
 from lancher_code.providers.models import ModelDefinition
 from lancher_code.permissions.storage import PermissionStorage
@@ -16,6 +18,7 @@ from lancher_code.tui.settings.confirmation import DiscardChangesScreen
 from lancher_code.tui.settings.screen import SettingsScreen
 from lancher_code.tui.settings.mcp import MCPSettingsEditor
 from lancher_code.tui.settings.permissions import PermissionSettingsEditor
+from lancher_code.tui.settings.system import SystemSettingsEditor
 
 
 def _write_config(path: Path) -> None:
@@ -119,6 +122,104 @@ def test_invalid_domain_save_does_not_write_or_make_migration_backup(tmp_path) -
     with pytest.raises(SettingsError):
         service.save_mcp("global", {"demo": {"type":"stdio", "command":"node", "args":"bad"}})
     assert not service.global_mcp_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(32, 16), (100, 40)])
+async def test_system_experiment_is_default_off_reachable_and_applied_after_save(tmp_path, size) -> None:
+    service = _service(tmp_path)
+    calls = []
+
+    def validate(runtime) -> None:
+        assert not load_config(service.config_path).runtime.experimental_mcp_tool_append
+        calls.append(("validate", runtime.experimental_mcp_tool_append))
+
+    def apply(runtime) -> str:
+        assert load_config(service.config_path).runtime.experimental_mcp_tool_append
+        calls.append(("apply", runtime.experimental_mcp_tool_append))
+        return "系统实验设置已应用。"
+
+    app = _settings_app(service, on_runtime_validate=validate, on_runtime_saved=apply)
+    async with app.run_test(size=size) as pilot:
+        screen = app.screen
+        await pilot.click("#tab-runtime")
+        await pilot.pause()
+        checkbox = screen.query_one("#runtime-mcp-tool-append", Checkbox)
+        assert not checkbox.value
+        checkbox.scroll_visible(animate=False)
+        await pilot.pause()
+        for selector in ("#tab-runtime", "#runtime-mcp-tool-append", "#settings-save", "#settings-cancel"):
+            widget = screen.query_one(selector)
+            assert widget.region.x >= 0 and widget.region.right <= size[0]
+            assert widget.region.y >= 0 and widget.region.bottom <= size[1]
+        screenshot = app.export_screenshot()
+        (tmp_path / f"runtime-options-{size[0]}x{size[1]}.svg").write_text(screenshot, encoding="utf-8")
+        root = ElementTree.fromstring(screenshot)
+        visible_text = "".join("".join(node.itertext()) for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "text")
+        assert "原生 MCP 工具追加" in visible_text.replace("\u00a0", " ")
+        for selector, name in (("#runtime-mcp-compatibility", "compatibility"), ("#runtime-mcp-scope", "scope")):
+            screen.query_one(selector).scroll_visible(animate=False)
+            await pilot.pause()
+            (tmp_path / f"runtime-{name}-{size[0]}x{size[1]}.svg").write_text(app.export_screenshot(), encoding="utf-8")
+        checkbox.scroll_visible(animate=False)
+        await pilot.pause()
+        checkbox.focus()
+        await pilot.press("space")
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert calls == [("validate", True), ("apply", True)]
+        assert "已应用" in str(screen.query_one("#settings-notice", Static).render())
+        assert screen.snapshot.config.runtime.experimental_mcp_tool_append
+        assert not screen._system_pending
+        await pilot.press("escape")
+        await pilot.press("escape")
+        assert app.result.saved and app.result.config.runtime.experimental_mcp_tool_append
+        assert not app.result.system_pending
+
+
+@pytest.mark.asyncio
+async def test_runtime_validation_failure_preserves_file_and_checkbox_draft(tmp_path) -> None:
+    service = _service(tmp_path)
+    before = service.config_path.read_bytes()
+
+    def reject(runtime) -> None:
+        raise ConfigError("当前任务正在运行，请等待完成。")
+
+    app = _settings_app(service, on_runtime_validate=reject)
+    async with app.run_test(size=(100, 40)) as pilot:
+        screen = app.screen
+        await pilot.click("#tab-runtime")
+        screen.query_one("#runtime-mcp-tool-append", Checkbox).value = True
+        screen.action_save_settings()
+        await pilot.pause()
+        assert "等待完成" in str(screen.query_one("#settings-error", Static).render())
+        assert service.config_path.read_bytes() == before
+        assert screen.query_one(SystemSettingsEditor).dirty
+        assert not screen._saved
+
+
+@pytest.mark.asyncio
+async def test_runtime_apply_failure_reports_saved_pending_and_returns_latest_config(tmp_path) -> None:
+    service = _service(tmp_path)
+
+    def reject(runtime) -> str:
+        raise RuntimeError("当前端点未应用")
+
+    app = _settings_app(service, on_runtime_saved=reject)
+    async with app.run_test(size=(100, 40)) as pilot:
+        screen = app.screen
+        await pilot.click("#tab-runtime")
+        screen.query_one("#runtime-mcp-tool-append", Checkbox).value = True
+        screen.action_save_settings()
+        await pilot.pause()
+        assert load_config(service.config_path).runtime.experimental_mcp_tool_append
+        error = str(screen.query_one("#settings-error", Static).render())
+        assert "已保存" in error and "应用失败" in error
+        assert screen._system_pending
+        await pilot.press("escape")
+        await pilot.press("escape")
+        assert app.result.saved and app.result.system_pending
+        assert app.result.config.runtime.experimental_mcp_tool_append
 
 
 @pytest.mark.asyncio

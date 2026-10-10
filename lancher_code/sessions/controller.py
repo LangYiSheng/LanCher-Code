@@ -21,7 +21,7 @@ from lancher_code.context.offload import offload_tool_results
 from lancher_code.context.prompt_models import PromptContext
 from lancher_code.context.prompts import build_dynamic_context_prompt, build_prompt_context, build_user_message
 from lancher_code.context.recovery import record_file_snapshot
-from lancher_code.context.request import build_request
+from lancher_code.context.request import build_request, prepare_request
 from lancher_code.context.tokens import estimate_request, estimate_request_tokens, update_usage_anchor
 from lancher_code.contracts.control import CancellationToken, PermissionPolicy, WorkPhase, validate_runtime_axes
 from lancher_code.contracts.messages import ChatRequest, ContentBlock, ConversationMessage
@@ -78,6 +78,10 @@ class SessionController:
         self._state = state or SessionState()
         self._cwd = (cwd or Path.cwd()).resolve()
         self._current_date = current_date or datetime.now().astimezone().date()
+        self._date_override = current_date
+        self._request_clock = lambda: datetime.now(timezone.utc)
+        self._prompt_experiments = False
+        self._prompt_epoch_reset = False
         self._transcript: list[ConversationMessage] = []
         self._sessions = SessionService(self._cwd)
         self._usage_tracker = usage_tracker or RunUsageTracker()
@@ -105,10 +109,6 @@ class SessionController:
     @property
     def state(self) -> SessionState:
         return self._state
-
-    @property
-    def project_root(self) -> Path:
-        return self._cwd
 
     @property
     def transcript(self) -> list[ConversationMessage]:
@@ -206,6 +206,7 @@ class SessionController:
         context.usage_anchor = None
         context.automatic_failure_count = 0
         context.automatic_compaction_disabled = False
+        # 实际协议、模型或窗口变化由前缀投影比较，恢复相同模型不会重写历史。
 
     @persist_change()
     def set_work_phase(self, phase: WorkPhase) -> WorkPhase:
@@ -251,7 +252,7 @@ class SessionController:
         self._state.messages.append(message)
         self._active_dynamic_context = build_dynamic_context_prompt(self._prompt_context())
         self._transcript.append(
-            build_user_message(text=text, dynamic_context=self._active_dynamic_context)
+            build_user_message(text=text, dynamic_context=None)
         )
         notifications = list(self._state.execution['inbox'][:20])
         if notifications:
@@ -404,11 +405,46 @@ class SessionController:
         phase = self.work_phase if work_phase is None else work_phase
         policy = self.permission_policy if permission_policy is None else permission_policy
         validate_runtime_axes(phase, policy)
-        return build_request(
+        previous_context, previous_transcript, previous_dirty = self.context_state, self._transcript, self._dirty
+        request, candidate, transcript = prepare_request(
             config=self._provider_config, context=self._prompt_context(work_phase=phase, permission_policy=policy),
-            transcript=self._transcript, state=self.context_state, dynamic_context=self._active_dynamic_context,
+            transcript=copy.deepcopy(self._transcript), state=copy.deepcopy(self.context_state), dynamic_context=self._active_dynamic_context,
             tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
+            experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock(),
         )
+        self._state.context_management, self._transcript = candidate, transcript
+        self._mark_dirty()
+        try:
+            self.flush(context_event='context.prefix_updated')
+        except Exception:
+            if self._sessions.prefix_committed(self._snapshot()):
+                self._prompt_epoch_reset = False
+            else:
+                self._state.context_management, self._transcript, self._dirty = previous_context, previous_transcript, previous_dirty
+            raise
+        self._prompt_epoch_reset = False
+        return request
+
+    def preview_request(self, tools: list[ToolDefinition], *, allow_tool_calls: bool,
+                        work_phase: WorkPhase | None = None, permission_policy: PermissionPolicy | None = None,
+                        deferred_tool_groups: list[DeferredToolGroup] | None = None) -> ChatRequest:
+        phase, policy = work_phase or self.work_phase, permission_policy or self.permission_policy
+        validate_runtime_axes(phase, policy)
+        return build_request(config=self._provider_config, context=self._prompt_context(work_phase=phase, permission_policy=policy),
+                             transcript=self._transcript, state=self.context_state, dynamic_context=self._active_dynamic_context,
+                             tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
+                             experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock())
+
+    def configure_prompt_experiments(self, enabled: bool) -> None:
+        if type(enabled) is not bool:
+            raise ValueError('原生追加实验开关必须为布尔值。')
+        if enabled != self._prompt_experiments:
+            self._prompt_experiments = enabled
+            if self.context_state.prefix_state and self.context_state.prefix_state['experimental'] != enabled:
+                self.reset_prompt_epoch()
+
+    def reset_prompt_epoch(self) -> None:
+        self._prompt_epoch_reset = True
 
     def bind_agent_context(self, builder) -> None:
         """装配核心提供的上下文投影；保持会话层不依赖界面或能力实现。"""
@@ -549,7 +585,7 @@ class SessionController:
             previous_transcript = copy.deepcopy(self._transcript)
             previous_context = copy.deepcopy(self.context_state)
             previous_dirty = self._dirty
-            before_request = self.build_request(
+            before_request = self.preview_request(
                 visible_tools,
                 allow_tool_calls=True,
                 deferred_tool_groups=deferred_tool_groups,
@@ -569,6 +605,7 @@ class SessionController:
                 stream_request=lambda request: self.stream_request(provider, request),
                 request_factory=lambda request: self.bind_usage_request(request, turn_id=turn_id, purpose="compaction"),
                 prompt_context_factory=lambda state: self._prompt_context(context_state=state),
+                experimental=self._prompt_experiments,
             )
             result = candidate.result
             self._transcript = candidate.transcript
@@ -760,6 +797,7 @@ class SessionController:
         self._active_dynamic_context = None
         self._permission_storage.replace_session_rules([], notify=False)
         self._dirty = False
+        self._prompt_epoch_reset = False
 
     def rename_session(self, session_id: str, title: str) -> None:
         self.flush()
@@ -809,6 +847,7 @@ class SessionController:
             self._selected_model_ref, self._provider_config = next_ref, next_provider
             self._active_dynamic_context = None
             self._dirty = False
+            self._prompt_epoch_reset = False
             self._register_execution_session()
             self._remember_session()
             return len(retained.rules)
@@ -828,7 +867,8 @@ class SessionController:
         try:
             self._prepare_detach_view()
             candidate.activate(prepared)
-            candidate.persist(SessionCodec.encode(state, transcript, rules, next_model_ref))
+            candidate.persist(SessionCodec.encode(state, transcript, rules, next_model_ref),
+                              context_event='context.prefix_updated' if state.context_management.prefix_state else 'context.replaced')
             if self._execution_runtime is not None:
                 from lancher_code.execution.runtime import SessionRuntime
                 self._execution_runtime.register_session(SessionRuntime(
@@ -852,6 +892,7 @@ class SessionController:
         if resolved_model is not None:
             self._provider_config = resolved_model[0]
         self._dirty = False
+        self._prompt_epoch_reset = False
         self._register_execution_session()
         self._remember_session()
         return len(rules)
@@ -884,7 +925,7 @@ class SessionController:
         builder = getattr(self, '_agent_context_builder', None)
         return build_prompt_context(
             cwd=self._cwd,
-            current_date=self._current_date,
+            current_date=self._date_override or self._request_clock().astimezone().date(),
             work_phase=work_phase if work_phase is not None else self.work_phase,
             permission_policy=permission_policy if permission_policy is not None else self.permission_policy,
             plan_snapshot=self.plan_snapshot,

@@ -14,6 +14,8 @@ from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEve
 from lancher_code.usage.models import MessageUsage, merge_usage
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
+from lancher_code.providers.native_tools import grouped_tool_updates
+from lancher_code.providers.responses import ResponsesProvider
 from lancher_code.usage.ledger import RequestUsageStatus
 
 logger = get_logger("providers.openai")
@@ -21,6 +23,15 @@ logger = get_logger("providers.openai")
 
 class OpenAIProvider(BaseChatProvider):
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
+        if request.experimental_mcp_tool_append:
+            provider = self._responses()
+            stream = provider.stream_chat(request)
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                await stream.aclose()
+            return
         request = self._prepare_usage_attempt(request)
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
         headers = {
@@ -185,6 +196,9 @@ class OpenAIProvider(BaseChatProvider):
         return deepcopy(blocks)
 
     def _build_payload(self, request: ChatRequest) -> dict[str, object]:
+        if request.experimental_mcp_tool_append:
+            return self._responses()._build_payload(request)
+        grouped_tool_updates(request)
         payload: dict[str, object] = {
             "model": request.model,
             "messages": [self._serialize_system_message(text) for text in request.system]
@@ -192,8 +206,10 @@ class OpenAIProvider(BaseChatProvider):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if request.allow_tool_calls and request.tools:
+        if request.tools:
             payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
+            if not request.allow_tool_calls:
+                payload["tool_choice"] = "none"
         if request.max_output_tokens is not None:
             if type(request.max_output_tokens) is not int or request.max_output_tokens <= 0:
                 raise ProviderRequestError("输出 token 上限必须为正整数。")
@@ -202,6 +218,14 @@ class OpenAIProvider(BaseChatProvider):
                            else "max_tokens")
             payload[limit_field] = request.max_output_tokens
         return payload
+
+    def _responses(self) -> ResponsesProvider:
+        provider = getattr(self, "_responses_provider", None)
+        if provider is None:
+            provider = ResponsesProvider(self.config, self._client_factory, usage_observer=self._usage_observer)
+            provider._usage_run_id = self._usage_run_id
+            self._responses_provider = provider
+        return provider
 
     @staticmethod
     def _serialize_system_message(text: str) -> dict[str, object]:
@@ -239,7 +263,8 @@ class OpenAIProvider(BaseChatProvider):
 
         if message.role == "assistant":
             for block in message.blocks:
-                if block.kind == "thinking" and block.thinking_protocol == "openai" and block.text:
+                if (block.kind == "thinking" and block.thinking_protocol == "openai"
+                        and block.text and block.data is None):
                     field = block.thinking_field or "reasoning_content"
                     serialized[field] = str(serialized.get(field, "")) + block.text
         return serialized

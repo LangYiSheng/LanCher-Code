@@ -141,7 +141,10 @@ async def test_plan_with_payload_submits_request_in_plan_mode(
         assert session.work_phase == "plan"
         assert len(provider.requests) == 1
         assert provider.requests[0].work_phase == "plan"
-        assert "用户刚进入 Plan Mode" in provider.requests[0].messages[0].blocks[0].text
+        request = provider.requests[0]
+        assert request.messages[0].blocks[0].text == '为搜索功能写计划'
+        assert request.messages[-1].blocks[0].text.startswith('<host_update ')
+        assert '用户刚进入 Plan Mode' in request.messages[-1].blocks[0].text
 
 
 @pytest.mark.asyncio

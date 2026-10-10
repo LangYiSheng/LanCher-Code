@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict
+import json
 
 import pytest
 from provider_helpers import complete_test_response
@@ -117,6 +118,53 @@ def test_invalid_complete_snapshot_never_changes_transcript_or_writes_events(
 def test_thinking_blocks_round_trip_without_tool_call_identifiers(block) -> None:
     message = ConversationMessage(role="assistant", blocks=[block], response_protocol="claude", response_model="test-model")
     assert SessionCodec.decode_transcript(asdict(message)) == message
+
+
+def _opaque_reasoning(**changes):
+    value = {'id': 'rs_123', 'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': '已核对'}],
+             'encrypted_content': 'opaque-ciphertext'}
+    value.update(changes)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def test_responses_opaque_reasoning_is_persisted_and_restored_exactly(openai_provider_config, tmp_path):
+    session = SessionController(openai_provider_config, cwd=tmp_path)
+    block = ContentBlock(kind='thinking', thinking_protocol='openai', data=_opaque_reasoning())
+    try:
+        session.create_user_message('检查')
+        session.append_assistant_response([block, ContentBlock.text_block('完成')])
+        saved_id = session.session_id
+        expected = deepcopy(session.transcript)
+        assert SessionCodec.decode_transcript(asdict(expected[-1])) == expected[-1]
+    finally:
+        session.close()
+    restored = SessionController(openai_provider_config, cwd=tmp_path)
+    try:
+        restored.resume_session(saved_id)
+        assert restored.transcript == expected
+        assistant = next(message for message in restored.preview_request([], allow_tool_calls=False).messages
+                         if message.role == 'assistant')
+        assert assistant.blocks[0].data == block.data
+    finally:
+        restored.close()
+
+
+@pytest.mark.parametrize('data,protocol', [
+    ('[]', 'openai'), ('not-json', 'openai'),
+    (_opaque_reasoning(type='message'), 'openai'), (_opaque_reasoning(id=''), 'openai'),
+    (_opaque_reasoning(summary='invented'), 'openai'),
+    (_opaque_reasoning(summary=[{'type': 'text', 'text': '摘要'}]), 'openai'),
+    (_opaque_reasoning(encrypted_content=12), 'openai'),
+    (_opaque_reasoning(encrypted_content=''), 'openai'),
+    (_opaque_reasoning(), 'claude'),
+    ('{"id":"rs","type":"reasoning","summary":[],"summary":[]}', 'openai'),
+    ('{"id":"rs","type":"reasoning","summary":[],"unexpected":NaN}', 'openai'),
+])
+def test_invalid_responses_reasoning_is_rejected_before_persisting(data, protocol):
+    message = ConversationMessage(role='assistant', blocks=[ContentBlock(
+        kind='thinking', thinking_protocol=protocol, data=data)], response_protocol='openai', response_model='test')
+    with pytest.raises(ValueError):
+        SessionCodec.decode_transcript(asdict(message))
 
 
 def test_protocol_history_without_response_provenance_is_rejected() -> None:

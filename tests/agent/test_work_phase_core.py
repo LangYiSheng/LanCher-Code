@@ -73,18 +73,25 @@ def test_mcp_discovery_and_permission_share_explicit_readonly_boundary(tmp_path,
     assert (check.decision == "allow") is expected
 
 
-def test_discuss_and_plan_share_tools_except_plan_writer(openai_provider_config, tmp_path):
+def test_phase_changes_keep_tool_schema_prefix_and_filter_discovery(openai_provider_config, tmp_path):
     session = SessionController(openai_provider_config, cwd=tmp_path)
     registry = create_default_tool_registry()
     session.set_permission_policy("bypass")
     session.set_work_phase("discuss")
-    request = session.build_request(registry.list_definitions(), allow_tool_calls=True)
+    definitions = registry.list_definitions()
+    request = session.build_request(definitions, allow_tool_calls=True)
     assert request.work_phase == "discuss"
     assert request.permission_policy == "bypass"
-    assert {tool.name for tool in request.tools} == {"read_file", "write_file", "edit_file", "glob", "grep", "tool_search", "process_list", "process_read", "process_wait", "process_stop"}
+    assert request.tools == definitions
+    discuss_tools = registry.list_definitions(work_phase='discuss')
     session.set_work_phase("plan")
+    plan_request = session.build_request(definitions, allow_tool_calls=True)
+    assert plan_request.tools == request.tools
+    assert plan_request.system == request.system
+    assert plan_request.messages[:len(request.messages)] == request.messages
+    assert plan_request.work_phase == 'plan'
     plan_tools = registry.list_definitions(work_phase=session.work_phase)
-    assert {tool.name for tool in plan_tools} == {tool.name for tool in request.tools} | {"write_plan_file"}
+    assert {tool.name for tool in plan_tools} == {tool.name for tool in discuss_tools} | {"write_plan_file"}
     session.set_work_phase("execute")
     assert session.permission_policy == "bypass"
 

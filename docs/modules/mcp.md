@@ -50,11 +50,17 @@ AgentCapabilities（agent/capabilities.py）
 
 ## 延迟加载与搜索
 
-工具可见名为 `mcp__<server>__<tool>`。默认只提供有预算的 Server／工具索引，完整参数 Schema 按需加载。
+工具可见名为 `mcp__<server>__<tool>`。默认只提供有预算的 Server／工具索引，完整参数 Schema 按需加载。核心保存目录与已发现定义；目录更新通过尾部 `host_update` 提供，不每次改写旧任务消息。
 
-模型先调用 `tool_search`：完整名称用 `select:<完整工具名>` 精确选择，其他查询按名称、Server 和用途描述排序。每次加载前 8 个候选，更多匹配以 `has_more` 提示，模型可缩小查询；超过 8 个不再整批拒绝。下一次请求附上已发现工具的完整定义。
+模型先调用 `tool_search`：完整名称用 `select:<完整工具名>` 精确选择，其他查询按名称、Server 和用途描述排序。每次加载前 8 个候选，更多匹配以 `has_more` 提示，模型可缩小查询；超过 8 个不再整批拒绝。常规模式从下一次请求把完整定义加入 `tools` 数组，跨用户轮保持已发现定义及顺序。
 
 尚未发现、已删除或断开的工具由执行器拦截；在阶段变化、工具刷新及执行前重新核对当前定义。索引预算只影响展示，不删除真实注册工具，未列出的工具仍可搜索。
+
+## 原生追加实验项
+
+“系统设置”中的 `runtime.experimental_mcp_tool_append` 默认关闭。开启后，核心固定初始工具基线，把后续变更交给 Provider 投影：OpenAI 使用 Responses 的 `additional_tools`，Claude 使用 `inline-tools-2026-09-15` beta 的 `tool_addition`／`tool_removal`。OpenAI 的移除或同名定义更新需要重建一次工具前缀。
+
+实验项只适用于支持对应扩展的端点，错误会明确提示关闭，不自动重放远端操作。当前覆盖离线 Provider 请求及传输 fixture，尚未实测模型 API 兼容性或缓存命中率。MCP 连接与工具执行本身仍走原有权限、阶段及调度链；不使用通用 `mcp_call` 代理。详见 [请求前缀与缓存](prompting.md)。
 
 ## 执行、输出与结果未知
 

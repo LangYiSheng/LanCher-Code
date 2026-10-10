@@ -168,8 +168,9 @@ async def test_claude_tool_loops_preserve_each_thinking_exchange_and_resume(
         ]
         expected_transcript = deepcopy(session.transcript)
         assert [message.role for message in expected_transcript] == [
-            "user", "assistant", "tool", "assistant", "tool", "assistant",
+            "user", "user", "assistant", "tool", "assistant", "tool", "assistant",
         ]
+        assert expected_transcript[1].blocks[0].text.startswith('<host_update ')
         assert provider._serialize_message(expected_transcript[-1])["content"] == final_expected
         assert sum(block.text == "最终回答正文，继续正文"
                    for message in expected_transcript for block in message.blocks) == 1
@@ -247,7 +248,8 @@ async def test_eof_without_message_stop_does_not_execute_or_commit_the_partial_e
         assert "未收到完整响应" in events[-1].error_text
         assert tool.executed == []
         assert len(requests) == 1
-        assert [message.role for message in session.transcript] == ["user"]
+        assert [message.role for message in session.transcript] == ["user", "user"]
+        assert session.transcript[1].blocks[0].text.startswith('<host_update ')
         assert all(event.tool_result is None for event in events)
         assert len(session.state.request_usage) == 1
         record = next(iter(session.state.request_usage.values()))
@@ -321,7 +323,8 @@ async def test_transport_eof_does_not_execute_tools_and_records_failed_attempt(
         assert events[-1].kind == "turn_failed"
         assert tool.executed == []
         assert len(requests) == 1
-        assert [message.role for message in session.transcript] == ["user"]
+        assert [message.role for message in session.transcript] == ["user", "user"]
+        assert session.transcript[1].blocks[0].text.startswith('<host_update ')
         record = next(iter(session.state.request_usage.values()))
         assert record["status"] == "failed"
 
@@ -338,7 +341,8 @@ async def test_plain_final_answer_saves_signed_thinking_once(
         assert events[-1].kind == "turn_completed"
         assert events[-1].message.content == "直接回答正文，继续正文"
         assert tool.executed == [] and len(requests) == 1
-        assert [message.role for message in session.transcript] == ["user", "assistant"]
+        assert [message.role for message in session.transcript] == ["user", "user", "assistant"]
+        assert session.transcript[1].blocks[0].text.startswith('<host_update ')
         assert provider._serialize_message(session.transcript[-1])["content"] == expected
         assert len([entry for entry in events[-1].message.trace.entries if entry.kind == "thinking"]) == 1
         assert "signature" not in events[-1].message.trace.entries[0].text

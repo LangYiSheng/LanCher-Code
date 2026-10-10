@@ -13,7 +13,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Static
 
 from lancher_code.providers.catalog import iter_model_refs
-from lancher_code.config.models import AppConfig, UIConfig
+from lancher_code.config.models import AppConfig, RuntimeConfig, UIConfig
 from lancher_code.config.settings import SettingsError, SettingsService, SettingsSnapshot
 from lancher_code.tui.model_picker import ModelPickerScreen
 from lancher_code.tui.settings.models import DeleteProviderScreen, ModelSettingsEditor
@@ -23,10 +23,11 @@ from lancher_code.tui.settings.common import SettingsDomainEditor, EditorViewCha
 from lancher_code.tui.settings.mcp import MCPSettingsEditor
 from lancher_code.tui.settings.permissions import PermissionSettingsEditor
 from lancher_code.tui.settings.appearance import AppearanceSettingsEditor
+from lancher_code.tui.settings.system import SystemSettingsEditor
 
 from lancher_code.tui.settings.styles import SETTINGS_CSS
 
-TAB_IDS = ("model", "mcp", "permissions", "ui")
+TAB_IDS = ("model", "mcp", "permissions", "ui", "runtime")
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,7 @@ class SettingsResult:
     config: AppConfig | None = None
     runtime_applied: bool = False
     mcp_pending: bool = False
+    system_pending: bool = False
 
 
 class SettingsScreen(Screen[SettingsResult]):
@@ -48,23 +50,27 @@ class SettingsScreen(Screen[SettingsResult]):
                  on_models_saved: Callable[[AppConfig], str | None] | None = None,
                  on_model_selected: Callable[[str], str | None] | None = None,
                  on_ui_saved: Callable[[UIConfig], None] | None = None,
-                 on_mcp_saved: Callable[[], Awaitable[str]] | None = None) -> None:
+                 on_mcp_saved: Callable[[], Awaitable[str]] | None = None,
+                 on_runtime_saved: Callable[[RuntimeConfig], str | None] | None = None,
+                 on_runtime_validate: Callable[[RuntimeConfig], None] | None = None) -> None:
         super().__init__()
         self.service = service
         self.current_model_ref = current_model_ref
         self._on_models_saved, self._on_model_selected, self._on_ui_saved = on_models_saved, on_model_selected, on_ui_saved
         self._on_mcp_saved = on_mcp_saved
+        self._on_runtime_saved, self._on_runtime_validate = on_runtime_saved, on_runtime_validate
         self.snapshot: SettingsSnapshot | None = None
         self._active_tab = "model"
         self._saved = False
         self._mcp_pending = service.mcp_restart_required if on_mcp_saved is None else False
         self._runtime_applied = False
+        self._system_pending = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="settings-root"):
             yield Static("❯ LanCher Code / 设置 / 模型", id="settings-title")
             with Horizontal(id="settings-tabs"):
-                for tab_id, label in zip(TAB_IDS, ("模型", "MCP 工具", "权限规则", "外观与输入")):
+                for tab_id, label in zip(TAB_IDS, ("模型", "MCP 工具", "权限规则", "外观与输入", "系统设置")):
                     yield Button(label, id=f"tab-{tab_id}", classes="settings-tab")
             yield Static("", id="settings-restart", markup=False)
             yield Static("", id="settings-error", markup=False)
@@ -74,6 +80,7 @@ class SettingsScreen(Screen[SettingsResult]):
                 yield MCPSettingsEditor(self.service)
                 yield PermissionSettingsEditor(self.service)
                 yield AppearanceSettingsEditor(self.service)
+                yield SystemSettingsEditor(self.service)
             with Horizontal(id="settings-actions"):
                 yield Button("‹ 返回对话", id="settings-cancel")
                 yield Button("保存", id="settings-save")
@@ -104,7 +111,7 @@ class SettingsScreen(Screen[SettingsResult]):
 
     def _refresh_tab_labels(self) -> None:
         compact = self.size.width < 60
-        labels = ("模型", "MCP", "权限", "外观") if compact else ("模型", "MCP 工具", "权限规则", "外观与输入")
+        labels = ("模型", "MCP", "权限", "外观", "系统") if compact else ("模型", "MCP 工具", "权限规则", "外观与输入", "系统设置")
         for tab_id, label in zip(TAB_IDS, labels):
             self.query_one(f"#tab-{tab_id}", Button).label = f"› {label}" if not compact and tab_id == self._active_tab else label
 
@@ -157,12 +164,12 @@ class SettingsScreen(Screen[SettingsResult]):
         editing = self._editing
         self.query_one("#settings-save").display = editing
         self.query_one("#settings-cancel", Button).label = "‹ 返回目录" if editing else "‹ 返回对话"
-        labels = {"model":"模型", "mcp":"MCP 工具", "permissions":"权限规则", "ui":"外观与输入"}
+        labels = {"model":"模型", "mcp":"MCP 工具", "permissions":"权限规则", "ui":"外观与输入", "runtime":"系统设置"}
         editor = self.query_one(ModelSettingsEditor)
         suffix = " / 供应商连接" if self._active_tab == "model" and editor.kind == "provider" else " / 编辑" if editing else ""
         self.query_one("#settings-title", Static).update(f"❯ LanCher Code / 设置 / {labels[self._active_tab]}{suffix}")
         save_label = "保存供应商" if editor.kind == "provider" else "保存模型"
-        self.query_one("#settings-save", Button).label = save_label if self._active_tab == "model" else {"mcp":"保存服务器", "permissions":"保存规则", "ui":"保存偏好"}[self._active_tab]
+        self.query_one("#settings-save", Button).label = save_label if self._active_tab == "model" else {"mcp":"保存服务器", "permissions":"保存规则", "ui":"保存偏好", "runtime":"保存系统"}[self._active_tab]
 
     @on(ModelSettingsEditor.PickRequested)
     def pick_requested(self, event: ModelSettingsEditor.PickRequested) -> None:
@@ -262,6 +269,16 @@ class SettingsScreen(Screen[SettingsResult]):
         def save() -> None:
             if self._active_tab == "model":
                 self._commit_models(self.query_one(ModelSettingsEditor).collect(), "已保存；本次模型与新对话默认分别管理。")
+            elif self._active_tab == "runtime":
+                editor = self.query_one(SystemSettingsEditor)
+                runtime = editor.collect()
+                if self._on_runtime_validate is not None:
+                    try:
+                        self._on_runtime_validate(deepcopy(runtime))
+                    except Exception as exc:
+                        self._show_error(str(exc))
+                        return
+                editor.save(runtime)
             else:
                 self._domain_editor().save()
         self._save_with_error(save)
@@ -299,6 +316,16 @@ class SettingsScreen(Screen[SettingsResult]):
                     self._on_ui_saved(deepcopy(event.ui))
             except Exception as exc:
                 callback_error = f"偏好已保存，当前界面更新失败：{exc}"
+        if event.runtime is not None:
+            self._system_pending = True
+            if self._on_runtime_saved is not None:
+                try:
+                    applied_notice = self._on_runtime_saved(deepcopy(event.runtime))
+                except Exception as exc:
+                    callback_error = f"系统设置已保存，当前运行时应用失败：{exc}；请在空闲时重新保存或重启应用。"
+                else:
+                    self._system_pending = False
+                    notice = applied_notice or "系统设置已保存并应用。"
         self._show_tab("model" if event.domain == "ui" else event.domain)
         self._notice(notice)
         if callback_error:
@@ -311,10 +338,10 @@ class SettingsScreen(Screen[SettingsResult]):
     def action_close_settings(self) -> None:
         def leave() -> None:
             if self._editing:
-                self._show_tab(self._active_tab if self._active_tab != "ui" else "model")
+                self._show_tab("model" if self._active_tab in {"ui", "runtime"} else self._active_tab)
             else:
                 self.dismiss(SettingsResult(self._saved, False, deepcopy(self.snapshot.config) if self.snapshot else None,
-                                            self._runtime_applied, self._mcp_pending))
+                                            self._runtime_applied, self._mcp_pending, self._system_pending))
         self._guard(leave)
 
     def _show_error(self, message: str) -> None:

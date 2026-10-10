@@ -59,9 +59,10 @@ sequenceDiagram
 
 ### 2. 请求组装（`SessionController.build_request`）
 
-- 可见工具 = 注册表中按工作阶段过滤后的定义（含上一轮 `tool_search` 发现且阶段允许的 MCP 工具）；审批策略独立传入
-- system = 系统提示 + 环境提示 + 动态提醒 + 延迟工具索引
-- messages = 协议无关 transcript（剥离旧 reminder、注入新 reminder）
+- 工具定义由核心维护，含内置能力和已发现 MCP 工具；跨轮保持已发布定义与顺序，阶段和审批策略独立传入，执行时仍检查当前阶段
+- system = 当前周期固定的基础规则、稳定环境、初始项目约定和能力目录
+- messages = 协议无关 transcript，加核心持久化的 `host_update` 尾部事件；迁移时仅清理一次旧 reminder，后续不改写旧任务
+- 禁止继续调用工具时保留 Schema，Provider 使用 `tool_choice: none`；详见 [请求前缀](../modules/prompting.md)
 
 ### 3. 流式消费（`agent.streaming.collect_response`）
 

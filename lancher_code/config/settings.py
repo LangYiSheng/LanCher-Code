@@ -10,7 +10,7 @@ import yaml
 from lancher_code.config.loader import load_config, load_config_data
 from lancher_code.config.writer import serialize_config, write_yaml_atomic
 from lancher_code.errors import ConfigError
-from lancher_code.config.models import AppConfig, UIConfig
+from lancher_code.config.models import AppConfig, RuntimeConfig, UIConfig
 from lancher_code.permissions.models import PermissionRule
 from lancher_code.permissions.storage import PermissionStorage
 from lancher_code.mcp.config import MCPConfigValidationError, validate_server_config
@@ -74,6 +74,12 @@ class SettingsService:
     def save_ui(self, ui: UIConfig) -> AppConfig:
         current = self._read_config()
         current.ui = deepcopy(ui)
+        return self._save_config(current)
+
+    def save_runtime(self, runtime: RuntimeConfig) -> AppConfig:
+        """只保存系统运行配置，运行时应用由智能体核心负责。"""
+        current = self._read_config()
+        current.runtime = deepcopy(runtime)
         return self._save_config(current)
 
     def _read_config(self) -> AppConfig:

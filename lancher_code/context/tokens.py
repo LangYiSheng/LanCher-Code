@@ -63,9 +63,12 @@ def _shape_digest(request: ChatRequest) -> str:
     return _digest({
         "model": request.model,
         "system": request.system,
-        "tools": [{"name": tool.name, "description": tool.description, "schema": tool.input_schema} for tool in request.tools] if request.allow_tool_calls else [],
+        "tools": [{"name": tool.name, "description": tool.description, "schema": tool.input_schema} for tool in request.tools],
         "allow_tool_calls": request.allow_tool_calls,
         "thinking": repr(request.thinking),
+        "experimental_mcp_tool_append": request.experimental_mcp_tool_append,
+        "prompt_cache_enabled": request.prompt_cache_enabled,
+        "tool_updates": request.tool_updates,
     })
 
 
@@ -106,8 +109,9 @@ def _request_breakdown(request: ChatRequest) -> dict[str, int]:
     result["tool_definitions"] = sum(
         estimate_text_tokens(tool.name) + estimate_text_tokens(tool.description)
         + estimate_text_tokens(_canonical(tool.input_schema)) + 16
-        for tool in request.tools if request.allow_tool_calls
+        for tool in request.tools
     )
+    result['tool_updates'] = sum(estimate_text_tokens(_canonical(event)) + 8 for event in request.tool_updates)
     result["framing"] += 8
     return result
 

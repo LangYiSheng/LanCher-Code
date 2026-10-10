@@ -27,7 +27,7 @@ from lancher_code.errors import (
     ProviderPromptTooLongError,
 )
 from lancher_code.logging_system import get_logger
-from lancher_code.config.models import AppConfig
+from lancher_code.config.models import AppConfig, RuntimeConfig
 from lancher_code.contracts.control import CancellationToken, PermissionPolicy, WorkPhase
 from lancher_code.context.models import CompactionActivity, CompactionTrigger, ContextCompactionResult
 from lancher_code.usage.models import MessageUsage
@@ -81,6 +81,8 @@ class TurnRunner:
         self._session.bind_execution_runtime(self._execution_runtime)
         self._max_tool_loops = max_tool_loops
         self._unknown_tool_streak_limit = unknown_tool_streak_limit
+        self._runtime_config = RuntimeConfig(tool_loop_limit=max_tool_loops,
+                                             unknown_tool_streak_limit=unknown_tool_streak_limit)
         self._active_turn: _ActiveTurn | None = None
         self._manual_compaction = False
         self._compaction_task: asyncio.Task | None = None
@@ -116,6 +118,31 @@ class TurnRunner:
     ) -> None:
         self._ensure_model_idle()
         self._models.configure_models(config, provider_factory)
+        self._apply_runtime_config(config.runtime)
+
+    def validate_runtime_settings(self, runtime: RuntimeConfig) -> None:
+        self._ensure_model_idle()
+        if type(runtime.experimental_mcp_tool_append) is not bool:
+            raise ConfigError('原生 MCP 工具追加实验项必须为布尔值。')
+        if runtime.tool_loop_limit < 1 or runtime.unknown_tool_streak_limit < 1:
+            raise ConfigError('工具循环和未知工具次数上限必须为正整数。')
+
+    def _apply_runtime_config(self, runtime: RuntimeConfig) -> None:
+        self._runtime_config = deepcopy(runtime)
+        self._max_tool_loops = runtime.tool_loop_limit
+        self._unknown_tool_streak_limit = runtime.unknown_tool_streak_limit
+        self._session.configure_prompt_experiments(runtime.experimental_mcp_tool_append)
+
+    def apply_runtime_settings(self, runtime: RuntimeConfig) -> str:
+        self.validate_runtime_settings(runtime)
+        changed = self._runtime_config.experimental_mcp_tool_append != runtime.experimental_mcp_tool_append
+        self._apply_runtime_config(runtime)
+        if self.model_config is not None:
+            self.model_config.runtime = deepcopy(runtime)
+        if changed:
+            mode = '原生追加实验模式' if runtime.experimental_mcp_tool_append else '常规 tools 数组模式'
+            return f'已切换为{mode}，下一次请求重建上下文前缀。'
+        return '系统设置已应用；当前会话阶段和权限保持其会话设置。'
 
     @property
     def model_config(self) -> AppConfig | None:
@@ -143,7 +170,10 @@ class TurnRunner:
 
     def reload_models(self, config: AppConfig) -> bool:
         self._ensure_model_idle()
-        return self._models.reload_models(config)
+        # 模型目录热更新不能顺带应用已保存但尚未成功应用的系统设置。
+        snapshot = deepcopy(config)
+        snapshot.runtime = deepcopy(self._runtime_config)
+        return self._models.reload_models(snapshot)
 
     def resume_session(self, session_id: str) -> int:
         self._ensure_model_idle()
@@ -525,7 +555,7 @@ class TurnRunner:
         total_usage = MessageUsage()
         loop_count = 0
         unknown_tool_streak = 0
-        discovered_tool_names: set[str] = set()
+        discovered_tool_names = set(self._session.context_state.prefix_state.get('observed_tools', {}))
         pending_tool_calls: list[ToolCall] = []
         phase = self._session.work_phase
         policy = self._session.permission_policy
@@ -566,14 +596,11 @@ class TurnRunner:
                     await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
                     return
 
-                visible_tools = self._tool_registry.list_definitions(
-                    discovered_names=discovered_tool_names,
-                    work_phase=phase,
-                )
                 await self._session.offload_large_tool_results()
-                deferred_tool_groups = self._tool_registry.list_deferred_index(
-                    work_phase=phase,
-                )
+                visible_tools = self._capabilities.visible_tools(discovered_tool_names)
+                # 请求定义和执行对象来自同一快照，流式响应期间换工具必须拒绝旧调用。
+                expected_tool_bindings = {tool.name: self._tool_registry.get(tool.name) for tool in visible_tools}
+                deferred_tool_groups = self._tool_registry.list_deferred_index()
                 request = self._session.build_request(
                     visible_tools,
                     allow_tool_calls=True,
@@ -742,6 +769,7 @@ class TurnRunner:
                         turn_id=turn_id, generation=generation, phase=phase, policy=policy,
                         cancellation_token=cancellation_token, permission_resolver=self._request_permission,
                         available_tool_names={tool.name for tool in visible_tools},
+                        expected_tool_bindings=expected_tool_bindings,
                         should_interrupt=self._has_steering,
                         is_current=lambda: self._active_turn is active_turn,
                         emit=partial(self._emit, queue),

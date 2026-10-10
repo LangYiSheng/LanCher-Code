@@ -16,6 +16,7 @@ from lancher_code.sessions.controller import SessionController
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.agent.runner import MAX_TOOL_LOOPS, TurnRunner
+from lancher_code.config.models import RuntimeConfig
 
 DelayedEvent = tuple[StreamEvent, float]
 
@@ -137,7 +138,9 @@ async def test_turn_runner_completes_plain_text_turn(openai_provider_config, tmp
     assert events[-1].message is not None
     assert events[-1].message.content == "直接回答"
     assert len(provider.requests) == 1
-    assert [message.role for message in session.transcript] == ["user", "assistant"]
+    assert [message.role for message in session.transcript] == ["user", "user", "assistant"]
+    assert session.transcript[1].blocks[0].text.startswith('<host_update ')
+    assert session.transcript[0].blocks[0].text == '你好'
 
 
 @pytest.mark.asyncio
@@ -310,11 +313,11 @@ async def test_turn_runner_adds_discovered_schema_only_to_next_loop(openai_provi
     base_tools = ["tool_search", "load_skill", "read_skill_resource"]
     assert [tool.name for tool in provider.requests[0].tools] == base_tools
     assert {tool.name for tool in provider.requests[1].tools} == {*base_tools, "mcp__demo__echo"}
-    assert "mcp__demo__echo" in provider.requests[0].system[-1]
+    assert "mcp__demo__echo" in '\n'.join(provider.requests[0].system)
 
 
 @pytest.mark.asyncio
-async def test_turn_runner_resets_discovered_tools_for_next_user_turn(openai_provider_config, tmp_path: Path) -> None:
+async def test_turn_runner_retains_discovered_tools_for_next_user_turn(openai_provider_config, tmp_path: Path) -> None:
     provider = FakeProvider(
         responses=[
             [
@@ -337,7 +340,44 @@ async def test_turn_runner_resets_discovered_tools_for_next_user_turn(openai_pro
     _ = [event async for event in runner.run_user_turn("第一轮")]
     _ = [event async for event in runner.run_user_turn("第二轮")]
 
-    assert [tool.name for tool in provider.requests[2].tools] == ["tool_search", "load_skill", "read_skill_resource"]
+    assert [tool.name for tool in provider.requests[2].tools] == [
+        "tool_search", "load_skill", "read_skill_resource", "mcp__demo__echo",
+    ]
+    assert provider.requests[2].system == provider.requests[1].system
+    assert provider.requests[2].tools == provider.requests[1].tools
+
+
+@pytest.mark.asyncio
+async def test_experimental_tool_addition_keeps_baseline_and_executes_real_tool(openai_provider_config, tmp_path):
+    provider = FakeProvider([
+        [StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
+            call_index=0, provider_call_id='find', name_delta='tool_search', arguments_delta='{"query":"echo"}')),
+         StreamEvent(kind='message_end', response_complete=True)],
+        [StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
+            call_index=0, provider_call_id='echo', name_delta='mcp__demo__echo', arguments_delta='{"value":"成功"}')),
+         StreamEvent(kind='message_end', response_complete=True)],
+        [StreamEvent(kind='text_delta', text='完成'), StreamEvent(kind='message_end', response_complete=True)],
+    ])
+    registry = ToolRegistry()
+    registry.register(DiscoverTool())
+    registry.register_deferred_server('demo', title='Demo MCP', description=None)
+    registry.register(DeferredEchoTool(), deferred_server_name='demo')
+    session = SessionController(openai_provider_config, cwd=tmp_path)
+    runner = TurnRunner(provider, session, registry, ToolExecutor(registry, cwd=tmp_path))
+    try:
+        runner.apply_runtime_settings(RuntimeConfig(experimental_mcp_tool_append=True))
+        events = [event async for event in runner.run_user_turn('查找并调用echo')]
+        assert events[-1].kind == 'turn_completed'
+        assert provider.requests[1].tools == provider.requests[0].tools
+        assert all(tool.name != 'mcp__demo__echo' for tool in provider.requests[1].tools)
+        update = provider.requests[1].tool_updates[0]
+        assert [tool['name'] for tool in update['additions']] == ['mcp__demo__echo']
+        assert update['at_message'] >= len(provider.requests[0].messages)
+        assert any(block.kind == 'tool_result' and '成功' in block.text
+                   for message in provider.requests[-1].messages for block in message.blocks)
+    finally:
+        await runner.shutdown()
+        session.close()
 
 
 @pytest.mark.asyncio
@@ -780,7 +820,8 @@ async def test_tool_argument_stream_notifies_thinking_finished_before_arguments_
                 assert session.state.messages[-1].status == "streaming"
                 release_arguments.set()
 
-    await asyncio.wait_for(collect(), 3)
+    # 验证事件顺序；真实会话日志落盘不属于三秒内完成的性能约束。
+    await asyncio.wait_for(collect(), 15)
     assert len(notifications) == 1
     assert len(provider.requests) == 2
     assert session.state.messages[-1].status == "complete"

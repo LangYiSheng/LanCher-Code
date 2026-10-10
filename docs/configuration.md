@@ -91,8 +91,22 @@ default_model: deepseek/chat
 | `runtime.unknown_tool_streak_limit` | int | `3` | 否 | 连续请求未知工具达到该次数即停止本轮 |
 | `runtime.work_phase` | str | `execute` | 否 | 初始工作阶段：`discuss` / `plan` / `execute` |
 | `runtime.permission_policy` | str | `default` | 否 | 权限策略：`default` / `acceptEdits` / `bypass`，不改变阶段 |
+| `runtime.experimental_mcp_tool_append` | bool | `false` | 否 | 系统实验项：支持端点的原生 MCP 工具追加；严格布尔值 |
 
 `runtime.permission_mode` 已移除，必须使用独立的 `work_phase` 与 `permission_policy`。工具记录与思考显示开关独立；关闭思考显示不会隐藏工具活动。
+
+### 系统设置：原生 MCP 工具追加（实验）
+
+```yaml
+runtime:
+  experimental_mcp_tool_append: false
+```
+
+默认关闭，缺省配置保留常规 `tools` 数组，新发现的 MCP 工具从下一次请求加入并跨用户轮保持顺序。开启只适合明确支持的模型端点：OpenAI 路径改用 Responses 和 `additional_tools`，Claude 使用 `inline-tools-2026-09-15` beta 追加或移除定义；不提供通用 `mcp_call` 代理。
+
+在 `/settings` 的“系统设置”页修改。保存前调用核心空闲校验，成功写盘后由核心应用；模式变化使下一次请求重建前缀。校验失败保留草稿与原文件；写盘成功但应用失败分别显示“已保存”和“待应用”，可空闲时重新保存或重启。该选项不改变阶段、审批或外部连接权限。
+
+官方 Anthropic 端点默认发送 `cache_control`；Claude 兼容端点只在实验项开启、用户声明支持时发送。未经验证的兼容端点应保持关闭；不支持的实验请求明确报错，不自动重放操作。当前只验证离线请求结构与传输 fixture，尚未进行真实模型 API 或缓存命中率实测。前缀与事件规则见 [提示词与请求前缀](modules/prompting.md)。
 
 ### `execution`：资源额度与已知命令约定
 
@@ -215,15 +229,17 @@ mcp_servers:
 
 ## 设置面板（/settings）
 
-运行时可以通过 `/settings` 打开 Textual 设置面板（`tui/settings/screen.py` + `config/settings.py`），四个标签页：
+运行时可以通过 `/settings` 打开 Textual 设置面板（`tui/settings/screen.py` + `config/settings.py`），五个标签页：
 
 - **模型设置**：增删改供应商及其多个模型，选择新会话默认模型；模型连接字段可独立继承或覆盖。API Key 留空保留原值，勾选“继承供应商”才会清除模型自己的密钥覆盖。模型高级选项包含上下文窗口和 thinking。
 - **MCP 服务器**：全局 / 项目两层，增删改 Server
 - **项目权限 / 全局权限**：增删改、上下移规则
+- **外观与输入**：主题与忙时输入偏好
+- **系统设置**：默认关闭的原生 MCP 工具追加实验项，只有支持端点适合开启
 
 “应用条目”只修改设置草稿，底部“保存”才写入文件。删除默认模型或其供应商前须先指定另一个默认模型；删除供应商会确认其下模型列表。
 
-保存按领域调用 `SettingsService.save_models/save_ui/save_mcp/save_rules`：校验本次提交，使用 `config/writer.py` 的临时文件与 `os.replace` 原子替换目标文件；写盘成功后才激活相关运行时更新。模型与 UI 保存保留主配置中的其他领域、环境变量原文及继承关系。模型目录保存后立即可用；修改默认值不覆盖当前会话已选模型。当前模型仍存在时继续使用它，并更新其连接配置；已删除时回退新默认模型并提示。MCP 保存后由能力核心关闭旧连接、重读配置并更新工具；应用失败与已保存事实分别显示，可用 `/mcp reload` 重试。
+保存按领域调用 `SettingsService.save_models/save_ui/save_runtime/save_mcp/save_rules`：校验本次提交，使用 `config/writer.py` 的临时文件与 `os.replace` 原子替换目标文件；写盘成功后才激活相关运行时更新。模型、UI 与系统运行配置保存保留主配置中的其他领域、环境变量原文及继承关系。模型目录保存后立即可用；修改默认值不覆盖当前会话已选模型。当前模型仍存在时继续使用它，并更新其连接配置；已删除时回退新默认模型并提示。MCP 保存后由能力核心关闭旧连接、重读配置并更新工具；应用失败与已保存事实分别显示，可用 `/mcp reload` 重试。
 
 聊天中使用 `/model` 展开模型候选项，Tab 或 Enter 填入后再次 Enter 切换，也可输入 `/model 供应商ID/模型ID`。仅切换当前会话，保留历史和权限，不修改新对话默认模型；首条消息之后的模型选择随 Session 自动持久化。`/settings default-model 供应商ID/模型ID` 单独修改默认值。详见 [cli-and-interaction.md](cli-and-interaction.md)。
 

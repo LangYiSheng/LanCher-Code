@@ -13,6 +13,9 @@ from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEve
 from lancher_code.usage.models import MessageUsage
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
+from lancher_code.providers.native_tools import (
+    INLINE_TOOLS_BETA, claude_update_blocks, grouped_tool_updates, raise_native_error_status,
+)
 from lancher_code.usage.ledger import RequestUsageStatus, UsageField
 
 logger = get_logger("providers.claude")
@@ -29,6 +32,8 @@ class ClaudeProvider(BaseChatProvider):
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        if request.experimental_mcp_tool_append:
+            headers["anthropic-beta"] = INLINE_TOOLS_BETA
         payload = self._build_payload(request)
 
         usage = MessageUsage(is_final=False)
@@ -43,7 +48,7 @@ class ClaudeProvider(BaseChatProvider):
             async with self._client_factory() as client:
                 usage_request_id = self._start_usage_request(request)
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    await self.raise_for_error_status(response)
+                    await raise_native_error_status(response, experimental=request.experimental_mcp_tool_append)
 
                     async for event_name, data in self.iter_sse_events(response):
                         if event_name == "ping":
@@ -232,16 +237,31 @@ class ClaudeProvider(BaseChatProvider):
             raise ProviderRequestError("输出 token 上限必须为正整数。")
         payload: dict[str, object] = {
             "model": request.model,
-            "messages": [self._serialize_message(message) for message in request.messages],
+            "messages": self._serialize_request_messages(request),
             "max_tokens": max_tokens,
             "stream": True,
             "thinking": self._build_thinking_payload(request),
         }
         if request.system:
             payload["system"] = "\n\n".join(request.system)
-        if request.allow_tool_calls and request.tools:
+        if request.tools:
             payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
+        if not request.allow_tool_calls and (request.tools or request.tool_updates):
+            payload["tool_choice"] = {"type": "none"}
+        if request.prompt_cache_enabled:
+            payload["cache_control"] = {"type": "ephemeral"}
         return payload
+
+    def _serialize_request_messages(self, request: ChatRequest) -> list[dict[str, object]]:
+        updates = grouped_tool_updates(request)
+        messages: list[dict[str, object]] = []
+        for index in range(len(request.messages) + 1):
+            blocks = claude_update_blocks(updates.get(index, []))
+            if blocks:
+                messages.append({"role": "system", "content": blocks})
+            if index < len(request.messages):
+                messages.append(self._serialize_message(request.messages[index]))
+        return messages
 
     def _build_thinking_payload(self, request: ChatRequest) -> dict[str, object]:
         if request.thinking and request.thinking.enabled:

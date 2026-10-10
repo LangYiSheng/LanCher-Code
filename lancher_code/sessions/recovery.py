@@ -62,9 +62,11 @@ def recover_interrupted_history(
         state.plan_snapshot.ready = False
 
     recovered: list[ConversationMessage] = []
+    recovered_indices: dict[int, int] = {}
     cursor = 0
     while cursor < len(transcript):
         message = transcript[cursor]
+        recovered_indices[cursor] = len(recovered)
         recovered.append(message)
         cursor += 1
         calls = [block for block in message.blocks if block.kind == "tool_use"]
@@ -75,6 +77,7 @@ def recover_interrupted_history(
         recorded_ids: set[str] = set()
         while cursor < len(transcript) and transcript[cursor].role == "tool":
             result_message = transcript[cursor]
+            recovered_indices[cursor] = len(recovered)
             recovered.append(result_message)
             recorded_ids.update(block.call_id for block in result_message.blocks if block.kind == "tool_result")
             cursor += 1
@@ -88,4 +91,8 @@ def recover_interrupted_history(
             call_id=call.call_id, is_error=True,
             text="上次任务在保存后中断，未获得此工具调用的完整结果。操作可能已部分执行，请先检查当前状态，勿直接重复执行。",
         ) for call in missing)
+    # 中断补齐工具结果会插入消息；事件固定文本不变，锚点随持久化历史重定位。
+    prefix = state.context_management.prefix_state
+    for event in [*prefix.get('events', []), *prefix.get('tool_events', [])]:
+        event['anchor'] = recovered_indices[event['anchor']]
     return recovered

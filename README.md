@@ -16,6 +16,7 @@
 - 内置文件、搜索、计划工具，以及 `run_command` 和六个 `process_*` 进程管理工具。
 - Skills 支持项目与用户 `.lancher/skills` 目录、`$技能名` 显式指定和模型按需加载；正文跨轮保留，成功压缩后按引用重载。
 - 自动读取项目根 `AGENTS.md`；MCP Tools 支持后台初始化、分页发现、动态目录刷新、重连和独立超时。
+- 核心保存固定请求前缀，新增技能与主机状态通过尾部事件提供；MCP 常规工具定义跨用户轮保留。“系统设置”提供默认关闭的原生 MCP 工具追加实验项，仅用于支持端点。
 - 按资源调度并行工具；每段对话可同时托管多个 Pipe / PTY 进程，支持后台、增量日志、输入和进程树停止。
 - 支持 ReAct 式多轮工具循环、工具轨迹展示、Token 用量展示。
 - 讨论、计划、执行三个工作阶段与审批策略独立；计划支持确认正文后开始执行。
@@ -83,6 +84,8 @@ lancher.example.yaml
   跳过常规询问，但阶段限制、显式 `deny` 规则与危险命令黑名单仍然生效。
 
 `ui.theme` 默认为 `dark`，可设为 `light`。`ui.busy_enter_action` 默认为 `follow_up`（下一轮），也可设为 `steer`（补充当前任务）或 `draft`（保留草稿）。阶段与权限策略分别配置，不接受旧 `permission_mode` 字段。
+
+`runtime.experimental_mcp_tool_append` 默认 `false`，在 `/settings` 的“系统设置”中修改；只接受布尔值。常规模式把发现的 MCP 工具放入 `tools` 数组。实验模式使用 OpenAI Responses 的 `additional_tools` 或 Claude 的原生工具追加 beta，只有支持端点才适合开启。保存前由核心校验空闲，应用后下次请求重建前缀；不支持时关闭实验项。当前验证为离线请求与传输测试，尚未实测模型 API 兼容性或缓存命中率，详见 [请求前缀与缓存边界](docs/modules/prompting.md)。
 
 ### 权限规则文件
 

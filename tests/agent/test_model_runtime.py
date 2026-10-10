@@ -207,12 +207,13 @@ def test_switch_keeps_all_parallel_tool_history_in_both_protocols(tmp_path: Path
         assert _quoted_tool_history(_payload_texts(claude_payload)) == _expected_history_references()
     else:
         # 来源模型未变时保留当前协议中的并行工具交换。
-        assert request.messages[1:] == previous[1:]
+        assert request.messages[1:len(previous)] == previous[1:]
         assert [(message["tool_call_id"], message["content"]) for message in results] == [
             ("call_1", "文件 A"), ("call_2", "文件 B")
         ]
         assert [block["tool_use_id"] for block in claude_results] == ["call_1", "call_2"]
-    assert session.transcript == previous
+    assert session.transcript[:len(previous)] == previous
+    assert session.transcript[-1].blocks[0].text.startswith('<host_update ')
 
 
 def test_failed_selection_or_factory_keeps_previous_runtime(tmp_path: Path) -> None:
@@ -315,6 +316,18 @@ def test_reload_removed_model_uses_default_and_failed_reload_is_atomic(tmp_path:
     assert runner.reload_models(updated)
     assert runner.model_ref == "anthropic/sonnet"
     assert "已被删除" in runner.model_notice
+
+
+def test_model_reload_does_not_apply_pending_system_settings(tmp_path: Path) -> None:
+    runner, session, _, _, config = _runner(tmp_path)
+    updated = deepcopy(config)
+    updated.runtime.experimental_mcp_tool_append = True
+    assert not runner.reload_models(updated)
+    assert not runner.model_config.runtime.experimental_mcp_tool_append
+    assert not session.build_request([], allow_tool_calls=True).experimental_mcp_tool_append
+    runner.apply_runtime_settings(updated.runtime)
+    assert runner.model_config.runtime.experimental_mcp_tool_append
+    assert session.build_request([], allow_tool_calls=True).experimental_mcp_tool_append
 
 
 def test_switch_autosaves_reference_without_credentials(tmp_path: Path) -> None:
@@ -542,6 +555,9 @@ async def test_interrupted_tools_are_paired_before_cross_protocol_switch(tmp_pat
     assert session.transcript == interrupted_history
     continuation = [event async for event in runner.run_user_turn("检查状态后继续")]
     assert continuation[-1].kind == "turn_completed"
-    assert session.transcript[:len(interrupted_history)] == interrupted_history
+    # 模型切换重建主机事件，但真实助手响应与已配对工具结果不得改写。
+    assert [message for message in session.transcript if message.role in {'assistant', 'tool'}][:4] == [
+        message for message in interrupted_history if message.role in {'assistant', 'tool'}
+    ]
     assert len(requests) == 3
     assert executions == ([False, True] if interruption == "cancel" else [False])

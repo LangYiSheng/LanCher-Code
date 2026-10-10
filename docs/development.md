@@ -72,7 +72,7 @@ uv run pytest            # 运行全部测试
 | 模式 | 位置 | 说明 |
 |---|---|---|
 | 策略 + 工厂 | `providers/` | `create_provider` 按协议选实现 |
-| 注册表 | `tools/core/registry.py`、`tui/commands.py` | 注册 + 查询；工具另按工作阶段过滤 |
+| 注册表 | `tools/core/registry.py`、`tui/commands.py` | 注册 + 查询；工具搜索与执行遵守阶段边界，请求保留已发布定义 |
 | 协议（Protocol） | `tools/core/base.py`、`providers/base.py` | 定义"工具/供应商必须长什么样" |
 | 异步生成器 + 队列 | `agent/runner.py` | 后台任务产事件，消费者逐条消费 |
 | 门面 | `ChatTUI` / `ConfigBootstrapTUI` | 包装 Textual App |

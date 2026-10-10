@@ -69,6 +69,39 @@ async def test_large_tool_result_is_offloaded_once_with_safe_stable_preview(tmp_
 
 
 @pytest.mark.asyncio
+async def test_frozen_tool_preview_does_not_shrink_when_history_grows(tmp_path):
+    state = ContextManagementState()
+    transcript = _tool_exchange(['first\n' + 'x' * 60000 + '\nlast'], ['initial'])
+    await offload_tool_results(transcript, state, tmp_path, result_directory=tmp_path / 'blobs', context_window=128000)
+    first = project_tool_results(transcript, state, context_window=128000)
+    transcript.extend(_tool_exchange(['y' * 60000] * 9, [f'later-{i}' for i in range(9)]))
+    await offload_tool_results(transcript, state, tmp_path, result_directory=tmp_path / 'blobs', context_window=128000)
+    grown = project_tool_results(transcript, state, context_window=128000)
+    assert grown[:len(first)] == first
+    assert len(state.frozen_tool_previews) == 10
+
+
+def test_tool_definitions_and_native_updates_count_when_calls_are_disabled():
+    state = ContextManagementState()
+    request = ChatRequest(model='test', allow_tool_calls=False, tools=[ToolDefinition(
+        name='builtin', description='固定工具', input_schema={'type': 'object'})])
+    initial = estimate_request(request, state)
+    assert initial.breakdown['tool_definitions'] > 0
+    assert update_usage_anchor(state, request, MessageUsage(input_tokens=100))
+    request.experimental_mcp_tool_append = True
+    request.tool_updates = [{'at_message': 0, 'additions': [{
+        'name': 'mcp_new', 'description': 'x' * 1000, 'input_schema': {'type': 'object'}}], 'removals': []}]
+    changed = estimate_request(request, state)
+    assert changed.source == 'estimated'
+    assert state.usage_anchor is None
+    assert changed.breakdown['tool_updates'] > 300
+    assert changed.tokens > initial.tokens
+    assert update_usage_anchor(state, request, MessageUsage(input_tokens=100))
+    request.tool_updates[0]['additions'][0]['description'] = 'different schema'
+    assert estimate_request(request, state).source == 'estimated'
+
+
+@pytest.mark.asyncio
 async def test_batch_offload_applies_token_budget_and_preserves_original_order(tmp_path: Path) -> None:
     state = ContextManagementState(context_id="batch")
     transcript = _tool_exchange(
@@ -244,9 +277,10 @@ def test_estimator_ignores_internal_metadata_and_json_transport_escaping() -> No
     assert estimate_text_tokens("你" * 300) == 200
     assert estimate_text_tokens("x" * 300) == 100
     request.allow_tool_calls = False
-    hidden_tool_estimate = estimate_request(request, ContextManagementState()).tokens
+    disabled_tool_estimate = estimate_request(request, ContextManagementState()).tokens
+    assert disabled_tool_estimate == original
     request.tools = []
-    assert estimate_request(request, ContextManagementState()).tokens == hidden_tool_estimate
+    assert estimate_request(request, ContextManagementState()).tokens < disabled_tool_estimate
 
 
 @pytest.mark.parametrize("window", [8192, 32768, 128000, 1000000])
@@ -358,6 +392,9 @@ async def test_offloaded_preview_adapts_after_switching_to_smaller_window(tmp_pa
     await offload_tool_results(transcript, state, tmp_path,
                               result_directory=tmp_path / "blobs", context_window=128000)
     large = project_tool_results(transcript, state, context_window=128000)
+    # 已发送的预览在同一 epoch 内冻结；切换模型/窗口会先重建 epoch。
+    assert project_tool_results(transcript, state, context_window=8192) == large
+    state.frozen_tool_previews.clear()
     small = project_tool_results(transcript, state, context_window=8192)
     assert len(small[1].blocks[0].text) < len(large[1].blocks[0].text)
     assert "first" in small[1].blocks[0].text and "last" in small[1].blocks[0].text

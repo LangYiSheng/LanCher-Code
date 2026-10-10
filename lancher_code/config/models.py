@@ -25,8 +25,11 @@ class RuntimeConfig:
     unknown_tool_streak_limit: int = 3
     work_phase: WorkPhase = "execute"
     permission_policy: PermissionPolicy = "default"
+    experimental_mcp_tool_append: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.experimental_mcp_tool_append) is not bool:
+            raise ValueError("runtime.experimental_mcp_tool_append 必须是布尔值。")
         self.work_phase, self.permission_policy = validate_runtime_axes(self.work_phase, self.permission_policy)
 
 

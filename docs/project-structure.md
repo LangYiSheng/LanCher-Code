@@ -28,7 +28,7 @@ lancher-code/
 │   ├── agent/                  # 单轮任务编排与智能体能力核心
 │   │   ├── runner.py           # TurnRunner 公开入口与任务循环
 │   │   ├── capabilities.py     # Skills、项目约定与 MCP 生命周期的公共门面
-│   │   ├── skill_context.py    # 技能激活、跨轮状态和系统上下文投影
+│   │   ├── skill_context.py    # 技能激活、跨轮状态和核心请求内容
 │   │   ├── instructions.py     # 项目根 AGENTS.md 常驻只读加载
 │   │   ├── skills/             # 技能发现、格式、快照和限定资源读取
 │   │   ├── inputs.py           # 忙时输入与队列
@@ -41,6 +41,7 @@ lancher-code/
 │   │   ├── tokens.py           # 估算、指纹、输入 usage 校准
 │   │   ├── budget.py           # 输入、输出、工具结果与近期历史预算
 │   │   ├── request.py          # 请求组装与发送副本
+│   │   ├── prefix.py           # 固定前缀、主机尾部事件与工具基线
 │   │   ├── projection.py       # 跨来源工具历史投影
 │   │   ├── offload.py          # 大工具结果落盘与引用
 │   │   ├── compaction.py       # 压缩候选与请求编排
@@ -118,7 +119,7 @@ lancher-code/
 ## 依赖与职责
 
 - `app.py` 负责装配；TUI 消费 `TurnEvent` 并调用公开服务，不直接调用模型网络接口。
-- `agent/` 编排一轮任务并管理 Skills、项目约定和 MCP 能力；前端只消费 `TurnRunner.capabilities` 的状态与公共操作。`sessions/` 持有对话事实，`context/` 构造模型可见副本并管理容量。请求副本的变化不覆盖原始事件。
+- `agent/` 编排一轮任务并管理 Skills、项目约定和 MCP 能力；前端只消费 `TurnRunner.capabilities` 的状态与公共操作。`sessions/` 持有对话事实，`context/` 构造模型可见副本并管理容量。正式请求持久化主机尾部事件，HUD 预览只使用副本，不提交前缀变化。
 - `config/models.py` 持有应用配置组合；供应商定义属于 `providers/models.py`。`providers/catalog.py` 只接收供应商映射与显式引用，不导入 `AppConfig`，避免配置加载与目录解析的循环依赖。
 - `contracts/` 只承载真正跨领域的消息、工具、控制契约。会话、权限、用量等类型由自己的领域维护，不再集中到根层 `models.py`。
 - `permissions/` 判定是否执行，`tools/` 组织工具调用，`execution/` 负责资源与进程；公共路径访问规则集中在 `filesystem/access.py`。

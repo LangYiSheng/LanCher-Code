@@ -245,11 +245,15 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         raise ConfigError("旧 runtime.permission_mode 已不再支持，请使用 work_phase 和 permission_policy 重新配置；原文件已保留。")
     work_phase = raw_value.get("work_phase", "execute")
     permission_policy = raw_value.get("permission_policy", "default")
+    experimental_mcp_tool_append = raw_value.get("experimental_mcp_tool_append", False)
+    if type(experimental_mcp_tool_append) is not bool:
+        raise ConfigError("runtime.experimental_mcp_tool_append 必须是布尔值。")
     return RuntimeConfig(
         tool_loop_limit=tool_loop_limit,
         unknown_tool_streak_limit=unknown_tool_streak_limit,
         work_phase=work_phase,
         permission_policy=permission_policy,
+        experimental_mcp_tool_append=experimental_mcp_tool_append,
     )
 
 

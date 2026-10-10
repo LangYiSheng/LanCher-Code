@@ -23,6 +23,7 @@ Skills 与 MCP 的界面仅消费 `TurnRunner.capabilities` 的状态与公共�
 | `permission.py` | 按请求 ID 返回结果的非阻塞内联审批 |
 | `settings/screen.py` | 设置页装配、导航与当前编辑状态 |
 | `settings/mcp.py`、`permissions.py`、`appearance.py` | 分领域编辑器，各自提交设置 |
+| `settings/system.py` | 系统实验选项表单，默认关闭；保存校验与应用由核心回调完成 |
 | `settings/models.py` | 供应商连接、模型继承与覆盖、独立默认选择 |
 | `model_picker.py` | 按供应商、API 模型名及显示名搜索，区分本次／默认 |
 | `bootstrap.py` | 连接供应商 → 第一个模型 → 确认并启动 |
@@ -74,6 +75,8 @@ HUD 分别展示模型、阶段、策略、预计上下文和任务状态。当�
 ## 设置提交
 
 `SettingsService` 按模型、界面偏好、MCP 作用范围、权限作用范围提交。模型保存不写 MCP 和权限文件。已提交快照与草稿分离；保存 A 后取消 B 不会撤销 A。
+
+“系统设置”页展示默认关闭的原生 MCP 工具追加实验项，明确只适合支持端点。`on_runtime_validate` 在写盘前调用核心空闲校验；`on_runtime_saved` 在写盘后应用，失败分别报告已保存与待应用。TUI 不判断协议或端点能力。`SettingsResult.config` 包含最新保存配置，`system_pending` 记录未成功应用，原 `runtime_applied` 仍表示模型设置的应用结果。
 
 模型保存回调刷新运行时，默认变更不替换本次模型；本次切换失败保留旧模型。配置落盘成功而运行时应用失败分别提示。MCP 保存后调用核心立即应用，失败提示 `/mcp reload` 重试。首次配置最终确认前不写文件，返回上一步保留输入。
 

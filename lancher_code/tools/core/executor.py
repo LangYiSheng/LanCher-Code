@@ -20,6 +20,7 @@ from lancher_code.sessions.storage import SessionRepositoryError
 from lancher_code.filesystem.access import resolve_path_in_root
 from lancher_code.tools.core.file_state_cache import FileStateCache
 from lancher_code.tools.core.registry import ToolRegistry
+from lancher_code.tools.core.base import Tool
 from lancher_code.tools.core.validation import validate_tool_arguments
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ class ToolExecutor:
         cancellation_token: CancellationToken | None = None,
         permission_resolver: PermissionResolver | None = None,
         available_tool_names: set[str] | None = None,
+        expected_tool_bindings: dict[str, Tool] | None = None,
         should_interrupt: Callable[[], bool] | None = None,
         on_call_started: ToolStartedCallback | None = None, on_result: ToolResultCallback | None = None,
         on_invocation_state: InvocationStateCallback | None = None,
@@ -73,6 +75,7 @@ class ToolExecutor:
         scheduler = get_project_scheduler(self._cwd, max_concurrency=self.execution_runtime.limits.max_concurrency)
         # 冻结参数，防止审批期间调用方修改实际执行内容。
         frozen_calls = [replace(call, arguments=deepcopy(call.arguments)) for call in calls]
+        expected_bindings = dict(expected_tool_bindings) if expected_tool_bindings is not None else None
         claims = [self._resource_claims(call, context) if self._argument_error(call) is None else () for call in frozen_calls]
         completed = [asyncio.Event() for _ in calls]
         invocations = [self.execution_runtime.begin_invocation(call, context) for call in frozen_calls]
@@ -83,6 +86,7 @@ class ToolExecutor:
             tasks.append(asyncio.create_task(self._execute_one(
                 call, replace(context), invocations[index], scheduler, claims[index], predecessors, completed[index],
                 permission_resolver, available_tool_names, should_interrupt, on_call_started, on_result, on_invocation_state,
+                expected_bindings,
             )))
         try:
             # gather 保留输入顺序，on_result 按实际完成顺序立即推送。
@@ -147,6 +151,7 @@ class ToolExecutor:
         permission_resolver: PermissionResolver | None, available_tool_names: set[str] | None,
         should_interrupt: Callable[[], bool] | None, on_call_started: ToolStartedCallback | None,
         on_result: ToolResultCallback | None, on_invocation_state: InvocationStateCallback | None,
+        expected_tool_bindings: dict[str, Tool] | None = None,
     ) -> ToolExecutionResult:
         context.invocation_id = invocation.invocation_id
         try:
@@ -174,7 +179,8 @@ class ToolExecutor:
                         wait.cancel()
                 await asyncio.gather(*predecessor_waits, return_exceptions=True)
             result = await self._run_one(call, context, invocation, scheduler, claims, permission_resolver,
-                                         available_tool_names, should_interrupt, on_call_started, on_invocation_state)
+                                         available_tool_names, should_interrupt, on_call_started, on_invocation_state,
+                                         expected_tool_bindings)
             state = ("interrupted" if result.error_code == "mcp_outcome_unknown" else
                      "superseded" if result.error_code == "steering_superseded" else
                      "failed" if result.is_error else "succeeded")
@@ -214,6 +220,7 @@ class ToolExecutor:
         permission_resolver: PermissionResolver | None, available_tool_names: set[str] | None,
         should_interrupt: Callable[[], bool] | None, on_call_started: ToolStartedCallback | None,
         on_invocation_state: InvocationStateCallback | None,
+        expected_tool_bindings: dict[str, Tool] | None = None,
     ) -> ToolExecutionResult:
         self._raise_if_cancelled(context)
         if self._superseded_now(context, should_interrupt):
@@ -221,12 +228,21 @@ class ToolExecutor:
         try:
             tool = self._registry.get(call.tool_name)
         except ToolNotFoundError as exc:
+            if expected_tool_bindings is not None and call.tool_name in expected_tool_bindings:
+                return self._changed_tool_result(call)
             return self._error(call, "tool_not_found", exc.user_message)
+        # 先与模型请求发出时的工具对象比较；旧 schema 调用不能被交给
+        # 响应期间刚接入的同名工具。审批和资源排队后还会再次核对。
+        if (expected_tool_bindings is not None and call.tool_name in expected_tool_bindings
+                and expected_tool_bindings[call.tool_name] is not tool):
+            return self._changed_tool_result(call)
         if not tool_available_in_phase(tool.definition, context.work_phase):
             return self._error(call, "phase_disallowed", f"{call.tool_name} 在当前阶段不可用。")
         if available_tool_names is not None and call.tool_name not in available_tool_names:
             return self._error(call, "tool_not_found", f"{call.tool_name} 尚未加载。请先调用 tool_search，再在下一次模型请求中调用该工具。",
                                {"requires_tool_search": True})
+        if expected_tool_bindings is not None and call.tool_name not in expected_tool_bindings:
+            return self._changed_tool_result(call)
         argument_error = self._argument_error(call)
         if argument_error is not None:
             return argument_error
@@ -291,13 +307,13 @@ class ToolExecutor:
             result.call_id, result.tool_name = call.call_id, call.tool_name
             return result
         except asyncio.CancelledError:
-            if self._external_side_effect(call):
+            if self._external_side_effect(tool):
                 await self._report_state(call, invocation, "interrupted", on_invocation_state,
                                          error_code="mcp_outcome_unknown")
             raise
         except asyncio.TimeoutError:
             logger.error("event=tool_execution_timeout tool=%s", call.tool_name)
-            if self._external_side_effect(call):
+            if self._external_side_effect(tool):
                 return self._unknown_remote_result(call, "等待远端结果超时")
             return self._error(call, "tool_timeout", f"{call.tool_name} 执行超时")
         except SessionRepositoryError:
@@ -305,15 +321,14 @@ class ToolExecutor:
             raise
         except Exception as exc:
             logger.exception("event=tool_execution_failed tool=%s exception_type=%s", call.tool_name, type(exc).__name__)
-            if self._external_side_effect(call):
+            if self._external_side_effect(tool):
                 return self._unknown_remote_result(call, "远端调用连接失败")
             return self._error(call, "tool_exception", str(exc))
 
-    def _external_side_effect(self, call: ToolCall) -> bool:
-        try:
-            definition = self._registry.get(call.tool_name).definition
-        except ToolNotFoundError:
-            return False
+    @staticmethod
+    def _external_side_effect(tool: Tool) -> bool:
+        # 执行事实属于已绑定的对象；目录撤销不能证明远端写入被撤销。
+        definition = tool.definition
         return (definition.permission is not None and definition.permission.source == "external"
                 and definition.category != "read")
 

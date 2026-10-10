@@ -115,7 +115,7 @@ class SessionService:
                           if name not in {'request_usage', 'compaction_activities'}}
                 after = {name: value for name, value in snapshot[key].items()
                          if name not in {'request_usage', 'compaction_activities'}}
-                if completed_activity is not None:
+                if completed_activity is not None or context_event == 'context.prefix_updated':
                     after['context_management'] = before['context_management']
             else:
                 before, after = previous[key], snapshot[key]
@@ -131,6 +131,14 @@ class SessionService:
                 previous[key] = copy.deepcopy(snapshot[key])
 
         before, after = previous['transcript'], snapshot['transcript']
+        if context_event == 'context.prefix_updated':
+            appended = len(after) >= len(before) and after[:len(before)] == before
+            self.writer.append(context_event, {'replace': not appended,
+                               'messages': after[len(before):] if appended else after,
+                               'context_management': snapshot['state']['context_management']})
+            previous['transcript'] = copy.deepcopy(after)
+            previous['state']['context_management'] = copy.deepcopy(snapshot['state']['context_management'])
+            return
         if len(after) < len(before) or context_event == 'context.compacted':
             data = {'messages': after}
             if completed_activity is not None:
@@ -149,6 +157,12 @@ class SessionService:
             if len(after) > len(before):
                 self.writer.append('transcript.appended', {'messages': after[len(before):]})
                 before.extend(copy.deepcopy(after[len(before):]))
+
+    def prefix_committed(self, snapshot: dict) -> bool:
+        # 文本前缀可能没变，但本次冻结的工具预览仍是原子提交的一部分。
+        return bool(self._saved is not None
+                    and self._saved['state']['context_management'] == snapshot['state']['context_management']
+                    and self._saved['transcript'] == snapshot['transcript'])
 
     def compaction_committed(self, activity_id: str) -> bool:
         saved = self._saved

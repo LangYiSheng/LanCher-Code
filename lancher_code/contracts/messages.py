@@ -102,6 +102,10 @@ class ChatRequest:
     max_output_tokens: int | None = None
     request_id: str | None = None
     run_id: str | None = None
+    # 实验协议通过历史位置追加工具定义；常规端点继续发送完整 tools 数组。
+    experimental_mcp_tool_append: bool = False
+    tool_updates: list[dict[str, object]] = field(default_factory=list)
+    prompt_cache_enabled: bool = False
     _prepared_usage_attempt_id: str | None = field(default=None, init=False, repr=False)
 
     def prepare_usage_attempt(self) -> None:
