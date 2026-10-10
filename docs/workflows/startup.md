@@ -13,6 +13,7 @@ sequenceDiagram
     participant BS as ConfigBootstrapTUI
     participant CFG as config_system
     participant PF as create_provider
+    participant USAGE as RunUsageTracker
     participant SS as SessionController
     participant REG as tool_registry
     participant MCP as MCPClientManager
@@ -29,7 +30,8 @@ sequenceDiagram
         APP-->>CLI: 返回 0，退出
     end
     APP->>CFG: load_config() 校验配置（非法则打印错误、返回 1）
-    APP->>PF: create_provider(config.provider)
+    APP->>USAGE: 创建本次启动的请求用量账本
+    APP->>PF: create_provider(active_config, usage_observer)
     APP->>LOG: register_sensitive_values(api_key)
     APP->>SS: SessionController(provider, cwd, plan 路径, 初始阶段, 权限策略, 权限存储)
     APP->>REG: create_default_tool_registry()（14 个内置工具）
@@ -38,7 +40,12 @@ sequenceDiagram
     APP->>SS: TurnRunner(provider, session, registry, executor, 循环上限...)
     APP->>TUI: ChatTUI(turn_runner, ...) + configure_settings + configure_mcp
     TUI-->>APP: tui.run() 进入事件循环
+    APP->>SS: finally: turn_runner.shutdown() 与 session.close()
     APP->>MCP: finally: mcp_manager.close()
+    opt TUI 正常返回
+        APP->>USAGE: 获取最终用量快照
+        APP-->>U: 普通终端打印告别、恢复命令与本次用量
+    end
 ```
 
 （`REG` 表示工具注册表；`PermissionEngine / SettingsService / ToolExecutor / TurnRunner` 的创建统一归到装配步骤，详见 [../modules](../modules/) 各模块文档。）
@@ -60,7 +67,9 @@ sequenceDiagram
 | 11. 创建执行链 | `tools/core/executor.py` + `permission_engine.py` | ToolExecutor 持有注册表与权限引擎 |
 | 12. 创建 TurnRunner | `turn_runner.py` | 注入全部依赖，配置循环上限与未知工具熔断 |
 | 13. 启动 TUI | `tui_views/chat.py` | 进入 Textual 事件循环；MCP 初始化完成后启用输入 |
-| 14. 退出清理 | `app.py finally` | `mcp_manager.close()` 关闭所有 MCP 连接 |
+| 14. 退出清理与小结 | `app.py finally` | 等待 Runner、Session 写入者和 MCP 连接收尾；正常返回后打印恢复命令与本次启动用量，清理失败明确报告并返回 1 |
+
+本次启动账本在应用装配时创建。Provider 工厂和切换模型后的新 Provider 都使用同一个 observer，Session 恢复不导入历史消耗。退出确认与统计口径详见 [结束工作与恢复对话](app-exit.md)。
 
 ## 启动失败的常见退出
 

@@ -525,6 +525,10 @@ class ProcessSupervisor:
         return any(entry.info.session_id == session_id and not entry.done.is_set()
                    for entry in self._processes.values())
 
+    @property
+    def active_count(self) -> int:
+        return sum(not entry.done.is_set() for entry in self._processes.values())
+
     async def close(self) -> None:
         self._closed = True
         sessions = {entry.info.session_id for entry in self._processes.values() if not entry.done.is_set()}

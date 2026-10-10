@@ -261,6 +261,50 @@ async def test_menu_keyboard_and_layout_across_sizes(tmp_path, theme, size):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 40), (60, 24), (32, 16)])
+async def test_session_title_menu_keeps_identity_visible_and_fills_uuid(openai_provider_config, tmp_path, size):
+    title = "HTTP 服务测试 · 同名会话恢复"
+    saved = SessionController(openai_provider_config, cwd=tmp_path)
+    saved.create_user_message("原对话")
+    original_id = saved.session_id
+    saved.rename_session(original_id, title)
+    saved.close()
+    second = SessionController(openai_provider_config, cwd=tmp_path)
+    second.create_user_message("另一个同名对话")
+    second_id = second.session_id
+    second.rename_session(second_id, title)
+    second.close()
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    session.archive_session(second_id)
+    async with app.run_test(size=size) as pilot:
+        composer = await type_command(app, pilot, "/session resume 服务 HTTP")
+        items = list(app.query(SlashCompletionMenuItem))
+        assert len(items) == 2
+        assert [item.candidate.value for item in items] == [second_id, original_id]
+        active = next(item for item in items if item._active)
+        assert active.candidate.display == title
+        assert active.render().plain.splitlines()[0].startswith("› HTTP")
+        assert second_id[:8] in active.render().plain and "已归档" in active.render().plain
+        hint = app.query_one(CommandHintBar)
+        if size[1] >= 24:
+            assert title in str(hint.render())
+        else:
+            assert "HTTP 服务测试" in str(hint.render())
+        assert title in active.candidate.detail and second_id in str(hint.render())
+        assert composer.region.bottom <= size[1] and composer.region.height >= 1
+        assert hint.region.right <= size[0]
+        assert hint.region.bottom <= app.query_one("#composer-actions").region.y
+        assert hint.region.height >= (3 if size[0] == 32 else 2)
+        await pilot.press("down")
+        assert original_id in str(hint.render())
+        await pilot.press("tab")
+        assert composer.text == f"/session resume {original_id}"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert session.session_id == original_id and session.state.messages[0].content == "原对话"
+
+
+@pytest.mark.asyncio
 async def test_list_and_new_do_not_create_session_and_active_destructive_commands_are_refused(openai_provider_config, tmp_path):
     app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
     async with app.run_test() as pilot:

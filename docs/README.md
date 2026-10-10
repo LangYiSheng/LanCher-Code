@@ -28,6 +28,7 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 | 模型与设置 | 供应商下管理模型，本次使用与新对话默认分别选择；单条保存，支持深浅主题和忙时 Enter 偏好 |
 | 上下文治理 | Token 估算、大工具结果落盘卸载、自动/紧急上下文压缩 |
 | 会话持久化 | 首条消息自动创建 UUID，按项目保存 `.lancher/sessions/<UUID>/events.jsonl` 新事件格式 v1，独立 workspace，支持恢复、改标题、归档和删除；旧命名格式不读取、不迁移 |
+| 退出小结 | 工作中先停止本轮，空闲 3 秒内双按 Ctrl+C 退出；告别显示完整恢复命令及本次启动的输入、输出、缓存和缓存比 |
 | MCP 扩展 | 支持 stdio / Streamable HTTP 两种 MCP Server，工具延迟加载 |
 
 ## 技术栈
@@ -105,11 +106,12 @@ python main.py
 5. [交互与命令 cli-and-interaction.md](cli-and-interaction.md) — 斜杠命令、快捷键、权限确认
 6. [模块文档 modules/](modules/) — 各核心模块深入说明
 7. [工具执行 workflows/tool-execution.md](workflows/tool-execution.md) — 从开发服务器和测试的场景理解并行、后台、停止与恢复
-8. [运行流程 workflows/](workflows/) — 启动、一轮对话、会话生命周期等流程
-9. [开发指南 development.md](development.md) — 如何继续开发
-10. [故障排查 troubleshooting.md](troubleshooting.md) — 常见问题
-11. [术语表 glossary.md](glossary.md) — 专有名词
-12. [PyInstaller 打包 pyinstaller.md](pyinstaller.md) — Windows 可执行文件打包
+8. [结束工作与恢复对话 workflows/app-exit.md](workflows/app-exit.md) — 确认退出、先收尾再告别，以及本次启动的用量账本
+9. [运行流程 workflows/](workflows/) — 启动、一轮对话、会话生命周期等流程
+10. [开发指南 development.md](development.md) — 如何继续开发
+11. [故障排查 troubleshooting.md](troubleshooting.md) — 常见问题
+12. [术语表 glossary.md](glossary.md) — 专有名词
+13. [PyInstaller 打包 pyinstaller.md](pyinstaller.md) — Windows 可执行文件打包
 
 ## 相关文件速查
 

@@ -94,6 +94,7 @@ class TurnRunner:
         self._unknown_tool_streak_limit = unknown_tool_streak_limit
         self._active_turn: _ActiveTurn | None = None
         self._manual_compaction = False
+        self._compaction_task: asyncio.Task | None = None
         self._model_config: AppConfig | None = None
         self._provider_factory: Callable[[ProviderConfig], ChatProvider] = create_provider
         self._model_notice = ""
@@ -398,6 +399,17 @@ class TurnRunner:
     def has_active_turn(self) -> bool:
         return self._active_turn is not None
 
+    @property
+    def is_compacting(self) -> bool:
+        return self._manual_compaction
+
+    @property
+    def is_stopping(self) -> bool:
+        active = self._active_turn
+        return (not self._execution_runtime.accepting(self._session.session_id)
+                or (active is not None and active.cancellation_token.is_cancelled)
+                or (self._compaction_task is not None and self._compaction_task.cancelling() > 0))
+
     async def stop_and_wait(self) -> None:
         """界面关闭前等待当前任务收尾，不能把资源回收留给事件循环析构。"""
         active = self._active_turn
@@ -464,9 +476,25 @@ class TurnRunner:
 
     async def shutdown(self) -> None:
         try:
+            task = self._compaction_task
+            if task is not None and task is not asyncio.current_task():
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
             await self.stop_and_wait()
         finally:
             await self._execution_runtime.close()
+
+    @property
+    def application_process_count(self) -> int:
+        """退出影响本应用托管的所有会话，不只统计当前画面。"""
+        return self._execution_runtime.processes.active_count
 
     async def compact_context(self) -> ContextCompactionResult:
         if not self._execution_runtime.accepting(self._session.session_id):
@@ -474,6 +502,7 @@ class TurnRunner:
         if self.has_active_turn or self._manual_compaction:
             raise ContextCompactionError("模型正在响应，暂时不能压缩上下文。")
         self._manual_compaction = True
+        self._compaction_task = asyncio.current_task()
         try:
             visible_tools = self._tool_registry.list_definitions(
                 discovered_names=set(),
@@ -491,6 +520,7 @@ class TurnRunner:
             )
         finally:
             self._manual_compaction = False
+            self._compaction_task = None
 
     async def run_user_turn(self, text: str) -> AsyncIterator[TurnEvent]:
         self._ensure_model_idle()

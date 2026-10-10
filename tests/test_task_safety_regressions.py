@@ -73,7 +73,9 @@ async def test_empty_plan_is_a_recoverable_tool_error(openai_provider_config, tm
     runner.set_phase("plan")
     runner.set_permission_policy("bypass")
 
-    events = await asyncio.wait_for(collect(runner, "制定计划"), 3)
+    # 两次工具调用和三次模型响应都会同步保存事件；Windows 路径校验与落盘
+    # 实测可超过 3 秒。保留 10 秒死锁上限，业务结果仍由下面的断言检查。
+    events = await asyncio.wait_for(collect(runner, "制定计划"), 10)
 
     assert not any(event.kind == "turn_failed" for event in events)
     results = [event.tool_result for event in events if event.kind == "tool_result_received"]

@@ -6,10 +6,12 @@ from pathlib import Path
 
 from rich.cells import cell_len
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.timer import Timer
+from textual.worker import Worker, WorkerState
 from textual.widgets import Button, Static, TextArea
 
 from lancher_code.errors import LanCherError
@@ -30,6 +32,7 @@ from lancher_code.session import SessionController
 from lancher_code.sessions.paths import SessionPaths
 from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.slash_commands import (
+    SessionCompletionChoice,
     SlashCompletionCandidate,
     SlashCompletionContext,
     SlashCommandRegistry,
@@ -54,6 +57,7 @@ from lancher_code.tui_views.model_picker import ModelPickerScreen
 from lancher_code.tui_views.command_actions import CommandConfirmationScreen, save_command_setting
 from lancher_code.tui_views.tasks import TaskScreenActions, TasksScreen, task_label
 from lancher_code.tui_views.theme import apply_theme, theme_palette
+from lancher_code.tui_views.exit_flow import ExitFlow
 from lancher_code.tui_views.chat_controls import (
     ChatAction, StageBar, PendingQueue, PendingInputEditor, PlanPanel,
     PlanReviewScreen, PermissionPolicyScreen, ReadOnlyDetailsScreen,
@@ -106,6 +110,7 @@ class LanCherTextualApp(App[int]):
     #slash-command-menu { display: none; width: 1fr; height: auto; }
     .slash-command-item { padding: 0 1; width: 1fr; height: auto; }
     #command-hint { width: 1fr; }
+    #exit-hint { width: 1fr; height: auto; display: none; color: $warning; padding: 0 1; }
     #inline-permission-panel { width: 1fr; }
     #permission-title, #permission-command, #permission-details, #permission-description,
     #permission-prompt, .permission-preview, .permission-option, #permission-help { height: auto; }
@@ -190,8 +195,7 @@ class LanCherTextualApp(App[int]):
     """
 
     BINDINGS = [
-        ("ctrl+c", "request_quit", "取消/退出"),
-        ("ctrl+d", "toggle_details", "状态详情"),
+        Binding("ctrl+c", "request_quit", "取消/退出", priority=True),
     ]
 
     def __init__(
@@ -214,6 +218,10 @@ class LanCherTextualApp(App[int]):
         self._slash_command_registry = slash_command_registry or create_default_slash_command_registry()
         self._is_streaming = False
         self._ui_closing = False
+        self._exit_flow = ExitFlow()
+        self._exit_hint_timer: Timer | None = None
+        self._compaction_worker: Worker | None = None
+        self._shutdown_process_count = 0
         self._status_refresh_timer: Timer | None = None
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
@@ -240,6 +248,7 @@ class LanCherTextualApp(App[int]):
                 yield PendingQueue()
                 yield Vertical(id="approval-region")
                 yield SlashCompletionMenu()
+                yield Static("", id="exit-hint", markup=False)
                 with Horizontal(id="composer"):
                     yield Static(MODE_GLYPHS["default"], id="prompt-glyph")
                     yield ComposerTextArea(
@@ -301,14 +310,17 @@ class LanCherTextualApp(App[int]):
             )
         finally:
             self.mcp_initialization_complete = True
-            composer = self.query_one("#composer-input", ComposerTextArea)
-            composer.disabled = False
-            self._status_hint = "就绪"
-            self._refresh_composer_placeholder()
-            self._refresh_status_bar()
-            composer.focus()
+            if not self._ui_closing and self.is_running:
+                composer = self.query_one("#composer-input", ComposerTextArea)
+                composer.disabled = False
+                self._status_hint = "就绪"
+                self._refresh_composer_placeholder()
+                self._refresh_status_bar()
+                composer.focus()
 
     def _handle_mcp_progress(self, progress: MCPInitializationProgress) -> None:
+        if self._ui_closing:
+            return
         self.query_one(BannerWidget).update_mcp_progress(progress)
         if progress.state == "complete":
             self._refresh_context_usage()
@@ -319,24 +331,116 @@ class LanCherTextualApp(App[int]):
         self.call_after_refresh(self._refresh_status_bar)
         self.call_after_refresh(self._update_composer_height)
         self.call_after_refresh(self._fit_chat_panels)
+        self.call_after_refresh(self._refresh_exit_hint)
 
     async def action_request_quit(self) -> None:
-        if self._is_streaming:
+        decision = self._exit_flow.request_interrupt(
+            busy=self._is_streaming or self._turn_runner.has_active_turn,
+            stopping=self._turn_runner.is_stopping,
+        )
+        if decision == "cancel_work":
+            if self._compaction_worker is not None:
+                self._stop_current_work()
+            elif self._is_streaming or self._turn_runner.has_active_turn:
+                # 工作刚排入 worker 时也可能还没有 ActiveTurn，worker 会在入口检查停止标记。
+                self._status_hint = "正在停止 · 草稿和队列会保留"
+                self._turn_runner.cancel_active_turn()
+                self._refresh_status_bar()
+            return
+        if decision == "wait_for_stop":
+            self.notify("正在停止本轮，请稍候。", title="正在收尾")
+            return
+        if decision == "arm_exit":
+            message = self._exit_confirmation_text()
+            self.notify(message, title="退出确认", timeout=3)
+            if self._exit_hint_timer is not None:
+                self._exit_hint_timer.stop()
+            self._exit_hint_timer = self.set_interval(0.2, self._refresh_exit_hint)
+            self._refresh_exit_hint()
+            return
+        if decision == "exit":
+            self._shutdown_process_count = self._turn_runner.application_process_count
+            self._ui_closing = True
+            self.exit(0)
+
+    async def on_event(self, event: events.Event) -> None:
+        # 在输入转交给控件之前解除确认，输入框和弹窗消费按键也不会留下旧确认。
+        interaction_events = (
+            events.Key, events.MouseDown, events.Paste,
+            events.MouseScrollUp, events.MouseScrollDown,
+            events.MouseScrollLeft, events.MouseScrollRight,
+        )
+        if isinstance(event, interaction_events) and not event.is_forwarded:
+            if not isinstance(event, events.Key) or event.key != "ctrl+c":
+                self._exit_flow.interact()
+                self._refresh_exit_hint()
+        await super().on_event(event)
+
+    def _exit_confirmation_text(self) -> str:
+        count = self._turn_runner.application_process_count
+        suffix = f" · 退出将结束 {count} 个托管进程" if count else ""
+        return "再按一次 Ctrl+C 退出（3 秒内）" + suffix
+
+    def _refresh_exit_hint(self) -> None:
+        if self._ui_closing or not self.is_running:
+            return
+        hint = next(iter(self.query("#exit-hint")), None)
+        if hint is None:
+            return
+        hint.display = self._exit_flow.is_armed
+        menu = self.query_one(SlashCompletionMenu)
+        hint_bar = self.query_one(CommandHintBar)
+        # 小终端确认退出时先让提示、草稿和 HUD 可见；候选身份和输入内容仍保留。
+        hide_completion = hint.display and self.size.height < 24
+        was_hidden = not menu.display
+        menu.display = bool(self._slash_menu_matches) and not hide_completion
+        hint_bar.display = bool(hint_bar.content) and not hide_completion
+        if hint.display:
+            hint.update(self._exit_confirmation_text())
+        elif self._exit_hint_timer is not None:
+            self._exit_hint_timer.stop()
+            self._exit_hint_timer = None
+        self._fit_chat_panels()
+        if was_hidden and menu.display:
+            self.call_after_refresh(menu.reveal_active)
+
+    def _request_explicit_exit(self) -> None:
+        if self._exit_flow.request_exit() == "exit":
+            self._shutdown_process_count = self._turn_runner.application_process_count
+            self._ui_closing = True
+            self.exit(0)
+
+    def _stop_current_work(self) -> None:
+        if self._compaction_worker is not None:
+            self._compaction_worker.cancel()
+            self._status_hint = "正在停止上下文压缩"
+            if not self._turn_runner.is_compacting:
+                # 取消发生在 worker 第一条指令之前，没有协程 finally 可替界面收尾。
+                self._compaction_worker = None
+                self._is_streaming = False
+                self._exit_flow.work_finished()
+                self._status_hint = "压缩已停止"
+                composer = self.query_one(ComposerTextArea)
+                composer.disabled = False
+                composer.focus()
+                self.call_later(self._refresh_command_ui)
+            self._refresh_status_bar()
+        else:
             if self._turn_runner.cancel_active_turn():
                 self._status_hint = "正在停止 · 草稿和队列会保留"
                 self._refresh_status_bar()
-            return
-        self.exit(0)
 
     @on(StopTurnRequested)
     def handle_stop_turn_requested(self, event: StopTurnRequested) -> None:
         event.stop()
-        if self._turn_runner.cancel_active_turn():
-            self._status_hint = "正在停止本轮 · 会话后台进程继续运行"
-            self._refresh_status_bar()
+        if self._is_streaming or self._turn_runner.has_active_turn:
+            if self._exit_flow.request_interrupt(busy=True) == "cancel_work":
+                self._stop_current_work()
 
     @on(TextArea.Changed, "#composer-input")
     async def handle_composer_changed(self) -> None:
+        self._exit_flow.interact()
+        self._refresh_exit_hint()
         self._update_composer_height()
         await self._refresh_command_ui()
 
@@ -358,7 +462,7 @@ class LanCherTextualApp(App[int]):
 
     @on(WorkPhaseCycleRequested)
     async def handle_work_phase_cycle_requested(self) -> None:
-        if self._is_streaming:
+        if self._is_streaming or self._ui_closing:
             return
         phases = ("discuss", "plan", "execute")
         phase = self._session_controller.work_phase
@@ -423,7 +527,7 @@ class LanCherTextualApp(App[int]):
         self._begin_turn(text)
 
     def _begin_turn(self, text: str, *, queued: bool = False) -> None:
-        if self._is_streaming:
+        if self._is_streaming or self._ui_closing:
             return
 
         if not self._chat_started:
@@ -432,6 +536,7 @@ class LanCherTextualApp(App[int]):
             self.query_one("#chat-view", VerticalScroll).set_class(True, "-banner-collapsed")
 
         self._is_streaming = True
+        self._exit_flow.work_started()
         self._turn_succeeded = False
         self._task_message_ids.clear()
         self._status_hint = "正在处理"
@@ -454,6 +559,10 @@ class LanCherTextualApp(App[int]):
         user_message_accepted = queued
         submission_failed = False
         try:
+            if self._exit_flow.state == "stopping":
+                submission_failed = True
+                self._turn_runner.pause_queue()
+                return
             stream = self._turn_runner.run_next_queued_turn() if queued else self._turn_runner.run_user_turn(text)
             # 消费事件期间也可能关闭界面；显式关闭生成器，等待执行器清理。
             async with aclosing(stream):
@@ -476,7 +585,8 @@ class LanCherTextualApp(App[int]):
             self.notify(str(exc), title="本轮未完成", severity="error")
         finally:
             self._is_streaming = False
-            if self.is_running:
+            self._exit_flow.work_finished()
+            if self.is_running and not self._ui_closing:
                 if submission_failed and not user_message_accepted:
                     composer = self.query_one(ComposerTextArea)
                     # 仅恢复尚未进入 Session 的输入；保留用户随后写下的新草稿。
@@ -495,11 +605,19 @@ class LanCherTextualApp(App[int]):
 
     async def on_unmount(self) -> None:
         self._ui_closing = True
+        if self._exit_hint_timer is not None:
+            self._exit_hint_timer.stop()
+            self._exit_hint_timer = None
         if self._status_refresh_timer is not None:
             self._status_refresh_timer.stop()
             self._status_refresh_timer = None
         # Textual 取消 worker 后不会等待所有后台执行器；退出前显式完成收尾。
-        await self._turn_runner.shutdown()
+        self._shutdown_process_count = max(self._shutdown_process_count, self._turn_runner.application_process_count)
+        try:
+            await self._turn_runner.shutdown()
+        except Exception:
+            # 应用 finally 仍会取得同一清理任务的失败结果，并在普通终端报告。
+            logger.exception("event=tui_shutdown_failed")
 
     async def _finish_turn_view(self) -> None:
         for request_id in list(self._pending_permissions):
@@ -524,7 +642,7 @@ class LanCherTextualApp(App[int]):
             self.call_later(self._start_next_queued)
 
     def _start_next_queued(self) -> None:
-        if self._is_streaming or self._turn_runner.has_active_turn or self._turn_runner.queue_paused:
+        if self._ui_closing or self._is_streaming or self._turn_runner.has_active_turn or self._turn_runner.queue_paused:
             return
         items = self._turn_runner.pending_inputs
         if items and items[0].state == "pending" and items[0].delivery == "follow_up":
@@ -546,7 +664,7 @@ class LanCherTextualApp(App[int]):
         if execution["notifications"]:
             badges.append(f"通知 {execution['notifications']} /tasks")
         process_badges = " · ".join(badges)
-        right_text = process_badges + " · Ctrl+D 详情" if process_badges else "Ctrl+D 详情"
+        right_text = process_badges
         status_center = self.query_one("#status-center", Static)
         status_right = self.query_one("#status-right", Static)
 
@@ -839,6 +957,12 @@ class LanCherTextualApp(App[int]):
         if not self.is_mounted:
             return
         short = self.size.height < 24
+        session_completion = bool(self._slash_menu_matches) and (
+            self._slash_menu_matches[self._slash_menu_index].presentation == "session"
+        )
+        self.query_one("#composer-region").styles.max_height = "90%" if short and session_completion else "75%"
+        self.query_one(CommandHintBar).styles.max_height = (4 if session_completion else 1) if short else None
+        self.query_one(SlashCompletionMenu).styles.max_height = (3 if session_completion else 4) if short else 7
         approval = self.query_one("#approval-region", Vertical)
         queue = self.query_one(PendingQueue)
         plan = self.query_one(PlanPanel)
@@ -861,7 +985,6 @@ class LanCherTextualApp(App[int]):
         self.query_one(BannerWidget).styles.height = 1
         self.query_one(BannerWidget).styles.margin = (0, 2, 0, 2)
         self.query_one("#chat-view").styles.margin = (0, 1, 0, 1)
-        self.query_one(CommandHintBar).styles.max_height = 1
         composer = self.query_one(ComposerTextArea)
         line_limit = 1 if self._pending_permissions else 3
         lines = max(1, min(line_limit, composer.wrapped_document.height))
@@ -870,7 +993,12 @@ class LanCherTextualApp(App[int]):
         # 预留横幅、阶段、聊天、完整 HUD、输入边框与操作行。
         hud_extra = 1 if self.size.width < 48 else 0
         budget = max(3, self.size.height - 8 - lines - hud_extra)
-        queue_height = min(3, budget) if queue.display else 0
+        if session_completion and self.query_one(SlashCompletionMenu).display:
+            # 完整 UUID 的提示优先保留；暂停队列可以缩到标题行，内容在自己的视口滚动。
+            hint_width = max(1, min(self.size.width, 112) - 4)
+            uuid_lines = (len(self._slash_menu_matches[self._slash_menu_index].value) + hint_width - 1) // hint_width
+            budget -= 3 + min(4, 1 + uuid_lines)
+        queue_height = min(3, max(1, budget)) if queue.display else 0
         queue.styles.max_height = max(1, queue_height)
         budget -= queue_height
         plan.styles.max_height = 2
@@ -998,6 +1126,7 @@ class LanCherTextualApp(App[int]):
             composer.slash_menu_active = False
             await menu.set_candidates([], None)
             hint_bar.set_hint("本轮结束后可执行命令 · 草稿已保留" if composer.text.lstrip().startswith("/") else "")
+            self._refresh_exit_hint()
             self._refresh_status_bar()
             return
 
@@ -1014,7 +1143,9 @@ class LanCherTextualApp(App[int]):
             self._slash_command_registry.complete(
                 SlashCompletionContext(
                     text=composer.text,
-                    session_ids=tuple(item.session_id for item in sessions),
+                    session_choices=tuple(SessionCompletionChoice(
+                        item.session_id, item.title, item.updated_at, item.archived,
+                    ) for item in sessions),
                     active_session_id=self._session_controller.session_id,
                     process_choices=tuple((str(item["process_id"]), task_label(item)) for item in processes),
                     model_choices=self._model_completion_choices(),
@@ -1037,10 +1168,12 @@ class LanCherTextualApp(App[int]):
         await menu.set_candidates(matches, active_key)
         menu.styles.max_height = 4 if self.size.height < 24 else 7
         composer.slash_menu_active = bool(matches)
+        self._fit_chat_panels()
         composer.slash_enter_accepts = not matches or not all(item.optional for item in matches)
         if matches and active_key is not None:
             active = matches[self._slash_menu_index]
             hint_bar.set_hint("会话列表不可用：" + session_listing_error if session_listing_error else self._completion_hint(active))
+            self._refresh_exit_hint()
             self._refresh_status_bar()
             return
 
@@ -1049,14 +1182,21 @@ class LanCherTextualApp(App[int]):
         composer.slash_menu_active = False
 
         hint_bar.set_hint("会话列表不可用：" + session_listing_error if session_listing_error else self._slash_command_registry.hint(composer.text))
+        self._refresh_exit_hint()
         self._refresh_status_bar()
 
     def _completion_hint(self, candidate: SlashCompletionCandidate) -> str:
+        if candidate.presentation == "session":
+            title = Text(candidate.display)
+            if self.size.height < 24:
+                # 小屏优先保留完整 UUID。长标题可在 /session list 的滚动详情中完整阅读。
+                title.truncate(max(1, min(self.size.width, 112) - 4), overflow="ellipsis")
+            return title.plain + "\n" + candidate.value
         keys = "Enter 执行 · Tab 填入可选参数" if candidate.optional else "↑↓ 选择 · Tab/Enter 填入 · Esc 关闭"
         detail = candidate.detail or candidate.description
         if self.size.height < 24 and candidate.optional:
             return candidate.description
-        if self.size.width < 64:
+        if self.size.width < 64 and candidate.presentation != "session":
             detail = candidate.display + " · " + candidate.description
         return detail + " · " + keys
 
@@ -1151,7 +1291,7 @@ class LanCherTextualApp(App[int]):
 
     async def _dispatch_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         if command_name == "exit":
-            self.exit(0)
+            self._request_explicit_exit()
             return None
 
         if command_name == "do":
@@ -1213,29 +1353,13 @@ class LanCherTextualApp(App[int]):
                 self.notify("用法：/compact", title="上下文压缩", severity="warning")
                 return None
             self._is_streaming = True
+            self._exit_flow.work_started()
             self._status_hint = "正在压缩上下文..."
             composer = self.query_one("#composer-input", ComposerTextArea)
             composer.disabled = True
             self._refresh_status_bar()
             self.notify("正在压缩上下文...", title="上下文压缩")
-            try:
-                result = await self._turn_runner.compact_context()
-            except Exception as exc:
-                self._command_preserve_input = True
-                self.notify(str(exc), title="上下文压缩失败", severity="error", timeout=10)
-            else:
-                self.notify(
-                    f"已压缩，token 从 {result.before_tokens} 降至 {result.after_tokens}",
-                    title="上下文压缩",
-                    timeout=10,
-                )
-            finally:
-                self._is_streaming = False
-                self._status_hint = "就绪"
-                composer.disabled = False
-                composer.focus()
-                self._refresh_status_bar()
-                self._refresh_context_usage()
+            self._compaction_worker = self._run_manual_compaction()
             return None
 
         if command_name == "session":
@@ -1247,6 +1371,63 @@ class LanCherTextualApp(App[int]):
             return None
 
         return None
+
+    @work(group="compaction", exclusive=True, exit_on_error=False)
+    async def _run_manual_compaction(self) -> None:
+        # 压缩交给 worker，主界面的消息循环才能继续处理 Ctrl+C。
+        status = "就绪"
+        try:
+            result = await self._turn_runner.compact_context()
+        except asyncio.CancelledError:
+            status = "压缩已停止"
+            raise
+        except Exception as exc:
+            status = "压缩未完成"
+            self._command_preserve_input = True
+            if not self._ui_closing and self.is_running:
+                self.notify(str(exc), title="上下文压缩失败", severity="error", timeout=10)
+                composer = self.query_one(ComposerTextArea)
+                if not composer.text:
+                    composer.text = "/compact"
+                    composer.cursor_location = composer.document.end
+        else:
+            if not self._ui_closing and self.is_running:
+                self.notify(f"已压缩，token 从 {result.before_tokens} 降至 {result.after_tokens}",
+                            title="上下文压缩", timeout=10)
+        finally:
+            self._compaction_worker = None
+            self._is_streaming = False
+            self._exit_flow.work_finished()
+            self._status_hint = status
+            if not self._ui_closing and self.is_running:
+                composer = self.query_one(ComposerTextArea)
+                composer.disabled = False
+                composer.focus()
+                self._refresh_status_bar()
+                self._refresh_context_usage()
+                await self._refresh_command_ui()
+
+    @on(Worker.StateChanged)
+    async def handle_compaction_worker_state(self, event: Worker.StateChanged) -> None:
+        if event.worker is not self._compaction_worker:
+            return
+        if event.state not in {WorkerState.CANCELLED, WorkerState.ERROR, WorkerState.SUCCESS}:
+            return
+        if not self._is_streaming:
+            # eager task 可能在 worker 引用赋值前完成；已有 finally 的结果不能被覆盖。
+            self._compaction_worker = None
+            return
+        # worker 尚未进入协程就取消时，协程内的 finally 不会执行。
+        self._compaction_worker = None
+        self._is_streaming = False
+        self._exit_flow.work_finished()
+        self._status_hint = "压缩已停止" if event.state == WorkerState.CANCELLED else "压缩未完成"
+        if not self._ui_closing and self.is_running:
+            composer = self.query_one(ComposerTextArea)
+            composer.disabled = False
+            composer.focus()
+            self._refresh_status_bar()
+            await self._refresh_command_ui()
 
     async def _execute_session_command(self, arguments_text: str, *, confirmed: bool = False) -> None:
         arguments = arguments_text.split(maxsplit=2)
@@ -1489,6 +1670,10 @@ class ChatTUI:
     async def run(self) -> int:
         result = await self._app.run_async()
         return 0 if result is None else result
+
+    @property
+    def stopped_process_count(self) -> int:
+        return self._app._shutdown_process_count
 
     def configure_mcp(self, manager: MCPClientManager, registry: ToolRegistry) -> None:
         self._app._mcp_manager = manager

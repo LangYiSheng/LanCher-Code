@@ -14,6 +14,7 @@ from lancher_code.errors import (
     StreamProtocolError,
 )
 from lancher_code.models import ChatRequest, ContentBlock, ConversationMessage, MessageUsage, ProviderConfig, StreamEvent
+from lancher_code.run_usage import RequestUsageStatus, UsageField, UsageObserver
 
 
 class ChatProvider(Protocol):
@@ -26,9 +27,52 @@ class BaseChatProvider:
         self,
         config: ProviderConfig,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        *,
+        usage_observer: UsageObserver | None = None,
     ) -> None:
         self.config = config
         self._client_factory = client_factory or self._default_client_factory
+        self._usage_observer = usage_observer
+
+    def _start_usage_request(self, request: ChatRequest) -> str | None:
+        if self._usage_observer is None:
+            return None
+        return self._usage_observer.start_request(protocol=self.config.protocol, model=request.model)
+
+    def _report_usage(
+        self, request_id: str | None, usage: MessageUsage, provided_fields: frozenset[UsageField]
+    ) -> None:
+        if request_id is not None and self._usage_observer is not None:
+            self._usage_observer.update_request(request_id, usage, provided_fields=provided_fields)
+
+    def _finish_usage_request(self, request_id: str | None, status: RequestUsageStatus) -> None:
+        if request_id is not None and self._usage_observer is not None:
+            self._usage_observer.finish_request(request_id, status=status)
+
+    @staticmethod
+    def usage_fields(
+        raw_usage: dict[str, object],
+        *,
+        input_keys: tuple[str, ...],
+        output_keys: tuple[str, ...],
+        cached_input_keys: tuple[str, ...] = (),
+    ) -> frozenset[UsageField]:
+        fields: set[UsageField] = set()
+        for field_name, keys in (("input", input_keys), ("output", output_keys), ("cache", cached_input_keys)):
+            if BaseChatProvider._read_optional_usage_value(raw_usage, keys) is not None:
+                fields.add(field_name)
+        return frozenset(fields)
+
+    @staticmethod
+    def merge_reported_usage(
+        current: MessageUsage, incoming: MessageUsage, fields: frozenset[UsageField]
+    ) -> MessageUsage:
+        # 缺字段不会抹掉之前的快照；服务端明确上报的零仍然覆盖旧值。
+        return MessageUsage(
+            input_tokens=incoming.input_tokens if "input" in fields else current.input_tokens,
+            output_tokens=incoming.output_tokens if "output" in fields else current.output_tokens,
+            cached_input_tokens=incoming.cached_input_tokens if "cache" in fields else current.cached_input_tokens,
+        )
 
     def _default_client_factory(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self.config.timeout_seconds)
@@ -191,11 +235,15 @@ class BaseChatProvider:
 
     @staticmethod
     def _read_usage_value(raw_usage: dict[str, object], keys: tuple[str, ...]) -> int:
+        return BaseChatProvider._read_optional_usage_value(raw_usage, keys) or 0
+
+    @staticmethod
+    def _read_optional_usage_value(raw_usage: dict[str, object], keys: tuple[str, ...]) -> int | None:
         for key in keys:
             value = BaseChatProvider._read_nested_usage_value(raw_usage, key)
-            if isinstance(value, int):
+            if type(value) is int and value >= 0:
                 return value
-        return 0
+        return None
 
     @staticmethod
     def _read_nested_usage_value(raw_usage: dict[str, object], key: str) -> object:

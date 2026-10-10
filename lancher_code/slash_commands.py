@@ -2,12 +2,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SessionCompletionChoice:
+    """标题用于寻找对话，UUID 始终是命令实际使用的身份。"""
+
+    session_id: str
+    title: str
+    updated_at: datetime
+    archived: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SlashCompletionContext:
     text: str
-    session_ids: tuple[str, ...] = ()
+    session_choices: tuple[SessionCompletionChoice, ...] = ()
     active_session_id: str | None = None
     process_choices: tuple[tuple[str, str], ...] = ()
     model_choices: tuple[tuple[str, str], ...] = ()
@@ -27,6 +38,7 @@ class SlashCompletionCandidate:
     append_space: bool = False
     detail: str = ""
     optional: bool = False
+    presentation: str = "default"
 
     def apply(self, text: str) -> str:
         suffix = " " if self.append_space else ""
@@ -125,6 +137,14 @@ class SlashCommandRegistry:
             ) for c in self.suggest(name)]
         if command is None:
             return []
+        # 会话标题可能包含空格，不能沿用普通参数的最后一个单词作为查询。
+        if name == "session":
+            session_parts = text.split(maxsplit=2)
+            action = session_parts[1] if len(session_parts) >= 2 else ""
+            if action in {"resume", "archive", "remove", "rename"} and (len(session_parts) == 3 or trailing):
+                query = session_parts[2] if len(session_parts) == 3 else ""
+                start = len(text) - len(query) if query else len(text)
+                return self._complete_sessions(context, action, query, start)
         args = parts[1:]
         # 精确输入父命令即可查看下一级；补全时补上必要的空格。
         exact_parent = len(parts) == 1 and not trailing
@@ -140,10 +160,6 @@ class SlashCommandRegistry:
             if not completed:
                 for value, label in SESSION_ACTIONS.items():
                     add(value, label, value not in {"new", "list", "stop"}, "作用范围：当前会话" if value == "stop" else "作用范围：当前项目")
-            elif len(completed) == 1 and completed[0] in {"resume", "archive", "remove", "rename"}:
-                for value in context.session_ids:
-                    if completed[0] not in {"archive", "remove"} or value != context.active_session_id:
-                        add(value, "项目会话" + (" · 当前" if value == context.active_session_id else ""), completed[0] == "rename", "使用完整 UUID；标题可重复。")
         elif name == "tasks":
             if not completed:
                 for value, label in TASK_ACTIONS.items():
@@ -174,6 +190,50 @@ class SlashCommandRegistry:
         ) for value, label, space, detail, optional in options
             if value.casefold().startswith(prefix.casefold()) or (prefix and prefix.casefold() in label.casefold())]
 
+    def _complete_sessions(
+        self,
+        context: SlashCompletionContext,
+        action: str,
+        query: str,
+        start: int,
+    ) -> list[SlashCompletionCandidate]:
+        words = query.casefold().split()
+        # 选定完整 UUID 后，空格开始下一个参数；尤其不能把 rename 的新标题当检索。
+        if words and any(words[0] == choice.session_id.casefold() for choice in context.session_choices):
+            if len(words) > 1 or context.text[-1].isspace():
+                return []
+        result = []
+        # 时间相同时保持来源顺序，UUID 不参与排序，避免刷新时选中项来回跳动。
+        choices = sorted(context.session_choices, key=lambda choice: choice.updated_at, reverse=True)
+        for choice in choices:
+            if action in {"archive", "remove"} and choice.session_id == context.active_session_id:
+                continue
+            title = choice.title.strip() or "未命名对话"
+            normalized_title = " ".join(title.casefold().split())
+            if words and not (
+                choice.session_id.casefold().startswith(query.strip().casefold())
+                or all(word in normalized_title for word in words)
+            ):
+                continue
+            metadata = [choice.session_id[:8]]
+            if choice.session_id == context.active_session_id:
+                metadata.append("当前")
+            if choice.archived:
+                metadata.append("已归档")
+            metadata.append(choice.updated_at.astimezone().strftime("%Y-%m-%d %H:%M"))
+            result.append(SlashCompletionCandidate(
+                key=f"session:{action}:{choice.session_id}",
+                value=choice.session_id,
+                display=title,
+                description=" · ".join(metadata),
+                replace_start=start,
+                replace_end=len(context.text),
+                append_space=action == "rename",
+                detail=f"标题：{title}\nUUID：{choice.session_id}",
+                presentation="session",
+            ))
+        return result
+
     def hint(self, text: str) -> str:
         match = self.parse_submission(text)
         if match is None:
@@ -185,7 +245,7 @@ class SlashCommandRegistry:
             if not args:
                 return "选择一个操作 · 作用范围：当前项目"
             if args[0] in {"resume", "archive", "remove", "rename"} and len(args) == 1:
-                return "输入完整会话 UUID · 必填 · Tab 从项目会话中选择"
+                return "按标题关键词或 UUID 前缀查找 · Tab 填入完整会话 UUID"
             if args[0] == "rename" and len(args) == 2:
                 return "输入新的会话标题 · 必填 · 标题可以包含空格"
             if args[0] in {"archive", "remove"} and len(args) == 2:

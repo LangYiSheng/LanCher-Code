@@ -18,6 +18,8 @@ from lancher_code.mcp import MCPClientManager, load_mcp_config
 from lancher_code.logging_system import get_logger, register_sensitive_values
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.providers.factory import create_provider
+from lancher_code.run_usage import RunUsageTracker
+from lancher_code.run_summary import print_exit_summary, select_resume_target
 from lancher_code.session import SessionController
 from lancher_code.settings_service import SettingsService
 from lancher_code.tools import create_default_tool_registry
@@ -46,7 +48,13 @@ async def run_app() -> int:
         return 1
 
     active_config = resolve_model(config)
-    provider = create_provider(active_config)
+    usage_tracker = RunUsageTracker()
+
+    def provider_factory(provider_config):
+        # 新建、恢复、模型热切换与压缩都共享本次启动的账本。
+        return create_provider(provider_config, usage_observer=usage_tracker)
+
+    provider = provider_factory(active_config)
     register_sensitive_values([active_config.api_key])
     cwd = Path.cwd()
     permission_storage = PermissionStorage(
@@ -94,7 +102,7 @@ async def run_app() -> int:
         max_tool_loops=config.runtime.tool_loop_limit,
         unknown_tool_streak_limit=config.runtime.unknown_tool_streak_limit,
     )
-    turn_runner.configure_models(config)
+    turn_runner.configure_models(config, provider_factory=provider_factory)
     tui = ChatTUI(
         turn_runner=turn_runner,
         provider_config=active_config,
@@ -105,13 +113,39 @@ async def run_app() -> int:
         tui.configure_settings(settings_service)
     if hasattr(tui, "configure_mcp"):
         tui.configure_mcp(mcp_manager, tool_registry)
+    normal_return = False
+    cleanup_errors: list[str] = []
+    stopped_processes = 0
+    target = None
     try:
-        return await tui.run()
+        result = await tui.run()
+        normal_return = True
     finally:
+        stopped_processes = max(tui.stopped_process_count, turn_runner.application_process_count)
         try:
             await turn_runner.shutdown()
-        finally:
+        except Exception as exc:
+            logger.exception("event=application_runner_shutdown_failed")
+            cleanup_errors.append(f"任务收尾失败：{exc}")
+        try:
+            session_controller.close()
+        except Exception as exc:
+            logger.exception("event=application_session_close_failed")
+            cleanup_errors.append(f"会话保存失败：{exc}")
+        try:
+            await mcp_manager.close()
+        except Exception as exc:
+            logger.exception("event=application_mcp_close_failed")
+            cleanup_errors.append(f"连接关闭失败：{exc}")
+        if normal_return:
             try:
-                session_controller.close()
-            finally:
-                await mcp_manager.close()
+                target = select_resume_target(session_controller)
+            except (ValueError, OSError) as exc:
+                logger.exception("event=application_resume_target_failed")
+                cleanup_errors.append(f"恢复信息读取失败：{exc}")
+            print_exit_summary(console, project_root=cwd, target=target, usage=usage_tracker.snapshot(),
+                               cleanup_errors=tuple(cleanup_errors), stopped_processes=stopped_processes)
+        elif cleanup_errors:
+            for error in cleanup_errors:
+                console.print(error, markup=False, style="yellow")
+    return 1 if cleanup_errors else result

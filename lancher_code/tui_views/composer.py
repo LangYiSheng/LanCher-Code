@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from rich.console import RenderableType
 from rich.cells import cell_len
 from rich.text import Text
@@ -50,14 +52,18 @@ class StopTurnRequested(Message):
     """输入区的 Esc 停止本轮；弹窗和菜单保留自己的返回行为。"""
 
 
-class ComposerTextArea(TextArea):
+class ComposerTextArea(TextArea, inherit_bindings=False):
     BINDINGS = [
         Binding("enter", "submit_message", "发送", show=False, priority=True),
         Binding("tab", "accept_slash_menu_selection", "补全命令", show=False, priority=True),
         Binding("shift+tab", "cycle_work_phase", "切换阶段", show=False, priority=True),
         Binding("shift+enter", "insert_newline", "换行", show=False, priority=True),
         Binding("ctrl+enter", "submit_steering", "补充当前任务", show=False, priority=True),
-    ] + TextArea.BINDINGS
+    ] + [
+        replace(binding, key=",".join(key for key in binding.key.split(",") if key != "ctrl+d"))
+        for binding in TextArea.BINDINGS
+        if any(key != "ctrl+d" for key in binding.key.split(","))
+    ]
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -135,6 +141,21 @@ class SlashCompletionMenuItem(Static):
     def render(self) -> RenderableType:
         colors = theme_palette(self.app.theme)
         foreground = colors["background"] if self._active else colors["text"]
+        if self.candidate.presentation == "session":
+            # 标题占据主行，身份和状态独立一行；窄终端不让 UUID 把标题挤掉。
+            text = Text(no_wrap=False)
+            text.append("› " if self._active else "  ", style=foreground)
+            title = Text(self.candidate.display, style="bold " + foreground)
+            title.truncate(max(1, self.size.width - 2), overflow="ellipsis")
+            text.append_text(title)
+            text.append("\n  ")
+            metadata = self.candidate.description
+            if self.size.width < 40:
+                parts = metadata.rsplit(" · ", 1)
+                # 日期独占元数据末项；窄屏省掉年份，仍保留月日和更新时间。
+                metadata = " · ".join((parts[0], parts[1][5:]))
+            text.append(metadata, style=foreground if self._active else colors["muted"])
+            return text
         text = Text(no_wrap=True, overflow="ellipsis")
         text.append("› " if self._active else "  ", style=foreground)
         column = min(self.column_width, max(8, (self.size.width - 4) // 2), 24)

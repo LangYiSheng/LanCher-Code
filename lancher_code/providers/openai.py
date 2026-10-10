@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 
@@ -9,6 +10,7 @@ from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError
 from lancher_code.logging_system import get_logger
 from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
+from lancher_code.run_usage import RequestUsageStatus, UsageObserver
 
 logger = get_logger("providers.openai")
 
@@ -18,8 +20,10 @@ class OpenAIProvider(BaseChatProvider):
         self,
         config,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        *,
+        usage_observer: UsageObserver | None = None,
     ) -> None:
-        super().__init__(config=config, client_factory=client_factory)
+        super().__init__(config=config, client_factory=client_factory, usage_observer=usage_observer)
 
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -30,14 +34,18 @@ class OpenAIProvider(BaseChatProvider):
         payload = self._build_payload(request)
 
         usage = MessageUsage()
+        usage_request_id: str | None = None
+        usage_status: RequestUsageStatus = "failed"
         try:
             async with self._client_factory() as client:
+                usage_request_id = self._start_usage_request(request)
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     await self.raise_for_error_status(response)
                     yield StreamEvent(kind="message_start")
 
                     async for _event_name, data in self.iter_sse_events(response):
                         if data == "[DONE]":
+                            usage_status = "completed"
                             yield StreamEvent(kind="message_end", usage=usage)
                             return
 
@@ -52,12 +60,18 @@ class OpenAIProvider(BaseChatProvider):
                             raise ProviderResponseError("OpenAI 响应包含 error 字段。")
 
                         if isinstance(chunk.get("usage"), dict):
-                            usage = self.build_usage(
-                                chunk["usage"],
+                            usage_keys = dict(
                                 input_keys=("prompt_tokens", "input_tokens"),
                                 output_keys=("completion_tokens", "output_tokens"),
                                 cached_input_keys=("prompt_tokens_details.cached_tokens",),
                             )
+                            fields = self.usage_fields(chunk["usage"], **usage_keys)
+                            incoming = self.build_usage(
+                                chunk["usage"],
+                                **usage_keys,
+                            )
+                            usage = self.merge_reported_usage(usage, incoming, fields)
+                            self._report_usage(usage_request_id, usage, fields)
 
                         for choice in chunk.get("choices", []):
                             delta = choice.get("delta", {})
@@ -97,11 +111,18 @@ class OpenAIProvider(BaseChatProvider):
                                         ),
                                     )
 
+                    usage_status = "incomplete"
                     yield StreamEvent(kind="message_end", usage=usage)
+        except (asyncio.CancelledError, GeneratorExit):
+            if usage_status != "completed":
+                usage_status = "cancelled"
+            raise
         except ProviderResponseError:
+            usage_status = "failed"
             logger.exception("event=provider_response_failed provider=openai")
             raise
         except Exception as exc:
+            usage_status = "failed"
             logger.exception(
                 "event=provider_request_failed provider=openai exception_type=%s",
                 type(exc).__name__,
@@ -111,6 +132,8 @@ class OpenAIProvider(BaseChatProvider):
             if isinstance(exc, httpx.HTTPError):
                 raise self.map_request_error(exc) from exc
             raise
+        finally:
+            self._finish_usage_request(usage_request_id, usage_status)
 
     def _build_payload(self, request: ChatRequest) -> dict[str, object]:
         payload: dict[str, object] = {

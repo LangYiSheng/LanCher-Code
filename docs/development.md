@@ -22,6 +22,8 @@ uv run pytest            # 运行全部测试
 - **事件驱动**：TurnRunner → TUI 通过 `TurnEvent` 通信；Provider → TurnRunner 通过 `StreamEvent` 通信。
 - **协议无关**：会话层只存抽象消息，Provider 负责序列化差异。
 
+退出确认、实际收尾和终端小结有各自职责：`tui_views/exit_flow.py` 用单调时钟决定停止与退出意图，界面持有异步操作任务，`app.py` 统一等待清理，`run_summary.py` 只展示最终结果。`run_usage.py` 的本次启动账本观察实际 Provider 请求，切换 Session 或模型时要继续注入同一个 observer，不能改成累计恢复的历史消息。完整场景和统计口径见 [结束工作与恢复对话](workflows/app-exit.md)。
+
 ## 如何增加一个新功能
 
 ### 新增内置工具
@@ -75,6 +77,8 @@ uv run pytest            # 运行全部测试
 | 异步生成器 + 队列 | `turn_runner.py` | 后台任务产事件，消费者逐条消费 |
 | 门面 | `ChatTUI` / `ConfigBootstrapTUI` | 包装 Textual App |
 | 状态机 | `SessionController.set_work_phase` / `set_permission_policy` | 阶段与策略独立，旧模式入口仅供兼容 |
+| 退出意图状态机 | `tui_views/exit_flow.py` | 停止期间锁存请求，空闲双按在 3 秒内确认；时钟可注入 |
+| 请求用量账本 | `run_usage.py` | 按请求 UUID 累计本次启动用量，同一流的 usage 快照替换而非累加 |
 | 持久化 | `sessions.repository`、`settings_service._atomic_write_many` | Session 追加事件 + 文件锁；摘要与配置采用临时文件 + `os.replace` |
 
 ## 运行测试
@@ -91,6 +95,9 @@ uv run pytest tests/test_tui_flow.py -k streaming   # 按关键字过滤
 - `pytest-asyncio` 为 `auto` 模式，`async def test_*` 自动以 asyncio 运行。
 - Provider 测试通过注入 `httpx.MockTransport` 模拟流式响应（fixture 见 `tests/conftest.py`）。
 - TUI 测试直接驱动 `LanCherTextualApp`（`tests/test_tui_*.py`），不依赖真实终端。
+- `tests/test_exit_flow.py` 用注入时钟检查确认窗口，不靠睡眠；`tests/test_run_summary.py` 检查本次访问的恢复目标、完整 UUID、纯文本标题、窄终端和缺失统计。
+- 修改退出流程时，状态机测试不能替代真实应用入口：需要确认停止与关闭等待完成后才打印小结，并覆盖清理失败。模型用量测试应同时检查跨 Session/模型、手动/自动压缩、重复 usage 帧和中断流。
+- Windows 上将测试临时目录放到系统 Temp 下的具名目录，例如 `--basetemp="$env:TEMP/lancher-exit-tests"`；配合 `PYTHONDONTWRITEBYTECODE=1` 和 `-p no:cacheprovider`，避免在项目根留下验证产物。
 
 ## 调试
 

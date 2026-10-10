@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 
@@ -9,6 +10,7 @@ from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError
 from lancher_code.logging_system import get_logger
 from lancher_code.models import ChatRequest, MessageUsage, StreamEvent, ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
+from lancher_code.run_usage import RequestUsageStatus, UsageField, UsageObserver
 
 logger = get_logger("providers.claude")
 
@@ -21,8 +23,10 @@ class ClaudeProvider(BaseChatProvider):
         self,
         config,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        *,
+        usage_observer: UsageObserver | None = None,
     ) -> None:
-        super().__init__(config=config, client_factory=client_factory)
+        super().__init__(config=config, client_factory=client_factory, usage_observer=usage_observer)
 
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
         url = f"{self.config.base_url.rstrip('/')}/messages"
@@ -35,8 +39,12 @@ class ClaudeProvider(BaseChatProvider):
 
         saw_end = False
         usage = MessageUsage()
+        usage_parts: dict[str, int] = {}
+        usage_request_id: str | None = None
+        usage_status: RequestUsageStatus = "failed"
         try:
             async with self._client_factory() as client:
+                usage_request_id = self._start_usage_request(request)
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     await self.raise_for_error_status(response)
 
@@ -49,12 +57,14 @@ class ClaudeProvider(BaseChatProvider):
                         if event_type == "message_start":
                             message = event.get("message")
                             if isinstance(message, dict):
-                                usage = self._merge_usage(usage, message.get("usage"))
+                                usage, fields = self._merge_usage(usage_parts, message.get("usage"))
+                                self._report_usage(usage_request_id, usage, fields)
                             yield StreamEvent(kind="message_start")
                             continue
 
                         if event_type == "message_delta":
-                            usage = self._merge_usage(usage, event.get("usage"))
+                            usage, fields = self._merge_usage(usage_parts, event.get("usage"))
+                            self._report_usage(usage_request_id, usage, fields)
                             continue
 
                         if event_type == "content_block_start":
@@ -100,6 +110,7 @@ class ClaudeProvider(BaseChatProvider):
 
                         if event_type == "message_stop":
                             saw_end = True
+                            usage_status = "completed"
                             yield StreamEvent(kind="message_end", usage=usage)
                             return
 
@@ -119,11 +130,18 @@ class ClaudeProvider(BaseChatProvider):
                             raise ProviderResponseError(message)
 
                     if not saw_end:
+                        usage_status = "incomplete"
                         yield StreamEvent(kind="message_end", usage=usage)
+        except (asyncio.CancelledError, GeneratorExit):
+            if usage_status != "completed":
+                usage_status = "cancelled"
+            raise
         except ProviderResponseError:
+            usage_status = "failed"
             logger.exception("event=provider_response_failed provider=claude")
             raise
         except Exception as exc:
+            usage_status = "failed"
             logger.exception(
                 "event=provider_request_failed provider=claude exception_type=%s",
                 type(exc).__name__,
@@ -133,6 +151,8 @@ class ClaudeProvider(BaseChatProvider):
             if isinstance(exc, httpx.HTTPError):
                 raise self.map_request_error(exc) from exc
             raise
+        finally:
+            self._finish_usage_request(usage_request_id, usage_status)
 
     def _build_payload(self, request: ChatRequest) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -199,20 +219,25 @@ class ClaudeProvider(BaseChatProvider):
         }
 
     @staticmethod
-    def _merge_usage(current: MessageUsage, raw_usage: object) -> MessageUsage:
-        if not isinstance(raw_usage, dict):
-            return current
-
-        incoming = ClaudeProvider.build_usage(
-            raw_usage,
-            input_keys=("input_tokens", "prompt_tokens"),
-            output_keys=("output_tokens", "completion_tokens"),
-            cached_input_keys=("cache_read_input_tokens", "cached_input_tokens"),
-        )
-        cache_creation_input_tokens = ClaudeProvider._read_usage_value(raw_usage, ("cache_creation_input_tokens",))
-        total_input_tokens = incoming.input_tokens + incoming.cached_input_tokens + cache_creation_input_tokens
+    def _merge_usage(
+        parts: dict[str, int], raw_usage: object
+    ) -> tuple[MessageUsage, frozenset[UsageField]]:
+        fields: set[UsageField] = set()
+        if isinstance(raw_usage, dict):
+            for name, keys, field_name in (
+                ("input", ("input_tokens", "prompt_tokens"), "input"),
+                ("output", ("output_tokens", "completion_tokens"), "output"),
+                ("cache", ("cache_read_input_tokens", "cached_input_tokens"), "cache"),
+                ("creation", ("cache_creation_input_tokens",), None),
+            ):
+                value = ClaudeProvider._read_optional_usage_value(raw_usage, keys)
+                if value is not None:
+                    parts[name] = value
+                    if field_name is not None:
+                        fields.add(field_name)
+        # 各输入分量分别保留；后续只有输出的帧不能抹掉缓存创建或读取量。
         return MessageUsage(
-            input_tokens=total_input_tokens or current.input_tokens,
-            cached_input_tokens=incoming.cached_input_tokens or current.cached_input_tokens,
-            output_tokens=incoming.output_tokens or current.output_tokens,
-        )
+            input_tokens=parts.get("input", 0) + parts.get("cache", 0) + parts.get("creation", 0),
+            cached_input_tokens=parts.get("cache", 0),
+            output_tokens=parts.get("output", 0),
+        ), frozenset(fields)

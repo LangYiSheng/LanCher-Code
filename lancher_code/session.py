@@ -98,6 +98,7 @@ class SessionController:
         self._current_date = current_date or datetime.now().astimezone().date()
         self._transcript: list[ConversationMessage] = []
         self._sessions = SessionService(self._cwd)
+        self._visited_session_ids: list[str] = []
         self._execution_runtime = None
         self._last_flush = monotonic()
         self._dirty = False
@@ -261,6 +262,7 @@ class SessionController:
             raise ValueError('用户消息不能为空。')
         if self.session_id is None:
             self._state.session_id = self._sessions.create(self._snapshot(), text)
+        self._remember_session()
         if self.work_phase == "plan" and self._state.plan_snapshot is not None:
             self._state.plan_snapshot.ready = False
         message = SessionMessage(
@@ -715,6 +717,18 @@ class SessionController:
     def list_sessions(self):
         return self._sessions.repository.list_sessions()
 
+    @property
+    def visited_session_ids(self) -> tuple[str, ...]:
+        """本次运行实际使用过的会话，按最近使用排列；不包含磁盘上的其他对话。"""
+        return tuple(self._visited_session_ids)
+
+    def _remember_session(self) -> None:
+        session_id = self.session_id
+        if session_id is not None:
+            if session_id in self._visited_session_ids:
+                self._visited_session_ids.remove(session_id)
+            self._visited_session_ids.append(session_id)
+
     def new_session(self) -> None:
         self._detach_view()
         self._sessions = SessionService(self._cwd)
@@ -753,6 +767,7 @@ class SessionController:
 
     def resume_session(self, session_id: str, *, resolved_model=None) -> int:
         if session_id == self.session_id and self._sessions.writer is not None:
+            self._remember_session()
             return len(self._permission_storage.rules_for_scope('session'))
         self.flush()
         retained = self._execution_runtime.sessions.get(session_id) if self._execution_runtime else None
@@ -772,6 +787,7 @@ class SessionController:
             self._active_dynamic_context = None
             self._dirty = False
             self._register_execution_session()
+            self._remember_session()
             return len(retained.rules)
         prepared = self._sessions.prepare(session_id)
         try:
@@ -814,6 +830,7 @@ class SessionController:
             self._provider_config = resolved_model[0]
         self._dirty = False
         self._register_execution_session()
+        self._remember_session()
         return len(rules)
 
     def close(self) -> None:
