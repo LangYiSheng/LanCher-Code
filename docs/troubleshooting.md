@@ -93,6 +93,8 @@ Test-Path $HOME\.lancher\lancher.yaml
 
 Windows 后端从系统目录使用 PowerShell，通过 Job Object 托管；ConPTY 要求系统支持对应 API。POSIX 后端使用 `/bin/sh`。先检查错误正文，不以后台工具返回句柄作为命令最终成功的证据。
 
+如果连 `python --version` 都返回「执行范围已停止，不能启动新进程」，不要把它当成需要额外批准的提示。早期工具运行时重构版本存在真实 TUI 立即调度与轮次初始化的竞态：事件日志里的 `turn.started` / `invocation.queued` 会带空 `turn_id`，首轮结束后后续命令被同一个已停止范围拦截。更新到修复版后退出并重新启动应用即可使用原 Session，日志和对话无需删除；停止范围只存在于旧进程的内存中。实现说明见 [轮次先绑定再启动](workflows/tool-execution.md#为什么轮次要先绑定再启动)。
+
 未知命令长期持有项目独占资源时，其他文件工具会排队，这是保守调度的结果。停止进程，或为确实已知的开发脚本配置合适的 `execution.command_profiles`。`process_read/list/stop` 管理入口不会被目标进程的项目锁挡住。
 
 等待超时不停止进程，真实运行期限才停止。重启后看到 `lost` 表示应用没有重新接管旧进程；它不会自动重跑，日志仍可阅读。停止后队列保持暂停，需要用户明确继续。

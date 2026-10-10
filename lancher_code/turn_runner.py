@@ -495,12 +495,24 @@ class TurnRunner:
         self._ensure_model_idle()
         queue: asyncio.Queue[TurnEvent | object] = asyncio.Queue()
         cancellation_token = CancellationToken()
-        active_turn = _ActiveTurn(
-            task=asyncio.create_task(self._run_turn(text, queue, cancellation_token)),
-            queue=queue,
-            cancellation_token=cancellation_token,
-        )
+        bound = asyncio.Event()
+
+        async def run_bound_turn() -> None:
+            # TUI 的 eager 调度可在 create_task 返回前执行；先等完整上下文发布。
+            await bound.wait()
+            await self._run_turn(text, active_turn)
+
+        task = asyncio.create_task(run_bound_turn())
+        # 启动前被取消的 Task 不会进入执行体的 finally，也必须结束事件消费者。
+        task.add_done_callback(lambda _: queue.put_nowait(_QUEUE_END))
+        try:
+            active_turn = _ActiveTurn(task=task, queue=queue, cancellation_token=cancellation_token)
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
         self._active_turn = active_turn
+        bound.set()
 
         try:
             while True:
@@ -532,9 +544,10 @@ class TurnRunner:
     async def _run_turn(
         self,
         text: str,
-        queue: asyncio.Queue[TurnEvent | object],
-        cancellation_token: CancellationToken,
+        active_turn: _ActiveTurn,
     ) -> None:
+        queue = active_turn.queue
+        cancellation_token = active_turn.cancellation_token
         assistant_message = None
         total_usage = MessageUsage()
         loop_count = 0
@@ -545,7 +558,7 @@ class TurnRunner:
         policy = self._session.permission_policy
         completed = False
         written_plan_digest: str | None = None
-        turn_id = self._active_turn.task_id if self._active_turn else None
+        turn_id = active_turn.task_id
         owner_session_id = None
         generation = 0
 
@@ -553,12 +566,11 @@ class TurnRunner:
             user_message = self._session.create_user_message(text)
             owner_session_id = self._session.session_id
             generation = self._execution_runtime.generation(owner_session_id)
-            self._session.record_event('turn.started', turn_id=self._active_turn.task_id if self._active_turn else None)
+            self._session.record_event('turn.started', turn_id=turn_id)
             await self._emit(queue, TurnEvent(kind="user_message_created", message=user_message))
 
             assistant_message = self._session.create_assistant_message()
-            if self._active_turn is not None:
-                self._active_turn.assistant_message_id = assistant_message.id
+            active_turn.assistant_message_id = assistant_message.id
             await self._emit(queue, TurnEvent(kind="assistant_message_started", message=assistant_message))
             await self._emit(
                 queue,
@@ -809,7 +821,7 @@ class TurnRunner:
                     async def report_started(call: ToolCall) -> None:
                         message = self._session.set_trace_tool_state(assistant_message.id, call.call_id, "running")
                         self._session.record_event('tool.started', {'call_id': call.call_id, 'tool_name': call.tool_name},
-                                                   turn_id=self._active_turn.task_id if self._active_turn else None)
+                                                   turn_id=turn_id)
                         await self._emit(queue, TurnEvent(kind="progress_updated", message=message,
                             tool_call=call, progress_message=f"正在执行 {call.tool_name}"))
 
@@ -822,7 +834,7 @@ class TurnRunner:
                         pending_tool_calls[:] = [call for call in pending_tool_calls if call.call_id != result.call_id]
                         message = self._session.append_trace_tool_results(assistant_message.id, [result])
                         self._session.record_event('tool.finished', {'call_id': result.call_id, 'ok': result.ok},
-                                                   turn_id=self._active_turn.task_id if self._active_turn else None)
+                                                   turn_id=turn_id)
                         await self._emit(queue, TurnEvent(kind="tool_result_received", message=message,
                             usage=self._current_message_usage(assistant_message.id), tool_result=result))
 
@@ -885,8 +897,7 @@ class TurnRunner:
                     written_plan_digest = None
                     continue
                 # 最终检查与关闭接收在同一事件循环片段完成；晚到的补充保留为暂停消息。
-                if self._active_turn is not None:
-                    self._active_turn.accepting_input = False
+                active_turn.accepting_input = False
                 message = self._session.complete_message(assistant_message.id, total_usage)
                 snapshot = self._session.plan_snapshot
                 if phase == "plan" and snapshot is not None and snapshot.digest == written_plan_digest:
@@ -898,7 +909,7 @@ class TurnRunner:
                     TurnEvent(kind="assistant_message_completed", message=message, usage=total_usage),
                 )
                 await self._emit(queue, TurnEvent(kind="turn_completed", message=message,
-                    task_id=self._active_turn.task_id if self._active_turn else None))
+                    task_id=turn_id))
                 return
         except asyncio.CancelledError:
             cancellation_token.cancel()
@@ -915,21 +926,17 @@ class TurnRunner:
                 if owner_session_id is not None:
                     # 正常结束与取消都结束 turn 作用域；session 进程继续托管。
                     await self._execution_runtime.processes.stop_turn(owner_session_id, turn_id)
-                if self._active_turn is not None:
-                    self._active_turn.accepting_input = False
-                    self._active_turn.pending_permissions.clear()
+                active_turn.accepting_input = False
+                active_turn.pending_permissions.clear()
                 if not completed:
                     self._pause_queue_best_effort()
                 if self._session.session_id is not None:
                     kind = 'turn.completed' if completed else 'turn.interrupted' if cancellation_token.is_cancelled else 'turn.failed'
-                    self._session.record_event(kind, turn_id=self._active_turn.task_id if self._active_turn else None)
+                    self._session.record_event(kind, turn_id=turn_id)
                 self._session.flush()
             except Exception as exc:
                 logger.exception('event=session_persistence_failed')
                 await self._emit(queue, TurnEvent(kind='turn_failed', error_text=f'会话保存失败：{exc}'))
-            finally:
-                # 持久化错误也必须结束事件消费者和后台任务。
-                await queue.put(_QUEUE_END)
 
     def _pause_queue_best_effort(self) -> None:
         try:

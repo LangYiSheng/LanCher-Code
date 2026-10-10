@@ -24,7 +24,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _uninterrupted(task: asyncio.Task):
+async def _uninterrupted(task: asyncio.Future):
     """停止已确定后，重复取消也不能打断取得句柄与释放资源。"""
     while not task.done():
         try:
@@ -505,14 +505,15 @@ class ProcessSupervisor:
         ids = [entry.info.process_id for entry in self._processes.values()
                if entry.info.session_id == session_id and entry.info.origin_turn_id == turn_id
                and entry.info.lifetime == "turn" and not entry.done.is_set()]
-        await asyncio.gather(*(self.stop(process_id, session_id) for process_id in ids))
+        # 保护整组停止任务；取消不能在某个子任务首次运行前就将它跳过。
+        await _uninterrupted(asyncio.gather(*(self.stop(process_id, session_id) for process_id in ids)))
 
     async def stop_session(self, session_id: str) -> None:
         self.seal_session(session_id)
         try:
             ids = [entry.info.process_id for entry in self._processes.values()
                    if entry.info.session_id == session_id and not entry.done.is_set()]
-            await asyncio.gather(*(self.stop(process_id, session_id) for process_id in ids))
+            await _uninterrupted(asyncio.gather(*(self.stop(process_id, session_id) for process_id in ids)))
         finally:
             self._stopping_sessions.discard(session_id)
 

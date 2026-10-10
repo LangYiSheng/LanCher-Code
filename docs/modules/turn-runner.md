@@ -28,7 +28,7 @@ tui_views/chat.py  ──run_user_turn()──▶  TurnRunner
 
 | 成员 | 作用 |
 |---|---|
-| `run_user_turn(text)` | 异步生成器：创建后台任务 `_run_turn` 与事件队列，逐个产出 `TurnEvent` |
+| `run_user_turn(text)` | 异步生成器：发布完整轮次上下文后开放后台任务入口，逐个产出队列里的 `TurnEvent` |
 | `resolve_permission_request(resolution)` | TUI 回调：把用户决议写入挂起的 Future |
 | `cancel_active_turn()` | 取消当前回合（令牌 + 任务 + 挂起权限 Future） |
 | `stop_and_wait()` | 界面关闭时取消当前任务并等待工具、子进程和管道收尾 |
@@ -49,7 +49,8 @@ tui_views/chat.py  ──run_user_turn()──▶  TurnRunner
 
 ```text
 run_user_turn(text)
-├─ 创建后台任务 _run_turn + 事件队列
+├─ 创建等待启动门闩的后台任务与事件队列
+├─ 发布完整 _ActiveTurn，再开放门闩（兼容立即执行任务的调度）
 └─ _run_turn:
     1. create_user_message → 事件 user_message_created
     2. create_assistant_message → 事件 assistant_message_started
@@ -80,7 +81,8 @@ run_user_turn(text)
        · CancelledError → cancel_message → turn_cancelled
        · LanCherError → fail_message → turn_failed
        · 其他异常 → 记日志 → fail_message → turn_failed
-    5. finally：清空权限挂起、flush 会话事件、发送 _QUEUE_END
+    5. finally：停止本轮进程、清空权限挂起、flush 会话事件
+    6. 后台任务完成回调：发送 _QUEUE_END；启动前被取消也会结束消费者
 ```
 
 ## 事件流（TurnEvent）

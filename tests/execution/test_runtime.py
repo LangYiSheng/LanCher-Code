@@ -52,6 +52,124 @@ async def launch(executor, session, script, *, lifetime='session', turn_id='orig
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('eager', [False, True])
+async def test_successive_turns_own_distinct_scopes_before_execution(
+    tmp_path, openai_provider_config, eager,
+):
+    """真实 TUI 的立即调度不能让首轮完成封住后续轮次。"""
+    class Provider:
+        requests = 0
+
+        async def stream_chat(self, request):
+            self.requests += 1
+            if self.requests == 2:
+                arguments = {'description': '检查 Python', 'command': python_command("print('scope-ok')"),
+                             'yield_ms': 10000}
+                yield StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
+                    call_index=0, provider_call_id='scope-call', name_delta='run_command',
+                    arguments_delta=json.dumps(arguments)))
+            else:
+                yield StreamEvent(kind='text_delta', text='完成')
+            yield StreamEvent(kind='message_end')
+
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    runtime, session, _, runner = setup_runtime(tmp_path, openai_provider_config, Provider())
+    try:
+        if eager:
+            loop.set_task_factory(asyncio.eager_task_factory)
+        first = [event async for event in runner.run_user_turn('先聊天')]
+        second = [event async for event in runner.run_user_turn('再检查 Python')]
+        result, = [event.tool_result for event in second if event.kind == 'tool_result_received']
+        assert result.ok, result.error_message
+        assert 'scope-ok' in result.content
+        first_id, = [event.task_id for event in first if event.kind == 'turn_completed']
+        second_id, = [event.task_id for event in second if event.kind == 'turn_completed']
+        assert first_id and second_id and first_id != second_id
+        journal = session._sessions.repository.read(session.session_id)
+        starts = [event['turn_id'] for event in journal if event['type'] == 'turn.started']
+        finishes = [event['turn_id'] for event in journal if event['type'] == 'turn.completed']
+        assert starts == finishes == [first_id, second_id]
+        assert result.metadata['origin_turn_id'] == second_id
+        assert (session.session_id, None) not in runtime.processes._stopping_turns
+        assert not runner.has_active_turn
+    finally:
+        await runner.shutdown()
+        session.close()
+        loop.set_task_factory(previous_factory)
+
+
+@pytest.mark.asyncio
+async def test_stop_before_bound_turn_starts_closes_event_consumer(tmp_path, openai_provider_config):
+    """立即调度创建消费者后、轮次启动门闩恢复前的停止仍能完整收尾。"""
+    loop = asyncio.get_running_loop()
+    previous_factory = loop.get_task_factory()
+    runtime, session, _, runner = setup_runtime(tmp_path, openai_provider_config)
+    consumer = None
+
+    async def consume():
+        return [event async for event in runner.run_user_turn('立即停止')]
+
+    try:
+        loop.set_task_factory(asyncio.eager_task_factory)
+        consumer = asyncio.create_task(consume())
+        assert runner.cancel_active_turn()
+        await asyncio.wait_for(consumer, 2)
+        assert not runner.has_active_turn
+        assert not runtime.processes._processes
+        # 停止入口未开始的轮次，不封住下一次正常请求。
+        events = [event async for event in runner.run_user_turn('现在继续')]
+        assert any(event.kind == 'turn_completed' and event.task_id for event in events)
+    finally:
+        if consumer is not None:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        await runner.shutdown()
+        session.close()
+        loop.set_task_factory(previous_factory)
+
+
+@pytest.mark.asyncio
+async def test_stop_during_completed_turn_cleanup_keeps_terminal_journal(tmp_path, openai_provider_config):
+    class Provider:
+        requests = 0
+
+        async def stream_chat(self, request):
+            self.requests += 1
+            if self.requests == 1:
+                arguments = {'description': '本轮托管进程', 'command': python_command('import time; time.sleep(30)'),
+                             'yield_ms': 0}
+                yield StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
+                    call_index=0, provider_call_id='cleanup-call', name_delta='run_command',
+                    arguments_delta=json.dumps(arguments)))
+            else:
+                yield StreamEvent(kind='text_delta', text='完成')
+            yield StreamEvent(kind='message_end')
+
+    runtime, session, _, runner = setup_runtime(tmp_path, openai_provider_config, Provider())
+    completed_id = None
+
+    async def consume():
+        nonlocal completed_id
+        async for event in runner.run_user_turn('启动本轮任务后结束回答'):
+            if event.kind == 'turn_completed':
+                completed_id = event.task_id
+                # 回答已完成，托管进程仍在 finally 中进行真实停止。
+                assert runner.cancel_active_turn()
+
+    try:
+        await asyncio.wait_for(consume(), 15)
+        assert completed_id and not runner.has_active_turn
+        assert not runtime.processes.active_session(session.session_id)
+        journal = session._sessions.repository.read(session.session_id)
+        assert [event['turn_id'] for event in journal if event['type'] == 'turn.completed'] == [completed_id]
+        assert not any(event['type'] == 'turn.interrupted' for event in journal)
+    finally:
+        await runner.shutdown()
+        session.close()
+
+
+@pytest.mark.asyncio
 async def test_switch_keeps_original_writer_and_background_event_owner(tmp_path, openai_provider_config):
     runtime, session, executor, runner = setup_runtime(tmp_path, openai_provider_config)
     session.create_user_message('第一段对话')

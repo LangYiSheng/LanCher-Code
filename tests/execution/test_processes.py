@@ -67,6 +67,68 @@ async def test_yield_does_not_terminate_and_lifetime_scopes(tmp_path):
         await manager.close()
 
 
+@pytest.mark.parametrize("scope", ["turn", "session"])
+@pytest.mark.asyncio
+async def test_cancel_stop_batch_before_children_start_reaps_all_and_reopens_scope(tmp_path, monkeypatch, scope):
+    """批次已经封住入口，单个停止任务还未运行时，取消也不能漏掉整个进程组。"""
+    manager = supervisor(tmp_path)
+    sid = uuid4().hex
+    batch_started, children_started, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered = []
+    stopping = None
+    seal_name = "seal_turn" if scope == "turn" else "seal_session"
+    original_seal, original_stop = getattr(manager, seal_name), manager.stop
+
+    def record_seal(*args):
+        original_seal(*args)
+        # 唤醒观察者后，批次才创建 stop 子任务，精确覆盖首次运行前的取消窗口。
+        batch_started.set()
+
+    async def gated_stop(process_id, session_id, **kwargs):
+        entered.append(process_id)
+        if len(entered) == 2:
+            children_started.set()
+        await release.wait()
+        return await original_stop(process_id, session_id, **kwargs)
+
+    monkeypatch.setattr(manager, seal_name, record_seal)
+    monkeypatch.setattr(manager, "stop", gated_stop)
+    try:
+        processes = []
+        for _ in range(2):
+            info, _ = await start(manager, tmp_path, "import time;time.sleep(30)", session_id=sid,
+                                  lifetime=scope, yield_ms=0)
+            processes.append(info)
+        operation = manager.stop_turn(sid, "turn") if scope == "turn" else manager.stop_session(sid)
+        stopping = asyncio.create_task(operation)
+        await asyncio.wait_for(batch_started.wait(), 2)
+        assert not entered
+        stopping.cancel()
+        await asyncio.wait_for(children_started.wait(), 2)
+        # 重复取消仍需等待被托管的整批清理，Session 入口不能提前重开。
+        stopping.cancel()
+        assert not stopping.done()
+        with pytest.raises(RuntimeError, match="执行范围已停止"):
+            await start(manager, tmp_path, "print('too-early')", session_id=sid, yield_ms=0)
+        release.set()
+        await asyncio.wait_for(stopping, 5)
+        assert not stopping.cancelled()
+        assert not manager.active_session(sid)
+        assert {manager.get(info.process_id, sid).status for info in processes} == {"cancelled"}
+        assert sid not in manager._stopping_sessions
+        # turn 的旧 UUID 保持封闭；同 Session 的新轮次或完整停止后的 Session 可继续使用。
+        next_turn = "next" if scope == "turn" else "turn"
+        restarted, _ = await start(manager, tmp_path, "print('reopened')", session_id=sid,
+                                   turn_id=next_turn, yield_ms=5000)
+        assert restarted.status == "exited" and restarted.exit_code == 0
+        assert "reopened" in manager.read(restarted.process_id, sid).text
+    finally:
+        release.set()
+        await manager.close()
+        if stopping is not None:
+            await asyncio.gather(stopping, return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_background_transfer_and_idempotent_stop(tmp_path):
     manager = supervisor(tmp_path)
