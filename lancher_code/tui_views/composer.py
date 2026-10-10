@@ -46,6 +46,10 @@ class WorkPhaseCycleRequested(Message):
     pass
 
 
+class StopTurnRequested(Message):
+    """输入区的 Esc 停止本轮；弹窗和菜单保留自己的返回行为。"""
+
+
 class ComposerTextArea(TextArea):
     BINDINGS = [
         Binding("enter", "submit_message", "发送", show=False, priority=True),
@@ -78,7 +82,13 @@ class ComposerTextArea(TextArea):
             if event.key == "escape":
                 self.post_message(SlashMenuDismissRequested())
                 event.prevent_default()
+                event.stop()
                 return
+        if event.key == "escape":
+            self.post_message(StopTurnRequested())
+            event.prevent_default()
+            event.stop()
+            return
         await super()._on_key(event)
 
     def action_submit_message(self) -> None:

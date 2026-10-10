@@ -33,7 +33,9 @@ from lancher_code.tools.core.common import (
 PermissionRuleMatcher = Literal["exact", "glob"]
 
 TOOL_LABELS: dict[str, str] = {
-    "bash": "Bash",
+    "run_command": "RunCommand",
+    "process_write": "ProcessWrite",
+    "process_background": "ProcessBackground",
     "read_file": "ReadFile",
     "write_file": "WriteFile",
     "edit_file": "EditFile",
@@ -42,52 +44,6 @@ TOOL_LABELS: dict[str, str] = {
     "write_plan_file": "WritePlanFile",
 }
 LABEL_TO_TOOL = {label.casefold(): tool_name for tool_name, label in TOOL_LABELS.items()}
-PLAN_ALLOWED_PREFIXES = (
-    "get-childitem",
-    "ls",
-    "dir",
-    "pwd",
-    "get-location",
-    "get-content",
-    "type",
-    "cat",
-    "rg",
-    "select-string",
-    "git status",
-    "git diff",
-    "where",
-    "python --version",
-    "python -v",
-    "uv --version",
-)
-PLAN_BLOCKED_PATTERNS = (
-    ">>",
-    ">",
-    "<",
-    "|",
-    "&&",
-    "||",
-    ";",
-    "set-content",
-    "add-content",
-    "out-file",
-    "remove-item",
-    "move-item",
-    "copy-item",
-    "new-item",
-    "rename-item",
-    "start-process",
-    "git checkout",
-    "git commit",
-    "git apply",
-    "git cherry-pick",
-    "npm ",
-    "pnpm ",
-    "yarn ",
-    "pip ",
-    "uv run",
-    "uv sync",
-)
 COMMAND_BLACKLIST_PATTERNS = (
     re.compile(r"(^|[;&|])\s*(remove-item|del|erase|rm)\b", re.IGNORECASE),
     re.compile(r"(^|[;&|])\s*(shutdown|restart-computer|stop-computer)\b", re.IGNORECASE),
@@ -323,7 +279,7 @@ class PermissionEngine:
             )
         metadata = self._build_denied_metadata(call, tool, context, target)
 
-        if tool.name == "bash":
+        if tool.name == "run_command":
             blacklist_message = _match_command_blacklist(target.value)
             if blacklist_message is not None:
                 return PermissionCheck(
@@ -332,9 +288,30 @@ class PermissionEngine:
                     reason_message=blacklist_message,
                     metadata=metadata,
                 )
+        if tool.name == "process_write":
+            # stdin 也可能是交互 Shell 的命令入口；已有不可绕过的命令限制
+            # 不能仅因为换成了输入通道就消失。
+            text = str(call.arguments.get("text", ""))
+            blocked = next((_match_command_blacklist(line) for line in text.splitlines()
+                            if _match_command_blacklist(line) is not None), None)
+            if blocked is not None:
+                return PermissionCheck(decision="deny", reason_code="permission_blacklist_denied",
+                                       reason_message=blocked, metadata=metadata)
         workspace_grant = write_path is not None and is_session_workspace_path(write_path, context)
         matched_rule = self._match_denied_rule(target) if workspace_grant else None
         matched_rule = matched_rule or self._match_rules(target)
+        # 交互 Shell 的 stdin 可以执行新的任意命令。历史允许规则不能把
+        # 一次命令批准扩大成一个永久的 Shell 输入通道，明确拒绝仍然生效。
+        if tool.name in {"process_write", "process_background"}:
+            denied_rule = self._match_denied_rule(target)
+            if denied_rule is not None:
+                return PermissionCheck(
+                    decision="deny", reason_code="permission_rule_deny",
+                    reason_message=f"命中 {denied_rule.scope} 级权限规则: {denied_rule.match}",
+                    metadata=metadata,
+                )
+            if context.permission_policy != "bypass":
+                return PermissionCheck(decision="ask", request=self._build_permission_request(call, tool, context, target))
         if matched_rule is not None:
             return PermissionCheck(
                 decision=matched_rule.result,
@@ -403,13 +380,15 @@ class PermissionEngine:
 
     @staticmethod
     def _policy_decision(tool: ToolDefinition, policy: PermissionPolicy) -> PermissionDecision:
+        if tool.name in {"process_list", "process_read", "process_wait", "process_stop"} and (tool.permission is None or tool.permission.source != "external"):
+            return "allow"
         if policy == "bypass":
             return "allow"
         if tool.category == "read":
             return "allow"
         if tool.permission is not None and tool.permission.source == "external":
             return "ask"
-        if policy == "acceptEdits" and tool.category == "write" and tool.name != "bash":
+        if policy == "acceptEdits" and tool.category == "write" and tool.name != "run_command":
             return "allow"
         return "ask"
 
@@ -421,10 +400,18 @@ class PermissionEngine:
                 value="",
                 matcher="exact",
             )
-        if tool.name == "bash":
+        if tool.name == "run_command":
             command = str(call.arguments.get("command", "")).strip()
+            raw_cwd = call.arguments.get("cwd")
+            if raw_cwd is not None:
+                if not isinstance(raw_cwd, str) or not raw_cwd.strip():
+                    raise ValueError("cwd 必须是项目内的非空路径字符串。")
+                resolve_path_in_root(context.cwd, raw_cwd, context.project_root or context.cwd)
             normalized = _normalize_command(command)
             return _MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=normalized, matcher="glob", exact_value=command)
+        if tool.name in {"process_write", "process_background"}:
+            process_id = str(call.arguments.get("process_id", "")).strip()
+            return _MatchTarget(tool.name, TOOL_LABELS[tool.name], process_id, "exact")
         if tool.name == "write_plan_file":
             if context.plan_file_path is None:
                 raise PathWriteDeniedError("missing_plan_file_path", "当前上下文没有会话计划文件路径。")
@@ -489,9 +476,16 @@ class PermissionEngine:
                     "remote_tool": tool.permission.remote_tool_name or "",
                 },
             )
-        if tool.name == "bash":
+        if tool.name == "run_command":
             command = str(call.arguments.get("command", "")).strip()
             description = str(call.arguments.get("description", "")).strip()
+            raw_cwd = call.arguments.get("cwd")
+            command_cwd = resolve_path_in_root(context.cwd, raw_cwd, context.project_root or context.cwd) if isinstance(raw_cwd, str) and raw_cwd.strip() else context.cwd
+            lifetime = call.arguments.get("lifetime", "turn")
+            transport = call.arguments.get("transport", "pipe")
+            yield_ms = call.arguments.get("yield_ms", 1000)
+            maximum = call.arguments.get("max_runtime_ms")
+            lifetime_label = "Session 后台：跨轮次和会话切换继续运行" if lifetime == "session" else "本轮任务：本轮结束或停止时收尾"
             exact_rule = f"{target.tool_label}({command})"
             return PermissionRequest(
                 request_id=request_id,
@@ -504,12 +498,30 @@ class PermissionEngine:
                 permission_policy=context.permission_policy,
                 title="是否允许执行此命令",
                 prompt="命令执行需要授权。",
-                details=f"命令: {command}\n描述: {description or '(无描述)'}",
+                details=(f"命令: {command}\n描述: {description or '(无描述)'}\n"
+                         f"工作目录: {command_cwd}\n归属: {lifetime_label}\n终端: {transport}\n"
+                         f"本次等待: {yield_ms} 毫秒\n运行上限: {maximum if maximum is not None else '未设置'}"),
                 command=command,
                 description=description,
                 session_rule=exact_rule,
                 project_rule=exact_rule,
-                metadata=metadata,
+                metadata={**metadata, "command_cwd": str(command_cwd), "lifetime": lifetime,
+                          "transport": transport, "yield_ms": yield_ms, "max_runtime_ms": maximum},
+            )
+
+        if tool.name in {"process_write", "process_background"}:
+            process_id = str(call.arguments.get("process_id", "")).strip()
+            input_data = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, default=str)
+            return PermissionRequest(
+                request_id=request_id, call_id=call.call_id, tool_name=tool.name,
+                tool_label=target.tool_label, kind="command", mode=context.mode,
+                work_phase=context.work_phase, permission_policy=context.permission_policy,
+                title="是否允许向进程发送输入" if tool.name == "process_write" else "是否允许将进程转入后台",
+                prompt="进程输入可能执行新的命令。" if tool.name == "process_write" else "进程将在本轮结束后继续运行。",
+                details=f"进程: {process_id}\n参数: {input_data}",
+                command=input_data, description=str(call.arguments.get("description", "")),
+                session_rule=None, project_rule=None,
+                metadata={**metadata, "process_id": process_id, "allow_once_only": True},
             )
 
         file_paths = _request_file_paths(tool.name, call.arguments, context)
@@ -548,7 +560,7 @@ class PermissionEngine:
             "tool_name": tool.name,
             "tool_label": target.tool_label,
         }
-        if tool.name == "bash":
+        if tool.name == "run_command":
             metadata["command"] = str(call.arguments.get("command", "")).strip()
             metadata["description"] = str(call.arguments.get("description", "")).strip()
         elif tool.name in {"read_file", "write_file", "edit_file", "write_plan_file"}:
@@ -560,10 +572,6 @@ class PermissionEngine:
             if preview_lines:
                 metadata["display_lines"] = preview_lines
         return metadata
-
-
-def validate_plan_command(command: str) -> str | None:
-    return "讨论和计划阶段禁止通用 Shell，请使用 read_file、glob 或 grep 进行只读调查。"
 
 
 def _match_command_blacklist(command: str) -> str | None:
@@ -581,7 +589,7 @@ def _validate_match_kind(match_kind: str) -> None:
 def _rule_matches(rule_match: str, target: _MatchTarget, match_kind: PermissionMatchKind = "legacy") -> bool:
     parsed = _parse_rule(rule_match)
     if parsed is None:
-        if target.value:
+        if target.value and target.tool_name not in {"process_write", "process_background"}:
             return False
         if match_kind == "exact":
             return target.tool_name == rule_match.strip()
@@ -589,7 +597,7 @@ def _rule_matches(rule_match: str, target: _MatchTarget, match_kind: PermissionM
     tool_name, rule_value = parsed
     if tool_name != target.tool_name:
         return False
-    if match_kind == "exact" and target.tool_name == "bash":
+    if match_kind == "exact" and target.tool_name == "run_command":
         return (target.exact_value if target.exact_value is not None else target.value) == rule_value.strip()
     candidate = target.value
     normalized_rule = _normalize_rule_value(target.tool_name, rule_value)
@@ -614,7 +622,7 @@ def _parse_rule(rule_match: str) -> tuple[str, str] | None:
 
 
 def _normalize_rule_value(tool_name: str, value: str) -> str:
-    if tool_name == "bash":
+    if tool_name == "run_command":
         return _normalize_command(value)
     if tool_name in {"read_file", "write_file", "edit_file", "write_plan_file", "grep"}:
         return _normalize_path(value)
@@ -632,14 +640,6 @@ def _normalize_path(path: str) -> str:
 
 def _has_glob(value: str) -> bool:
     return any(token in value for token in ("*", "?", "["))
-
-
-def _suggest_rule(tool_label: str, command: str) -> str:
-    normalized = re.sub(r"\s+", " ", command.strip())
-    if " " not in normalized:
-        return f"{tool_label}({normalized})"
-    first_token, _rest = normalized.split(" ", 1)
-    return f"{tool_label}({first_token} *)"
 
 
 def _request_file_paths(tool_name: str, arguments: dict[str, object], context: ToolContext) -> list[str]:

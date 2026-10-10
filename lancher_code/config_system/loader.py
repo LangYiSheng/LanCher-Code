@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 
 from lancher_code.errors import ConfigError
+from lancher_code.execution.contracts import CommandProfile, ExecutionConfig, ExecutionLimits, ReadinessProbe, ResourceClaim
 from lancher_code.model_catalog import iter_model_refs, resolve_model
 from lancher_code.models import (
     AppConfig,
@@ -97,6 +98,7 @@ def load_config_data(raw_data: Any) -> AppConfig:
         legacy_format=legacy_format,
         ui=_load_ui(ui_data),
         runtime=_load_runtime(runtime_data),
+        execution=_load_execution(raw_data.get('execution', {})),
     )
     # 检查全部模型，而不只是默认模型；只生成快照，不把继承值填回目录。
     for reference in iter_model_refs(config):
@@ -108,6 +110,81 @@ def load_config_data(raw_data: Any) -> AppConfig:
 def _require_entry_id(value: Any, path: str) -> None:
     if not isinstance(value, str) or not re.fullmatch(r"[\w-]+", value):
         raise ConfigError(f"{path} 的 ID 只能包含中文、字母、数字、下划线和短横线。")
+
+
+def _load_execution(raw: Any) -> ExecutionConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError('execution 必须是对象。')
+    limits_raw = raw.get('limits', {})
+    if not isinstance(limits_raw, dict):
+        raise ConfigError('execution.limits 必须是对象。')
+    defaults = ExecutionLimits()
+    values = {}
+    for key in ('max_concurrency', 'max_processes', 'max_processes_per_session',
+                'output_limit_bytes', 'max_read_chars'):
+        values[key] = _read_positive_int(limits_raw.get(key, getattr(defaults, key)), f'execution.limits.{key}')
+    for key in ('stop_grace_seconds', 'drain_timeout_seconds'):
+        values[key] = _read_positive_float(limits_raw.get(key, getattr(defaults, key)), f'execution.limits.{key}')
+    if set(limits_raw) - set(values):
+        raise ConfigError('execution.limits 含有未知配置项。')
+    if values['max_processes_per_session'] > values['max_processes']:
+        raise ConfigError('每个 Session 的进程上限不能超过应用进程上限。')
+    if values['output_limit_bytes'] < 256:
+        raise ConfigError('进程输出日志配额至少为 256 字节。')
+    if values['max_read_chars'] > 100000:
+        raise ConfigError('单次进程读取最多为 100000 字符。')
+    profiles_raw = raw.get('command_profiles', [])
+    if not isinstance(profiles_raw, list):
+        raise ConfigError('execution.command_profiles 必须是数组。')
+    profiles, names = [], set()
+    for index, item in enumerate(profiles_raw):
+        label = f'execution.command_profiles[{index}]'
+        if not isinstance(item, dict):
+            raise ConfigError(f'{label} 必须是对象。')
+        if set(item) - {'name', 'command_match', 'resources', 'readiness'}:
+            raise ConfigError(f'{label} 含有未知配置项。')
+        name = _require_non_empty_string(item, 'name', f'{label}.name')
+        if name in names:
+            raise ConfigError(f'{label}.name 重复。')
+        names.add(name)
+        match = _require_non_empty_string(item, 'command_match', f'{label}.command_match')
+        if 'resources' not in item:
+            raise ConfigError(f'{label}.resources 必须明确填写；无资源需求请写 []。')
+        resources = item['resources']
+        if not isinstance(resources, list):
+            raise ConfigError(f'{label}.resources 必须是数组。')
+        claims = []
+        for claim in resources:
+            if not isinstance(claim, dict) or claim.get('kind') not in {'path', 'process', 'project', 'external'}:
+                raise ConfigError(f'{label}.resources.kind 无效。')
+            if set(claim) - {'kind', 'key', 'mode', 'recursive'}:
+                raise ConfigError(f'{label}.resources 含有未知配置项。')
+            key = _require_non_empty_string(claim, 'key', f'{label}.resources.key')
+            mode, recursive = claim.get('mode', 'exclusive'), claim.get('recursive', False)
+            if mode not in {'shared', 'exclusive'} or type(recursive) is not bool:
+                raise ConfigError(f'{label}.resources 的 mode 或 recursive 无效。')
+            if claim['kind'] != 'path' and recursive:
+                raise ConfigError('recursive 只适用于路径资源。')
+            claims.append(ResourceClaim(claim['kind'], key, mode, recursive))
+        probe_raw = item.get('readiness')
+        probe = None
+        if probe_raw is not None:
+            if not isinstance(probe_raw, dict) or probe_raw.get('kind', 'tcp') != 'tcp':
+                raise ConfigError(f'{label}.readiness 只支持 TCP。')
+            if set(probe_raw) - {'kind', 'host', 'port', 'timeout_ms'}:
+                raise ConfigError(f'{label}.readiness 含有未知配置项。')
+            host = probe_raw.get('host', '127.0.0.1')
+            if host not in {'127.0.0.1', '::1', 'localhost'}:
+                raise ConfigError('就绪探针只能访问本机回环地址。')
+            port = _read_positive_int(probe_raw.get('port'), f'{label}.readiness.port')
+            if port > 65535:
+                raise ConfigError('就绪探针端口不能超过 65535。')
+            timeout = _read_positive_int(probe_raw.get('timeout_ms', 30000), f'{label}.readiness.timeout_ms')
+            probe = ReadinessProbe(host=host, port=port, timeout_ms=timeout)
+        profiles.append(CommandProfile(name, match, tuple(claims), probe))
+    if set(raw) - {'limits', 'command_profiles'}:
+        raise ConfigError('execution 含有未知配置项。')
+    return ExecutionConfig(ExecutionLimits(**values), profiles)
 
 
 def _load_provider(raw: Any, path: str) -> ProviderDefinition:

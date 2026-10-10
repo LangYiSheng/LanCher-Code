@@ -102,9 +102,9 @@ class GatedRead:
 
 
 @pytest.mark.asyncio
-async def test_steering_waits_for_started_group_and_skips_later_write(openai_provider_config, tmp_path):
+async def test_steering_waits_for_started_read_and_skips_conflicting_write(openai_provider_config, tmp_path):
     read = GatedRead()
-    provider = Provider([calls(("read_file", {"path": "a.txt"}), ("write_file", {"path": "new.txt", "content": "不应写入"})), reply("按补充调整")])
+    provider = Provider([calls(("read_file", {"path": "new.txt"}), ("write_file", {"path": "new.txt", "content": "不应写入"})), reply("按补充调整")])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, read, WriteFileTool())
     runner.set_permission_policy("bypass")
     task = asyncio.create_task(collect(runner, "检查再修改"))

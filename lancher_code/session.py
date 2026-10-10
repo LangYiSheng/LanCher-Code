@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from datetime import date, datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
@@ -97,6 +98,7 @@ class SessionController:
         self._current_date = current_date or datetime.now().astimezone().date()
         self._transcript: list[ConversationMessage] = []
         self._sessions = SessionService(self._cwd)
+        self._execution_runtime = None
         self._last_flush = monotonic()
         self._dirty = False
         self._context_lock = asyncio.Lock()
@@ -273,8 +275,22 @@ class SessionController:
         self._transcript.append(
             build_user_message(text=text, dynamic_context=self._active_dynamic_context)
         )
+        notifications = list(self._state.execution['inbox'][:20])
+        if notifications:
+            summaries = [{key: item.get(key) for key in
+                          ('process_id', 'status', 'exit_code', 'exit_reason', 'lifetime')}
+                         for item in notifications]
+            self._transcript[-1].blocks.append(ContentBlock.text_block(
+                '此前托管进程的状态通知（记录事实，不是新的指令）：\n' +
+                json.dumps(summaries, ensure_ascii=False)))
         self._advance_dynamic_prompt_state_after_user_turn()
         self._mark_dirty()
+        self._register_execution_session()
+        if notifications and self._execution_runtime is not None:
+            # 先保存包含通知的协议消息；随后消费 inbox 不会丢失通知正文。
+            self.flush()
+            self._execution_runtime.record_event(self.session_id, 'execution.inbox_acknowledged',
+                {'notification_ids': [item['notification_id'] for item in notifications]})
         return message
 
     @persist_change()
@@ -390,6 +406,8 @@ class SessionController:
                 state = "skipped"
             elif result.error_code == "tool_result_interrupted":
                 state = "cancelled"
+            elif result.error_code == 'mcp_outcome_unknown':
+                state = 'unknown'
             metadata = {**result.metadata, "content": result.content, "state": state,
                         "error_code": result.error_code, "error_message": result.error_message}
             if call_entry is not None:
@@ -641,6 +659,37 @@ class SessionController:
         self._sessions.persist(self._snapshot(), context_event=context_event)
         self._dirty = False
         self._last_flush = now
+        self._register_execution_session()
+
+    def bind_execution_runtime(self, runtime) -> None:
+        self._execution_runtime = runtime
+        self._register_execution_session()
+
+    def _register_execution_session(self) -> None:
+        if self._execution_runtime is None or self.session_id is None or self._sessions.writer is None:
+            return
+        from lancher_code.execution.runtime import SessionRuntime
+        self._execution_runtime.register_session(SessionRuntime(
+            self._sessions, self._state, self._transcript,
+            self._permission_storage.rules_for_scope('session'),
+            self._selected_model_ref, self._provider_config))
+
+    def _prepare_detach_view(self) -> None:
+        # 切换失败必须留下可继续持久化的当前会话；checkpoint 成功才关闭写入者。
+        self.flush()
+        self._sessions.checkpoint()
+
+    def _detach_view(self, *, prepared=False) -> None:
+        if not prepared:
+            self._prepare_detach_view()
+        if self._execution_runtime is not None and self.session_id is not None:
+            self._register_execution_session()
+            self._execution_runtime.detach_view(self.session_id)
+            if self._execution_runtime.processes.active_session(self.session_id):
+                return
+            self._execution_runtime.sessions.release(self.session_id, checkpoint=False)
+        else:
+            self._sessions.close()
 
     def record_event(self, kind, data=None, *, turn_id=None):
         self.flush()
@@ -650,7 +699,7 @@ class SessionController:
         return self._sessions.repository.list_sessions()
 
     def new_session(self) -> None:
-        self.close()
+        self._detach_view()
         self._sessions = SessionService(self._cwd)
         self._state = SessionState(work_phase=self._initial_phase, permission_policy=self._initial_policy)
         self._transcript = []
@@ -660,17 +709,26 @@ class SessionController:
 
     def rename_session(self, session_id: str, title: str) -> None:
         self.flush()
-        self._sessions.rename(session_id, title)
+        binding = self._execution_runtime.sessions.get(session_id) if self._execution_runtime else None
+        (binding.service if binding else self._sessions).rename(session_id, title)
 
     def archive_session(self, session_id: str) -> None:
         if session_id == self.session_id:
             raise SessionRepositoryError('请先新建或切换对话，再归档当前会话。')
+        self._release_inactive_execution(session_id)
         self._sessions.repository.archive(session_id)
 
     def remove_session(self, session_id: str) -> None:
         if session_id == self.session_id:
             raise SessionRepositoryError('不能删除当前正在使用的会话。')
+        self._release_inactive_execution(session_id)
         self._sessions.repository.remove(session_id)
+
+    def _release_inactive_execution(self, session_id):
+        if self._execution_runtime is not None:
+            if self._execution_runtime.processes.active_session(session_id):
+                raise SessionRepositoryError('该会话还有运行中的进程，请先停止会话任务。')
+            self._execution_runtime.sessions.release(session_id)
 
     def read_session_model_ref(self, session_id: str) -> str | None:
         data = SessionCodec.project(self._sessions.repository.read(session_id))
@@ -680,6 +738,24 @@ class SessionController:
         if session_id == self.session_id and self._sessions.writer is not None:
             return len(self._permission_storage.rules_for_scope('session'))
         self.flush()
+        retained = self._execution_runtime.sessions.get(session_id) if self._execution_runtime else None
+        if retained is not None:
+            self._prepare_detach_view()
+            next_ref = resolved_model[1] if resolved_model is not None else retained.model_ref
+            next_provider = resolved_model[0] if resolved_model is not None else retained.provider_config
+            next_state = retained.state
+            if next_ref != retained.model_ref or next_provider != retained.provider_config:
+                next_state = copy.deepcopy(retained.state)
+                self._reset_model_context(next_state.context_management)
+            retained.service.persist(SessionCodec.encode(next_state, retained.transcript, retained.rules, next_ref))
+            self._detach_view(prepared=True)
+            self._sessions, self._state, self._transcript = retained.service, next_state, retained.transcript
+            self._permission_storage.replace_session_rules(retained.rules, notify=False)
+            self._selected_model_ref, self._provider_config = next_ref, next_provider
+            self._active_dynamic_context = None
+            self._dirty = False
+            self._register_execution_session()
+            return len(retained.rules)
         prepared = self._sessions.prepare(session_id)
         try:
             state, transcript, rules, model_ref = prepared[2]
@@ -694,12 +770,24 @@ class SessionController:
         next_model_ref = resolved_model[1] if resolved_model is not None else model_ref
         candidate = SessionService(self._cwd)
         try:
+            self._prepare_detach_view()
             candidate.activate(prepared)
             candidate.persist(SessionCodec.encode(state, transcript, rules, next_model_ref))
+            if self._execution_runtime is not None:
+                from lancher_code.execution.runtime import SessionRuntime
+                self._execution_runtime.register_session(SessionRuntime(
+                    candidate, state, transcript, rules, next_model_ref,
+                    resolved_model[0] if resolved_model is not None else self._provider_config), viewed=False)
+                self._execution_runtime.recover_session(session_id)
+            self._detach_view(prepared=True)
         except Exception:
-            candidate.close()
+            if self._execution_runtime is not None and self._execution_runtime.sessions.get(session_id) is not None:
+                self._execution_runtime.sessions.release(session_id, checkpoint=False)
+            if candidate.writer is not None:
+                candidate.close()
+            else:
+                prepared[0].close()
             raise
-        self._sessions.close()
         self._sessions = candidate
         self._state, self._transcript = state, transcript
         self._permission_storage.replace_session_rules(rules, notify=False)
@@ -708,6 +796,7 @@ class SessionController:
         if resolved_model is not None:
             self._provider_config = resolved_model[0]
         self._dirty = False
+        self._register_execution_session()
         return len(rules)
 
     def close(self) -> None:

@@ -32,7 +32,7 @@ sequenceDiagram
     APP->>PF: create_provider(config.provider)
     APP->>LOG: register_sensitive_values(api_key)
     APP->>SS: SessionController(provider, cwd, plan 路径, 初始阶段, 权限策略, 权限存储)
-    APP->>REG: create_default_tool_registry()（8 个内置工具）
+    APP->>REG: create_default_tool_registry()（14 个内置工具）
     APP->>MCP: load_mcp_config(cwd) + MCPClientManager（并注册 env/headers 敏感值）
     APP->>SS: PermissionEngine / SettingsService / ToolExecutor
     APP->>SS: TurnRunner(provider, session, registry, executor, 循环上限...)
@@ -55,7 +55,7 @@ sequenceDiagram
 | 6. 创建 Provider | `providers/factory.py` | 按 `protocol` 返回 OpenAI/Claude 实现 |
 | 7. 敏感值注册 | `logging_system.register_sensitive_values()` | api_key 与 MCP env/headers 值，日志脱敏 |
 | 8. 创建会话控制器 | `session.py SessionController` | 绑定 cwd、初始阶段与策略、权限存储；首条用户消息才创建 UUID Session 与独立 workspace |
-| 9. 创建工具集 | `tools/__init__.py` | 注册 read_file / write_file / edit_file / bash / glob / grep / write_plan_file / tool_search |
+| 9. 创建工具集 | `tools/__init__.py` | 注册 文件工具、run_command、process_list/read/wait/write/stop/background、glob/grep、计划与发现工具 |
 | 10. 创建 MCP | `mcp/manager.py` | 加载全局+项目配置；TUI 挂载后异步初始化 |
 | 11. 创建执行链 | `tools/core/executor.py` + `permission_engine.py` | ToolExecutor 持有注册表与权限引擎 |
 | 12. 创建 TurnRunner | `turn_runner.py` | 注入全部依赖，配置循环上限与未知工具熔断 |

@@ -3,7 +3,7 @@ from __future__ import annotations
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
 from lancher_code.tools.core.common import (
-    PathWriteDeniedError, ensure_writable_path, is_session_workspace_path, relative_display_path,
+    PathWriteDeniedError, atomic_write_text, ensure_writable_path, is_session_workspace_path, relative_display_path,
 )
 
 WRITE_PLAN_FILE_DESCRIPTION = (
@@ -32,7 +32,6 @@ class WritePlanFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            is_concurrency_safe=False,
             allowed_modes=("plan",),
         )
 
@@ -65,8 +64,12 @@ class WritePlanFileTool:
             )
 
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            existed = path.exists()
+            atomic_write_text(path, content, context, expected_exists=existed,
+                              expected_mtime_ns=path.stat().st_mtime_ns if existed else None)
+        except PathWriteDeniedError as exc:
+            return build_tool_error(summary="写入计划文件失败", error_code=exc.reason_code,
+                                    error_message=str(exc), tool_name=self.definition.name)
         except OSError as exc:
             return build_tool_error(
                 summary="写入计划文件失败",

@@ -9,6 +9,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.timer import Timer
 from textual.widgets import Button, Static, TextArea
 
 from lancher_code.errors import LanCherError
@@ -44,12 +45,14 @@ from lancher_code.tui_views.composer import (
     SlashMenuAcceptRequested,
     SlashMenuDismissRequested,
     SlashMenuNavigateRequested,
+    StopTurnRequested,
 )
 from lancher_code.tui_views.message import BannerWidget, MessageWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.tui_views.settings import SettingsResult, SettingsScreen
 from lancher_code.tui_views.model_picker import ModelPickerScreen
 from lancher_code.tui_views.command_actions import CommandConfirmationScreen, save_command_setting
+from lancher_code.tui_views.tasks import TaskScreenActions, TasksScreen, task_label
 from lancher_code.tui_views.theme import apply_theme, theme_palette
 from lancher_code.tui_views.chat_controls import (
     ChatAction, StageBar, PendingQueue, PendingInputEditor, PlanPanel,
@@ -210,6 +213,8 @@ class LanCherTextualApp(App[int]):
         apply_theme(self, getattr(ui_config, "theme", "dark"))
         self._slash_command_registry = slash_command_registry or create_default_slash_command_registry()
         self._is_streaming = False
+        self._ui_closing = False
+        self._status_refresh_timer: Timer | None = None
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
         self._task_message_ids: set[str] = set()
@@ -274,6 +279,7 @@ class LanCherTextualApp(App[int]):
         self._refresh_context_usage()
         await self._refresh_pending_queue()
         self._refresh_plan_panel()
+        self._status_refresh_timer = self.set_interval(1.0, self._refresh_status_bar)
         if self._mcp_manager is not None:
             self._mcp_manager.add_progress_callback(self._handle_mcp_progress)
             if self._mcp_manager.has_servers:
@@ -322,6 +328,13 @@ class LanCherTextualApp(App[int]):
             return
         self.exit(0)
 
+    @on(StopTurnRequested)
+    def handle_stop_turn_requested(self, event: StopTurnRequested) -> None:
+        event.stop()
+        if self._turn_runner.cancel_active_turn():
+            self._status_hint = "正在停止本轮 · 会话后台进程继续运行"
+            self._refresh_status_bar()
+
     @on(TextArea.Changed, "#composer-input")
     async def handle_composer_changed(self) -> None:
         self._update_composer_height()
@@ -364,6 +377,13 @@ class LanCherTextualApp(App[int]):
 
         if self._is_streaming:
             if text.startswith("/"):
+                match = self._slash_command_registry.parse_submission(text)
+                if match is not None and self._command_allowed_while_busy(match.definition.name, match.arguments_text):
+                    await self._execute_slash_command(match.definition.name, match.arguments_text)
+                    if not self._command_preserve_input:
+                        event.composer.clear()
+                        await self._refresh_command_ui()
+                    return
                 self._status_hint = "当前任务结束后可使用命令 · 输入已保留"
                 self._refresh_status_bar()
                 return
@@ -474,8 +494,12 @@ class LanCherTextualApp(App[int]):
                     logger.exception("event=session_flush_failed")
 
     async def on_unmount(self) -> None:
+        self._ui_closing = True
+        if self._status_refresh_timer is not None:
+            self._status_refresh_timer.stop()
+            self._status_refresh_timer = None
         # Textual 取消 worker 后不会等待所有后台执行器；退出前显式完成收尾。
-        await self._turn_runner.stop_and_wait()
+        await self._turn_runner.shutdown()
 
     async def _finish_turn_view(self) -> None:
         for request_id in list(self._pending_permissions):
@@ -507,9 +531,22 @@ class LanCherTextualApp(App[int]):
             self._begin_turn("", queued=True)
 
     def _refresh_status_bar(self) -> None:
+        # Textual 先卸载控件，再等待 App 的异步收尾；已排队的刷新也须止步。
+        if self._ui_closing or not self.is_running:
+            return
+        status_left = next(iter(self.query("#status-left")), None)
+        if status_left is None or not status_left.is_mounted:
+            return
         usage = self._session_controller.total_usage()
         center_text = self._status_hint or ("正在处理" if self._is_streaming else "就绪")
-        status_left = self.query_one("#status-left", Static)
+        execution = self._turn_runner.execution_summary()
+        badges = []
+        if execution["background"]:
+            badges.append(f"后台 {execution['background']}")
+        if execution["notifications"]:
+            badges.append(f"通知 {execution['notifications']} /tasks")
+        process_badges = " · ".join(badges)
+        right_text = process_badges + " · Ctrl+D 详情" if process_badges else "Ctrl+D 详情"
         status_center = self.query_one("#status-center", Static)
         status_right = self.query_one("#status-right", Static)
 
@@ -520,7 +557,7 @@ class LanCherTextualApp(App[int]):
         composer = self.query_one(ComposerTextArea)
         is_command = composer.text.lstrip().startswith("/")
         if is_command:
-            enter_action = "等待" if self._is_streaming else "填入" if composer.slash_menu_active and composer.slash_enter_accepts else "执行"
+            enter_action = "等待" if self._is_streaming and not self._command_text_allowed_while_busy(composer.text) else "填入" if composer.slash_menu_active and composer.slash_enter_accepts else "执行"
         compact_state = center_text.split(" · ", 1)[0]
         if self._pending_permissions:
             compact_state = "等待确认"
@@ -534,19 +571,25 @@ class LanCherTextualApp(App[int]):
         if self.size.width < 64:
             available = max(8, self.size.width - 4)
             model_limit = max(5, available - (10 if self.size.width < 48 else 28))
+            if process_badges:
+                model_limit = max(5, model_limit - cell_len(f" · {compact_state}"))
             model_text = Text(model)
             model_text.truncate(model_limit, overflow="ellipsis")
             model = model_text.plain
             if self.size.width < 48:
-                label = f"{model} · {phase}\n{policy} · {estimate}\n{compact_state} · Enter {enter_action}"
+                first = f"{model} · {phase}" + (f" · {compact_state}" if process_badges else "")
+                last = process_badges or f"{compact_state} · Enter {enter_action}"
+                label = f"{first}\n{policy} · {estimate}\n{last}"
             else:
-                label = f"{model} · {phase} · {policy}\n{estimate} · {compact_state} · Enter {enter_action}"
+                first = f"{model} · {phase} · {policy}" + (f" · {compact_state}" if process_badges else "")
+                last = process_badges or f"{compact_state} · Enter {enter_action}"
+                label = f"{first}\n{estimate} · {last}"
         else:
             # 模型名按终端格宽截断，给阶段与权限保留位置。
             # 使用本轮状态的宽度，不能沿用状态变化前上一帧的布局。
             hud_width = max(1, min(self.size.width, 112) - 4)
             center_width = min(cell_len(f"{estimate} · {center_text}"), (hud_width * 35 + 99) // 100)
-            available = hud_width - center_width - cell_len("Ctrl+D 详情") - 1
+            available = hud_width - center_width - cell_len(right_text) - 1
             model_text = Text(model)
             model_text.truncate(max(1, available - cell_len(f" · {phase} · {policy}")), overflow="ellipsis")
             model = model_text.plain
@@ -561,10 +604,11 @@ class LanCherTextualApp(App[int]):
             status_left.set_class(candidate != "default" and candidate == self._session_controller.runtime_mode, f"-{candidate}")
 
         status_center.update(f"{estimate} · {center_text}")
-        status_right.update("Ctrl+D 详情")
+        status_right.update(right_text)
         self.query_one(StageBar).update_phase(self._session_controller.work_phase, busy=self._is_streaming)
         config = getattr(self._turn_runner, "model_config", None)
         ref = getattr(self._turn_runner, "model_ref", None)
+        notification_hint = " · /tasks 查看任务与输出" if execution["notifications"] else ""
         details = (
             f"本次模型：{self._status_left_text()}\n"
             f"工作目录：{self._session_controller._cwd}\n"
@@ -573,6 +617,8 @@ class LanCherTextualApp(App[int]):
             f"模型引用：{ref or self._provider_config.model}\n"
             f"新对话默认：{getattr(config, 'default_model', None) or '当前配置'}\n"
             f"{self._format_usage_text(usage)} · {banner._context_usage_status}\n"
+            f"托管进程：运行 {execution['running']} · 会话后台 {execution['background']} · 排队 {execution['waiting']}\n"
+            f"未读完成通知：{execution['notifications']}{notification_hint}\n"
             f"{banner._mcp_status}"
         )
         self.query_one("#status-details", Static).update(details)
@@ -583,8 +629,8 @@ class LanCherTextualApp(App[int]):
         self.query_one("#composer-actions").set_class(self._is_streaming, "-working")
         busy_help = {"follow_up": "Enter 排下一轮", "steer": "Enter 补充当前任务", "draft": "Enter 保留草稿"}[action]
         self.query_one("#composer-help", Static).update(
-            ("本轮结束后执行 · 草稿已保留" if self._is_streaming else f"Enter {enter_action} · Tab 补全 · Esc 关闭") if is_command else
-            busy_help + " · Ctrl+Enter 补充 · Ctrl+C 停止" if self._is_streaming else "Enter 发送 · Shift+Enter 换行"
+            ("本轮结束后执行 · 草稿已保留" if self._is_streaming and not self._command_text_allowed_while_busy(composer.text) else f"Enter {enter_action} · Tab 补全 · Esc 关闭") if is_command else
+            busy_help + " · Ctrl+Enter 补充 · Esc 停本轮" if self._is_streaming else "Enter 发送 · Shift+Enter 换行"
         )
 
     def _refresh_context_usage(self) -> None:
@@ -946,7 +992,7 @@ class LanCherTextualApp(App[int]):
         menu = self.query_one(SlashCompletionMenu)
         hint_bar = self.query_one(CommandHintBar)
         composer.clear_accepted_slash_command_if_needed()
-        if self._is_streaming:
+        if self._is_streaming and not self._command_text_allowed_while_busy(composer.text):
             self._slash_menu_matches = []
             self._slash_menu_index = 0
             composer.slash_menu_active = False
@@ -956,6 +1002,7 @@ class LanCherTextualApp(App[int]):
             return
 
         cursor_at_end = composer.cursor_location == composer.document.end
+        processes = self._turn_runner.list_processes() if composer.text.lstrip().startswith("/tasks") else []
         sessions = []
         session_listing_error = None
         if cursor_at_end and composer.text.lstrip().startswith("/session"):
@@ -969,6 +1016,7 @@ class LanCherTextualApp(App[int]):
                     text=composer.text,
                     session_ids=tuple(item.session_id for item in sessions),
                     active_session_id=self._session_controller.session_id,
+                    process_choices=tuple((str(item["process_id"]), task_label(item)) for item in processes),
                     model_choices=self._model_completion_choices(),
                     active_model_ref=getattr(self._turn_runner, "model_ref", None),
                     default_model_ref=getattr(getattr(self._turn_runner, "model_config", None), "default_model", None),
@@ -1027,7 +1075,7 @@ class LanCherTextualApp(App[int]):
         candidate_key = self._current_active_completion_key()
         if candidate_key is None:
             composer = self.query_one(ComposerTextArea)
-            if self._is_streaming or composer.cursor_location != composer.document.end:
+            if (self._is_streaming and not self._command_text_allowed_while_busy(composer.text)) or composer.cursor_location != composer.document.end:
                 return
             advanced = self._slash_command_registry.advance_text(composer.text)
             if advanced is not None:
@@ -1075,7 +1123,7 @@ class LanCherTextualApp(App[int]):
     async def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         self._command_preserve_input = False
         try:
-            if self._is_streaming or self._turn_runner.has_active_turn:
+            if (self._is_streaming or self._turn_runner.has_active_turn) and not self._command_allowed_while_busy(command_name, arguments_text):
                 raise ValueError("当前任务结束后可执行命令；草稿已保留。")
             self._slash_command_registry.validate(command_name, arguments_text)
             if command_name in {"session", "model", "permissions", "settings"} and not arguments_text.strip():
@@ -1092,6 +1140,14 @@ class LanCherTextualApp(App[int]):
             self._command_preserve_input = True
             self.notify(str(exc), title="命令未执行", severity="warning", timeout=10)
             return None
+
+    @staticmethod
+    def _command_allowed_while_busy(command_name: str, arguments_text: str) -> bool:
+        return command_name == "tasks" or (command_name == "session" and arguments_text.strip() == "stop")
+
+    def _command_text_allowed_while_busy(self, text: str) -> bool:
+        match = self._slash_command_registry.parse_submission(text)
+        return match is not None and self._command_allowed_while_busy(match.definition.name, match.arguments_text)
 
     async def _dispatch_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         if command_name == "exit":
@@ -1186,11 +1242,22 @@ class LanCherTextualApp(App[int]):
             await self._execute_session_command(arguments_text)
             return None
 
+        if command_name == "tasks":
+            await self._execute_tasks_command(arguments_text)
+            return None
+
         return None
 
     async def _execute_session_command(self, arguments_text: str, *, confirmed: bool = False) -> None:
         arguments = arguments_text.split(maxsplit=2)
         action = arguments[0]
+        if action == "stop":
+            await self._turn_runner.stop_session()
+            self._status_hint = "当前会话已停止 · 草稿、队列和日志保留"
+            self._refresh_status_bar()
+            await self._refresh_pending_queue()
+            self.notify("当前会话的本轮及全部托管进程已收尾。", title="Session")
+            return
         if self._is_streaming or self._turn_runner.has_active_turn:
             raise ValueError("本轮结束后才能管理会话，命令草稿已保留。")
         if action in {"archive", "remove"} and arguments[1] == self._session_controller.session_id:
@@ -1289,6 +1356,36 @@ class LanCherTextualApp(App[int]):
             return
 
         raise SessionRepositoryError("参数不正确，请查看 /session 的命令提示。")
+
+    async def _execute_tasks_command(self, arguments_text: str) -> None:
+        arguments = arguments_text.split()
+        action = arguments[0] if arguments else "show"
+        process_id = arguments[1] if len(arguments) > 1 else None
+        session_id = self._session_controller.session_id
+        if action == "stop" and process_id:
+            result = await self._turn_runner.stop_process(process_id, session_id=session_id)
+            storage_error = getattr(result, "storage_error", None)
+            self.notify("进程已停止，但日志保存失败，请查看任务详情。" if storage_error else "进程及其托管子进程已停止，日志保留。", title="进程任务", severity="warning" if storage_error else "information")
+            return
+        if action == "background" and process_id:
+            await self._turn_runner.background_process(process_id, session_id=session_id)
+            self.notify("已转交会话后台；停止本轮和切换对话后继续运行。", title="进程任务")
+            return
+        if process_id and process_id not in {str(item["process_id"]) for item in self._turn_runner.list_processes(session_id=session_id)}:
+            raise ValueError("当前会话没有此进程，请输入完整进程 UUID。")
+        runner = self._turn_runner
+        async def read_output(target: str, cursor: int) -> dict[str, object]:
+            return runner.read_process_output(target, cursor=cursor, max_chars=16000, session_id=session_id)
+        # 所有回调绑定打开窗口时的 Session，不能跟随界面切换改归属。
+        callbacks = TaskScreenActions(
+            list_tasks=lambda: runner.list_processes(session_id=session_id),
+            read_output=read_output,
+            stop=lambda target: runner.stop_process(target, session_id=session_id),
+            background=lambda target: runner.background_process(target, session_id=session_id),
+            write_input=lambda target, text: runner.write_process_input(target, text, session_id=session_id),
+            stop_session=lambda: runner.stop_session(session_id=session_id),
+        )
+        self.push_screen(TasksScreen(session_id, callbacks, selected_process_id=process_id))
 
     async def _restore_session_view(self) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)

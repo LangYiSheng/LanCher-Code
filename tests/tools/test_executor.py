@@ -12,13 +12,22 @@ from lancher_code.models import (
     ToolContext,
     ToolDefinition,
     ToolExecutionResult,
+    ToolPermissionMetadata,
 )
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
+from lancher_code.execution.contracts import ResourceClaim
+from lancher_code.execution.contracts import ExecutionConfig, ExecutionLimits
+from lancher_code.execution.runtime import ExecutionRuntime
+from lancher_code.execution.scheduler import get_project_scheduler, path_claim, project_claim
+from lancher_code.models import CancellationToken
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 
 
 class SuccessTool:
+    def resource_claims(self, arguments, context):
+        return (ResourceClaim("external", "test:success", "shared"),)
+
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(name="success_tool", description="ok", input_schema={"type": "object"})
@@ -148,6 +157,12 @@ class ControlledTool:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.finished = asyncio.Event()
+
+    def resource_claims(self, arguments, context):
+        if self.definition.category == "write":
+            from lancher_code.execution.scheduler import project_claim
+            return (project_claim(context.project_root),)
+        return (ResourceClaim("external", "test:" + self.definition.name, "shared"),)
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
         self.entered.set()
@@ -298,7 +313,7 @@ async def test_unexecuted_calls_report_once_without_started(
 async def test_interruption_after_batch_reports_remaining_calls_once(tmp_path: Path) -> None:
     registry = ToolRegistry()
     registry.register(SuccessTool())
-    write = ControlledTool(ToolDefinition(name="write_tool", description="", category="write", is_concurrency_safe=False))
+    write = ControlledTool(ToolDefinition(name="write_tool", description="", category="write"))
     registry.register(write)
     interrupt = False
     started: list[str] = []
@@ -398,3 +413,253 @@ async def test_callback_failure_cancels_other_running_tools_without_duplicate_re
         )
     assert reported == ["call-1"]
     assert slow.finished.is_set()
+
+
+class FileControlledTool(ControlledTool):
+    def __init__(self, *, writing: bool = True) -> None:
+        super().__init__(ToolDefinition(name="write_file" if writing else "read_file", description="",
+                                        category="write" if writing else "read"))
+        self.started_paths: list[str] = []
+
+    def resource_claims(self, arguments, context):
+        return (path_claim(context.cwd / str(arguments["path"]), write=self.definition.category == "write"),)
+
+    async def execute(self, arguments, context):
+        self.started_paths.append(str(arguments["path"]))
+        return await super().execute(arguments, context)
+
+
+@pytest.mark.asyncio
+async def test_independent_file_writes_start_in_parallel(tmp_path: Path) -> None:
+    tool = FileControlledTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path).execute_calls(
+        [_call("write_file", {"path": "a", "content": "a"}),
+         _call("write_file", {"path": "b", "content": "b"}, index=1)], permission_policy="bypass"))
+    try:
+        for _ in range(40):
+            if len(tool.started_paths) == 2:
+                break
+            await asyncio.sleep(0)
+        assert tool.started_paths == ["a", "b"]
+        tool.release.set()
+        assert len(await task) == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_waiting_permission_does_not_hold_resources(tmp_path: Path) -> None:
+    write, read = FileControlledTool(), FileControlledTool(writing=False)
+    read.release.set()
+    first, second = ToolRegistry(), ToolRegistry()
+    first.register(write)
+    second.register(read)
+    awaiting_approval, approve = asyncio.Event(), asyncio.Event()
+
+    async def resolver(request):
+        awaiting_approval.set()
+        await approve.wait()
+        return PermissionResolution(request.request_id, "allow_once")
+
+    task = asyncio.create_task(ToolExecutor(first, cwd=tmp_path).execute_calls(
+        [_call("write_file", {"path": "a", "content": "new"})], permission_resolver=resolver))
+    try:
+        await asyncio.wait_for(awaiting_approval.wait(), 1)
+        result = await asyncio.wait_for(ToolExecutor(second, cwd=tmp_path).execute_calls([_call("read_file", {"path": "a"})]), 1)
+        assert result[0].ok and not write.entered.is_set()
+        approve.set()
+        write.release.set()
+        assert (await task)[0].ok
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_resource_wait_rechecks_changed_permission_before_start(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    tool = FileControlledTool()
+    registry.register(tool)
+    storage = PermissionStorage()
+    scheduler = get_project_scheduler(tmp_path)
+    owner = await scheduler.reserve([project_claim(tmp_path)])
+    approved = asyncio.Event()
+
+    async def resolver(request):
+        approved.set()
+        return PermissionResolution(request.request_id, "allow_once")
+
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path, permission_engine=PermissionEngine(storage)).execute_calls(
+        [_call("write_file", {"path": "a", "content": "new"})], permission_resolver=resolver))
+    try:
+        await asyncio.wait_for(approved.wait(), 1)
+        for _ in range(20):
+            if scheduler.waiting_count:
+                break
+            await asyncio.sleep(0)
+        storage.add_session_rule("WriteFile(a)", "deny")
+        await owner.release()
+        assert (await asyncio.wait_for(task, 1))[0].error_code == "permission_rule_deny"
+        assert not tool.entered.is_set()
+    finally:
+        await owner.release()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stale_generation_approval_does_not_persist_grant(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    tool = FileControlledTool()
+    registry.register(tool)
+    storage = PermissionStorage()
+    runtime = ExecutionRuntime(tmp_path)
+
+    async def resolver(request):
+        runtime.invalidate("session")
+        return PermissionResolution(request.request_id, "allow_session")
+
+    result = await ToolExecutor(registry, cwd=tmp_path, permission_engine=PermissionEngine(storage),
+                                execution_runtime=runtime).execute_calls(
+        [_call("write_file", {"path": "a", "content": "new"})], session_id="session", permission_resolver=resolver)
+    assert result[0].error_code == "steering_superseded"
+    assert storage.rules_for_scope("session") == []
+    assert not tool.entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_token_cancel_waiting_resources_never_starts_tool(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    tool = FileControlledTool()
+    registry.register(tool)
+    token = CancellationToken()
+    scheduler = get_project_scheduler(tmp_path)
+    owner = await scheduler.reserve([project_claim(tmp_path)])
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path).execute_calls(
+        [_call("write_file", {"path": "a", "content": "new"})], permission_policy="bypass", cancellation_token=token))
+    try:
+        for _ in range(40):
+            if scheduler.waiting_count:
+                break
+            await asyncio.sleep(0)
+        assert scheduler.waiting_count == 1
+        token.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not tool.entered.is_set() and scheduler.waiting_count == 0
+    finally:
+        await owner.release()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_completed_write_result_survives_simultaneous_token_stop(tmp_path: Path) -> None:
+    class CommittingTool(SuccessTool):
+        async def execute(self, arguments, context):
+            context.cancellation_token.cancel()
+            return ToolExecutionResult("", self.definition.name, content="committed")
+
+    registry = ToolRegistry()
+    registry.register(CommittingTool())
+    result = await ToolExecutor(registry, cwd=tmp_path).execute_calls(
+        [_call("success_tool", {"value": "ok"})], cancellation_token=CancellationToken())
+    assert result[0].ok and result[0].content == "committed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocking_tool", ["process_wait", "process_write"])
+async def test_stop_process_enters_when_ordinary_capacity_is_full(tmp_path: Path, blocking_tool: str) -> None:
+    blocked = ControlledTool(ToolDefinition(blocking_tool, "", category="read" if blocking_tool == "process_wait" else "command"))
+    stop_entered = asyncio.Event()
+
+    class StopTool:
+        definition = ToolDefinition("process_stop", "", category="command")
+
+        def resource_claims(self, arguments, context):
+            return ()
+
+        async def execute(self, arguments, context):
+            await blocked.entered.wait()
+            stop_entered.set()
+            blocked.release.set()
+            return ToolExecutionResult("", "process_stop", content="stopped")
+
+    registry = ToolRegistry()
+    registry.register(blocked)
+    registry.register(StopTool())
+    runtime = ExecutionRuntime(tmp_path, ExecutionConfig(limits=ExecutionLimits(max_concurrency=1)))
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime).execute_calls([
+        _call(blocking_tool, {"process_id": "a" * 32}), _call("process_stop", {"process_id": "a" * 32}, index=1)],
+        permission_policy="bypass"))
+    try:
+        await asyncio.wait_for(stop_entered.wait(), 1)
+        results = await asyncio.wait_for(task, 1)
+        assert all(result.ok for result in results)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+class RemoteControlledTool(ControlledTool):
+    def __init__(self, *, read_only: bool = False):
+        super().__init__(ToolDefinition("mcp__test__operation", "", category="read" if read_only else "command",
+            permission=ToolPermissionMetadata("external", "mcp__test__operation", "远端操作")))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_only", [True, False])
+async def test_running_remote_cancel_records_unknown_only_for_side_effects(tmp_path: Path, read_only: bool) -> None:
+    tool = RemoteControlledTool(read_only=read_only)
+    registry = ToolRegistry()
+    registry.register(tool)
+    runtime = ExecutionRuntime(tmp_path)
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime).execute_calls(
+        [_call(tool.definition.name, {})], permission_policy="bypass"))
+    await asyncio.wait_for(tool.entered.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    info = runtime.list_invocations(None)[0]
+    assert info["state"] == ("cancelled" if read_only else "interrupted")
+    assert info["error_code"] == (None if read_only else "mcp_outcome_unknown")
+
+
+@pytest.mark.asyncio
+async def test_remote_cancel_before_approval_is_known_not_started(tmp_path: Path) -> None:
+    tool = RemoteControlledTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    runtime = ExecutionRuntime(tmp_path)
+    waiting = asyncio.Event()
+
+    async def resolver(request):
+        waiting.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime).execute_calls(
+        [_call(tool.definition.name, {})], permission_resolver=resolver))
+    await asyncio.wait_for(waiting.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not tool.entered.is_set()
+    info = runtime.list_invocations(None)[0]
+    assert info["state"] == "cancelled" and info["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_remote_timeout_returns_outcome_unknown_without_retry(tmp_path: Path) -> None:
+    tool = RemoteControlledTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    runtime = ExecutionRuntime(tmp_path)
+    result = await ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime, timeout_seconds=0.01).execute_calls(
+        [_call(tool.definition.name, {})], permission_policy="bypass")
+    assert result[0].error_code == "mcp_outcome_unknown"
+    assert result[0].metadata["automatic_retry"] is False
+    assert "查询实际状态" in result[0].content
+    assert runtime.list_invocations(None)[0]["state"] == "interrupted"

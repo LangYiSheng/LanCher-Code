@@ -32,10 +32,13 @@ def build_system_prompt() -> str:
         "- 对于探索性的问题（“这个怎么办？”，“你觉得呢”）回复 2-3 句建议，不要直接动手。\n"
         "- 不确定时候先问，不要猜。",
         "# 工具使用指南\n"
-        "- 优先用专用工具而不是 bash，读文件用 ReadFile，别用 cat。\n"
+        "- 优先用专用文件工具；读文件使用 read_file。\n"
         "- 编辑文件用 EditFile，别用 sed。写文件用 WriteFile，别用 echo >。\n"
         "- 多个独立的工具调用请在同一轮中并行执行，不要串行。\n"
-        "- bash 命令的 description 参数要写清楚这条命令做什么。\n"
+        "- run_command 的 description 参数要写清楚命令目的。yield_ms 只控制何时交回结果，不是运行超时。\n"
+        "- run_command 返回 running 时，使用 process_read/process_wait 增量查看；不要重复启动相同命令。\n"
+        "- 默认进程属于当前轮次；确需跨轮运行时明确选择 session 生命周期或经批准 process_background。\n"
+        "- process_write 会向真实进程发送输入，仍须审批；running 不等于服务 ready。\n"
         "- 编辑文件之前必须先读一遍相关文件，否则不要直接修改。",
         "# 代码质量规范\n"
         "- 不要添加超出任务需求的功能、抽象或重构。\n"

@@ -52,6 +52,10 @@ class FakeProvider:
 
 
 class EchoTool:
+    def resource_claims(self, arguments, context):
+        # 测试工具只构造字符串，显式声明不访问共享资源。
+        return ()
+
     @property
     def definition(self) -> ToolDefinition:
         return ToolDefinition(name="echo_tool", description="echo", input_schema={"type": "object"})

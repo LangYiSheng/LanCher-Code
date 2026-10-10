@@ -1,29 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from lancher_code.errors import ToolNotFoundError
+from lancher_code.execution.contracts import InvocationInfo, ResourceClaim
+from lancher_code.execution.scheduler import ResourceScheduler, claims_conflict, get_project_scheduler, normalize_claim, path_claim, project_claim
 from lancher_code.logging_system import get_logger
 from lancher_code.models import (
-    CancellationToken,
-    PermissionRequest,
-    PermissionResolution,
-    RuntimeMode,
-    WorkPhase,
-    PermissionPolicy,
-    ToolCall,
-    ToolContext,
-    ToolExecutionResult,
-    tool_available_in_phase,
+    CancellationToken, PermissionRequest, PermissionResolution, RuntimeMode,
+    WorkPhase, PermissionPolicy, ToolCall, ToolContext, ToolExecutionResult, tool_available_in_phase,
 )
 from lancher_code.permission_engine import PermissionCheck, PermissionEngine
+from lancher_code.sessions.repository import SessionRepositoryError
+from lancher_code.tools.core.common import resolve_path_in_root
 from lancher_code.tools.core.file_state_cache import FileStateCache
 from lancher_code.tools.core.registry import ToolRegistry
+from lancher_code.tools.core.validation import validate_tool_arguments
+
+if TYPE_CHECKING:
+    from lancher_code.execution.runtime import ExecutionRuntime
 
 logger = get_logger("tools.executor")
-
 PermissionResolver = Callable[[PermissionRequest], Awaitable[PermissionResolution]]
 ToolStartedCallback = Callable[[ToolCall], Awaitable[None]]
 ToolResultCallback = Callable[[ToolExecutionResult], Awaitable[None]]
@@ -31,326 +32,322 @@ ToolResultCallback = Callable[[ToolExecutionResult], Awaitable[None]]
 
 class ToolExecutor:
     def __init__(
-        self,
-        registry: ToolRegistry,
-        *,
-        cwd: Path,
-        timeout_seconds: float = 10.0,
+        self, registry: ToolRegistry, *, cwd: Path, timeout_seconds: float = 10.0,
         permission_engine: PermissionEngine | None = None,
+        execution_runtime: ExecutionRuntime | None = None,
     ) -> None:
+        from lancher_code.execution.runtime import ExecutionRuntime
+
         self._registry = registry
-        self._cwd = cwd
+        self._cwd = cwd.resolve()
         self._timeout_seconds = timeout_seconds
-        self._file_state_cache = FileStateCache()
-        self._session_id: str | None = None
+        self._file_state_caches: dict[str | None, FileStateCache] = {}
         self._permission_engine = permission_engine or PermissionEngine()
+        self.execution_runtime = execution_runtime or ExecutionRuntime(self._cwd)
 
     async def execute_calls(
-        self,
-        calls: list[ToolCall],
-        *,
-        mode: RuntimeMode = "default",
-        work_phase: WorkPhase | None = None,
-        permission_policy: PermissionPolicy | None = None,
-        plan_file_path: Path | None = None,
-        session_id: str | None = None,
-        session_workspace: Path | None = None,
-        session_root: Path | None = None,
+        self, calls: list[ToolCall], *, mode: RuntimeMode = "default",
+        work_phase: WorkPhase | None = None, permission_policy: PermissionPolicy | None = None,
+        plan_file_path: Path | None = None, session_id: str | None = None,
+        session_workspace: Path | None = None, session_root: Path | None = None,
+        turn_id: str | None = None, generation: int | None = None,
         cancellation_token: CancellationToken | None = None,
         permission_resolver: PermissionResolver | None = None,
         available_tool_names: set[str] | None = None,
         should_interrupt: Callable[[], bool] | None = None,
-        on_call_started: ToolStartedCallback | None = None,
-        on_result: ToolResultCallback | None = None,
+        on_call_started: ToolStartedCallback | None = None, on_result: ToolResultCallback | None = None,
     ) -> list[ToolExecutionResult]:
-        if session_id != self._session_id:
-            self._file_state_cache = FileStateCache()
-            self._session_id = session_id
         context = ToolContext(
-            cwd=self._cwd,
-            timeout_seconds=self._timeout_seconds,
-            mode=mode,
-            work_phase=work_phase,
-            permission_policy=permission_policy,
-            project_root=self._cwd,
-            plan_file_path=plan_file_path,
-            session_id=session_id,
-            session_workspace=session_workspace,
-            session_root=session_root,
+            cwd=self._cwd, timeout_seconds=self._timeout_seconds, mode=mode,
+            work_phase=work_phase, permission_policy=permission_policy,
+            project_root=self._cwd, plan_file_path=plan_file_path, session_id=session_id,
+            session_workspace=session_workspace, session_root=session_root,
             cancellation_token=cancellation_token,
-            file_state_cache=self._file_state_cache,
+            file_state_cache=self._file_state_caches.setdefault(session_id, FileStateCache()),
+            execution_runtime=self.execution_runtime, turn_id=turn_id,
+            generation=self.execution_runtime.generation(session_id) if generation is None else generation,
         )
-        results: list[ToolExecutionResult] = []
-        safe_batch: list[ToolCall] = []
-
-        for index, call in enumerate(calls):
-            self._raise_if_cancelled(context)
-            if should_interrupt is not None and should_interrupt():
-                results.extend(await self._skip_calls([*safe_batch, *calls[index:]], on_result))
-                return results
-            try:
-                tool = self._registry.get(call.tool_name)
-            except ToolNotFoundError:
-                if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
-                    safe_batch = []
-                results.append(await self._execute_one(call, context, permission_resolver, should_interrupt, on_call_started, on_result))
-                continue
-
-            if not tool_available_in_phase(tool.definition, context.work_phase):
-                if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
-                    safe_batch = []
-                results.append(
-                    await self._report_result(ToolExecutionResult(
-                        call_id=call.call_id,
-                        tool_name=call.tool_name,
-                        content=f"{call.tool_name} 在当前模式下不可用。",
-                        is_error=True,
-                        metadata={"work_phase": context.work_phase, "permission_policy": context.permission_policy},
-                        summary=f"{call.tool_name} 在当前模式下不可用",
-                        error_code="phase_disallowed",
-                        error_message=f"{call.tool_name} 在当前模式下不可用。",
-                    ), on_result)
-                )
-                continue
-
-            if available_tool_names is not None and call.tool_name not in available_tool_names:
-                if safe_batch:
-                    results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
-                    safe_batch = []
-                if should_interrupt is not None and should_interrupt():
-                    results.extend(await self._skip_calls(calls[index:], on_result))
-                    return results
-                results.append(
-                    await self._report_result(ToolExecutionResult(
-                        call_id=call.call_id, tool_name=call.tool_name,
-                        content=f"{call.tool_name} 尚未加载。请先调用 tool_search，再在下一次模型请求中调用该工具。",
-                        is_error=True, metadata={"requires_tool_search": True},
-                        summary=f"{call.tool_name} 尚未加载", error_code="tool_not_found",
-                        error_message=f"{call.tool_name} 尚未加载。",
-                    ), on_result)
-                )
-                continue
-
-            if tool.definition.is_concurrency_safe:
-                safe_batch.append(call)
-                continue
-
-            if safe_batch:
-                results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
-                safe_batch = []
-            results.append(await self._execute_one(call, context, permission_resolver, should_interrupt, on_call_started, on_result))
-
-        if safe_batch:
-            results.extend(await self._execute_safe_batch(safe_batch, context, permission_resolver, should_interrupt, on_call_started, on_result))
-
-        return results
-
-    async def _execute_safe_batch(
-        self,
-        calls: list[ToolCall],
-        context: ToolContext,
-        permission_resolver: PermissionResolver | None,
-        should_interrupt: Callable[[], bool] | None = None,
-        on_call_started: ToolStartedCallback | None = None,
-        on_result: ToolResultCallback | None = None,
-    ) -> list[ToolExecutionResult]:
-        if should_interrupt is not None and should_interrupt():
-            return await self._skip_calls(calls, on_result)
-        tasks = [
-            asyncio.create_task(self._execute_one(call, context, permission_resolver, should_interrupt, on_call_started, on_result))
-            for call in calls
-        ]
+        scheduler = get_project_scheduler(self._cwd, max_concurrency=self.execution_runtime.limits.max_concurrency)
+        # 冻结参数，防止审批期间调用方修改实际执行内容。
+        frozen_calls = [replace(call, arguments=deepcopy(call.arguments)) for call in calls]
+        claims = [self._resource_claims(call, context) if self._argument_error(call) is None else () for call in frozen_calls]
+        completed = [asyncio.Event() for _ in calls]
+        tasks = []
+        for index, call in enumerate(frozen_calls):
+            predecessors = [completed[earlier] for earlier in range(index)
+                            if any(claims_conflict(one, other) for one in claims[earlier] for other in claims[index])]
+            tasks.append(asyncio.create_task(self._execute_one(
+                call, replace(context), scheduler, claims[index], predecessors, completed[index],
+                permission_resolver, available_tool_names, should_interrupt, on_call_started, on_result,
+            )))
         try:
+            # gather 保留输入顺序，on_result 按实际完成顺序立即推送。
             return list(await asyncio.gather(*tasks))
-        except (asyncio.CancelledError, Exception):
-            # 回调失败也必须收束已启动的同组工具，不能留下后台操作。
+        except BaseException:
+            # 业务失败已转换为结构化结果；只有取消或日志/通知基础设施失败才收束整批。
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
+    def _argument_error(self, call: ToolCall) -> ToolExecutionResult | None:
+        try:
+            tool = self._registry.get(call.tool_name)
+        except ToolNotFoundError:
+            return None
+        issue = validate_tool_arguments(call.arguments, tool.definition.input_schema)
+        if issue is None:
+            return None
+        return self._error(call, issue.error_code, issue.error_message,
+                           {"argument_path": list(issue.path), "constraint": issue.constraint})
+
+    def _resource_claims(self, call: ToolCall, context: ToolContext) -> tuple[ResourceClaim, ...]:
+        root = context.project_root or context.cwd
+        try:
+            tool = self._registry.get(call.tool_name)
+            declaration = getattr(tool, "resource_claims", None)
+            if callable(declaration):
+                claims = tuple(declaration(call.arguments, context))
+                if not all(isinstance(claim, ResourceClaim) for claim in claims):
+                    raise TypeError("工具资源声明必须返回 ResourceClaim。")
+                return tuple(normalize_claim(claim) for claim in claims)
+            # MCP 的 readOnlyHint 描述远端能力，不足以证明与本地或其他远端操作无冲突。
+            if tool.definition.permission is not None and tool.definition.permission.source == "external":
+                return (project_claim(root),)
+            name = call.tool_name
+            if name in {"read_file", "write_file", "edit_file"}:
+                path = resolve_path_in_root(context.cwd, str(call.arguments.get("path", "")), root)
+                return (path_claim(path, write=name != "read_file"),)
+            if name == "write_plan_file" and context.plan_file_path is not None:
+                return (path_claim(context.plan_file_path, write=True),)
+            if name in {"glob", "grep"}:
+                raw = call.arguments.get("path")
+                path = resolve_path_in_root(context.cwd, raw, root) if isinstance(raw, str) and raw.strip() else root
+                return (path_claim(path, recursive=True),)
+            if name == "run_command":
+                raw = call.arguments.get("cwd")
+                cwd = resolve_path_in_root(context.cwd, raw, root) if isinstance(raw, str) and raw.strip() else context.cwd
+                return tuple(normalize_claim(claim) for claim in self.execution_runtime.command_claims(str(call.arguments.get("command", "")), cwd))
+            if name in {"process_write", "process_background"}:
+                return (ResourceClaim("process", f"{call.arguments.get('process_id', '')}:stdin", "exclusive"),)
+            if name in {"tool_search", "process_list", "process_read", "process_wait", "process_stop"}:
+                return ()
+        except (ToolNotFoundError, ValueError, TypeError):
+            # 无效参数由工具给出具体错误；保守资源声明不会让坏参数获得更宽并行权限。
+            pass
+        return (project_claim(root),)
+
     async def _execute_one(
-        self,
-        call: ToolCall,
-        context: ToolContext,
-        permission_resolver: PermissionResolver | None,
-        should_interrupt: Callable[[], bool] | None = None,
-        on_call_started: ToolStartedCallback | None = None,
-        on_result: ToolResultCallback | None = None,
+        self, call: ToolCall, context: ToolContext, scheduler: ResourceScheduler,
+        claims: tuple[ResourceClaim, ...], predecessors: list[asyncio.Event], completed: asyncio.Event,
+        permission_resolver: PermissionResolver | None, available_tool_names: set[str] | None,
+        should_interrupt: Callable[[], bool] | None, on_call_started: ToolStartedCallback | None,
+        on_result: ToolResultCallback | None,
     ) -> ToolExecutionResult:
-        # 每个调用完成时立即报告，不等待并发组中其他工具；返回值仍按输入排序。
-        result = await self._run_one(call, context, permission_resolver, should_interrupt, on_call_started)
-        return await self._report_result(result, on_result)
+        invocation = self.execution_runtime.begin_invocation(call, context)
+        context.invocation_id = invocation.invocation_id
+        try:
+            for predecessor in predecessors:
+                await self._await_cancelable(predecessor.wait(), context)
+            result = await self._run_one(call, context, invocation, scheduler, claims, permission_resolver,
+                                         available_tool_names, should_interrupt, on_call_started)
+            state = ("interrupted" if result.error_code == "mcp_outcome_unknown" else
+                     "superseded" if result.error_code == "steering_superseded" else
+                     "failed" if result.is_error else "succeeded")
+            self.execution_runtime.update_invocation(invocation, state, error_code=result.error_code,
+                                                     process_id=result.metadata.get("process_id"))
+            if on_result is not None:
+                await on_result(result)
+            return result
+        except asyncio.CancelledError:
+            if invocation.state not in {"succeeded", "failed", "interrupted", "superseded"}:
+                if invocation.state == "running" and self._external_side_effect(call):
+                    self.execution_runtime.update_invocation(invocation, "interrupted", error_code="mcp_outcome_unknown")
+                else:
+                    self.execution_runtime.update_invocation(invocation, "cancelled")
+            raise
+        finally:
+            # 后台进程保留资源占用，但不占普通工具的并发额度。
+            if context.resource_lease is not None and not context.resource_lease.transferred:
+                await context.resource_lease.release()
+            completed.set()
 
     async def _run_one(
-        self,
-        call: ToolCall,
-        context: ToolContext,
-        permission_resolver: PermissionResolver | None,
-        should_interrupt: Callable[[], bool] | None = None,
-        on_call_started: ToolStartedCallback | None = None,
+        self, call: ToolCall, context: ToolContext, invocation: InvocationInfo,
+        scheduler: ResourceScheduler, claims: tuple[ResourceClaim, ...],
+        permission_resolver: PermissionResolver | None, available_tool_names: set[str] | None,
+        should_interrupt: Callable[[], bool] | None, on_call_started: ToolStartedCallback | None,
     ) -> ToolExecutionResult:
         self._raise_if_cancelled(context)
-        if should_interrupt is not None and should_interrupt():
+        if self._superseded_now(context, should_interrupt):
             return self._superseded(call)
         try:
             tool = self._registry.get(call.tool_name)
         except ToolNotFoundError as exc:
-            return ToolExecutionResult(
-                call_id=call.call_id,
-                tool_name=call.tool_name,
-                content=exc.user_message,
-                is_error=True,
-                metadata={},
-                summary=exc.user_message,
-                error_code="tool_not_found",
-                error_message=exc.user_message,
-            )
-
-        permission_check = self._permission_engine.evaluate(call=call, tool=tool.definition, context=context)
-        maybe_denied = await self._handle_permission_check(
-            call=call,
-            tool_name=tool.definition.name,
-            permission_check=permission_check,
-            permission_resolver=permission_resolver,
-            should_interrupt=should_interrupt,
-            context=context,
-        )
-        if maybe_denied is not None:
-            return maybe_denied
-
+            return self._error(call, "tool_not_found", exc.user_message)
+        if not tool_available_in_phase(tool.definition, context.work_phase):
+            return self._error(call, "phase_disallowed", f"{call.tool_name} 在当前阶段不可用。")
+        if available_tool_names is not None and call.tool_name not in available_tool_names:
+            return self._error(call, "tool_not_found", f"{call.tool_name} 尚未加载。请先调用 tool_search，再在下一次模型请求中调用该工具。",
+                               {"requires_tool_search": True})
+        argument_error = self._argument_error(call)
+        if argument_error is not None:
+            return argument_error
+        check = self._permission_engine.evaluate(call=call, tool=tool.definition, context=context)
+        approval_signature = self._permission_signature(check)
+        if check.decision == "ask":
+            self.execution_runtime.update_invocation(invocation, "awaiting_permission")
+        denied = await self._handle_permission_check(call=call, tool_name=tool.definition.name,
+                    permission_check=check, permission_resolver=permission_resolver,
+                    should_interrupt=should_interrupt, context=context)
+        if denied is not None:
+            return denied
         self._raise_if_cancelled(context)
-        if should_interrupt is not None and should_interrupt():
+        if self._superseded_now(context, should_interrupt):
             return self._superseded(call)
+        self.execution_runtime.update_invocation(invocation, "waiting_resources")
+        management = (call.tool_name in {"process_stop", "process_read", "process_list", "process_background"}
+                      and (tool.definition.permission is None or tool.definition.permission.source != "external"))
+        context.resource_lease = await scheduler.reserve(claims, cancellation_token=context.cancellation_token,
+                                                        counted=not management)
+        self._raise_if_cancelled(context)
+        if self._superseded_now(context, should_interrupt):
+            return self._superseded(call)
+        # 审批等待和资源排队都会让文件、规则发生变化；真正执行前再次检查。
+        checked = self._permission_engine.evaluate(call=call, tool=tool.definition, context=context)
+        if checked.decision == "deny":
+            return self._permission_denied(call, checked)
+        if checked.decision == "ask" and (check.decision != "ask" or self._permission_signature(checked) != approval_signature):
+            return self._error(call, "permission_target_changed", "等待期间权限或目标已改变，请重新请求执行。")
+        if self._resource_claims(call, context) != claims:
+            return self._error(call, "resource_target_changed", "等待期间资源目标已改变，当前调用未执行。")
+        argument_error = self._argument_error(call)
+        if argument_error is not None:
+            return argument_error
         if on_call_started is not None:
             await on_call_started(call)
         self._raise_if_cancelled(context)
-
+        if self._superseded_now(context, should_interrupt):
+            return self._superseded(call)
+        self.execution_runtime.update_invocation(invocation, "running")
         try:
-            result = await asyncio.wait_for(
-                tool.execute(call.arguments, context),
-                timeout=context.timeout_seconds,
-            )
-            result.call_id = call.call_id
-            result.tool_name = call.tool_name
+            # 进程工具分别管理本次等待期限和进程运行期限；普通工具超时不能
+            # 把这些期限重新合并，也不能在停止流程完成之前打断收尾。
+            timeout = None if call.tool_name in {"run_command", "process_wait", "process_stop", "process_background"} else context.timeout_seconds
+            result = await self._await_cancelable(tool.execute(call.arguments, context), context, timeout=timeout)
+            result.call_id, result.tool_name = call.call_id, call.tool_name
             return result
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
             logger.error("event=tool_execution_timeout tool=%s", call.tool_name)
-            return ToolExecutionResult(
-                call_id=call.call_id,
-                tool_name=call.tool_name,
-                content=f"{call.tool_name} 执行超时",
-                is_error=True,
-                metadata={},
-                summary=f"{call.tool_name} 执行超时",
-                error_code="tool_timeout",
-                error_message=f"{call.tool_name} 执行超时",
-            )
+            if self._external_side_effect(call):
+                return self._unknown_remote_result(call, "等待远端结果超时")
+            return self._error(call, "tool_timeout", f"{call.tool_name} 执行超时")
+        except SessionRepositoryError:
+            # 事件持久化失败意味着无法可靠审计后续执行，不能当作普通工具错误继续。
+            raise
         except Exception as exc:
-            logger.exception(
-                "event=tool_execution_failed tool=%s exception_type=%s",
-                call.tool_name, type(exc).__name__,
-            )
-            return ToolExecutionResult(
-                call_id=call.call_id,
-                tool_name=call.tool_name,
-                content=str(exc),
-                is_error=True,
-                metadata={},
-                summary=f"{call.tool_name} 执行失败",
-                error_code="tool_exception",
-                error_message=str(exc),
-            )
+            logger.exception("event=tool_execution_failed tool=%s exception_type=%s", call.tool_name, type(exc).__name__)
+            if self._external_side_effect(call):
+                return self._unknown_remote_result(call, "远端调用连接失败")
+            return self._error(call, "tool_exception", str(exc))
+
+    def _external_side_effect(self, call: ToolCall) -> bool:
+        try:
+            definition = self._registry.get(call.tool_name).definition
+        except ToolNotFoundError:
+            return False
+        return (definition.permission is not None and definition.permission.source == "external"
+                and definition.category != "read")
+
+    @staticmethod
+    def _unknown_remote_result(call: ToolCall, reason: str) -> ToolExecutionResult:
+        return ToolExecutor._error(call, "mcp_outcome_unknown",
+            f"{reason}；远端操作可能已经发生。请先查询实际状态，再决定是否重试。",
+            {"outcome_unknown": True, "automatic_retry": False})
 
     async def _handle_permission_check(
-        self,
-        *,
-        call: ToolCall,
-        tool_name: str,
-        permission_check: PermissionCheck,
-        permission_resolver: PermissionResolver | None,
-        should_interrupt: Callable[[], bool] | None = None,
+        self, *, call: ToolCall, tool_name: str, permission_check: PermissionCheck,
+        permission_resolver: PermissionResolver | None, should_interrupt: Callable[[], bool] | None = None,
         context: ToolContext | None = None,
     ) -> ToolExecutionResult | None:
         if permission_check.decision == "allow":
             return None
-
-        metadata = permission_check.metadata or {}
         if permission_check.decision == "deny":
-            return ToolExecutionResult(
-                call_id=call.call_id,
-                tool_name=tool_name,
-                content=permission_check.reason_message or "权限拒绝执行该工具调用。",
-                is_error=True,
-                metadata=metadata,
-                summary="权限拒绝",
-                error_code=permission_check.reason_code or "permission_denied",
-                error_message=permission_check.reason_message or "权限拒绝执行该工具调用。",
-            )
-
+            return self._permission_denied(call, permission_check)
         request = permission_check.request
         if request is None or permission_resolver is None:
-            return ToolExecutionResult(
-                call_id=call.call_id,
-                tool_name=tool_name,
-                content="当前工具调用需要用户授权，但没有可用的授权处理器。",
-                is_error=True,
-                metadata=metadata,
-                summary="缺少权限确认",
-                error_code="permission_confirmation_unavailable",
-                error_message="当前工具调用需要用户授权，但没有可用的授权处理器。",
-            )
-
-        resolution = await permission_resolver(request)
-        if resolution.outcome == "superseded":
-            return self._superseded(call)
+            return self._error(call, "permission_confirmation_unavailable", "当前工具调用需要用户授权，但没有可用的授权处理器。")
+        resolution = await self._await_cancelable(permission_resolver(request), context)
         if context is not None:
             self._raise_if_cancelled(context)
-        if should_interrupt is not None and should_interrupt():
+            if self._superseded_now(context, should_interrupt):
+                return self._superseded(call)
+        if resolution.outcome == "superseded":
             return self._superseded(call)
-        self._permission_engine.apply_resolution(request, resolution)
+        if resolution.request_id != request.request_id:
+            return self._error(call, "permission_resolution_mismatch", "授权结果与当前请求不匹配。")
         if resolution.outcome in {"allow_once", "allow_session", "allow_project"}:
+            self._permission_engine.apply_resolution(request, resolution)
             return None
-        return ToolExecutionResult(
-            call_id=call.call_id,
-            tool_name=tool_name,
-            content="用户拒绝了本次工具调用。",
-            is_error=True,
-            metadata={**metadata, "permission_request_id": request.request_id},
-            summary="用户拒绝授权",
-            error_code="permission_user_denied",
-            error_message="用户拒绝了本次工具调用。",
-        )
+        return self._error(call, "permission_user_denied", "用户拒绝了本次工具调用。",
+                           {**(permission_check.metadata or {}), "permission_request_id": request.request_id})
+
+    def _superseded_now(self, context: ToolContext, should_interrupt: Callable[[], bool] | None) -> bool:
+        return ((should_interrupt is not None and should_interrupt())
+                or not self.execution_runtime.is_current(context.session_id, context.generation))
 
     @staticmethod
-    async def _report_result(
-        result: ToolExecutionResult,
-        on_result: ToolResultCallback | None,
-    ) -> ToolExecutionResult:
-        if on_result is not None:
-            await on_result(result)
-        return result
+    async def _await_cancelable(awaitable, context: ToolContext | None, *, timeout: float | None = None):
+        operation = asyncio.ensure_future(awaitable)
+        token = context.cancellation_token if context is not None else None
+        cancellation_wait = asyncio.create_task(token.wait()) if token is not None else None
+        try:
+            if cancellation_wait is None:
+                return await asyncio.wait_for(operation, timeout=timeout)
+            done, _ = await asyncio.wait((operation, cancellation_wait), timeout=timeout,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if operation.done():
+                # 已提交的本地修改或已收到的远端结果保留真实结果；停止信号
+                # 不能因为同时到达，就把已经成功的操作说成没有执行。
+                return await operation
+            if token.is_cancelled:
+                raise asyncio.CancelledError
+            if operation not in done:
+                raise asyncio.TimeoutError
+            return await operation
+        finally:
+            if not operation.done():
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+            if cancellation_wait is not None:
+                cancellation_wait.cancel()
+                await asyncio.gather(cancellation_wait, return_exceptions=True)
 
-    async def _skip_calls(
-        self,
-        calls: list[ToolCall],
-        on_result: ToolResultCallback | None,
-    ) -> list[ToolExecutionResult]:
-        return [await self._report_result(self._superseded(call), on_result) for call in calls]
+    @staticmethod
+    def _permission_signature(check: PermissionCheck) -> tuple[object, ...]:
+        request = check.request
+        if request is None:
+            return (check.decision,)
+        return (request.tool_name, request.kind, request.command, request.details,
+                tuple(request.file_paths), request.work_phase, request.permission_policy)
+
+    @staticmethod
+    def _permission_denied(call: ToolCall, check: PermissionCheck) -> ToolExecutionResult:
+        return ToolExecutor._error(call, check.reason_code or "permission_denied",
+                                  check.reason_message or "权限拒绝执行该工具调用。", check.metadata)
+
+    @staticmethod
+    def _error(call: ToolCall, code: str, message: str, metadata: dict[str, object] | None = None) -> ToolExecutionResult:
+        return ToolExecutionResult(call.call_id, call.tool_name, content=message, is_error=True,
+                                   summary=message, error_code=code, error_message=message, metadata=metadata or {})
 
     @staticmethod
     def _superseded(call: ToolCall) -> ToolExecutionResult:
-        return ToolExecutionResult(
-            call_id=call.call_id, tool_name=call.tool_name, is_error=True,
-            content="用户已调整当前任务，此工具尚未执行。", summary="已跳过待执行工具",
-            error_code="steering_superseded", error_message="用户已调整当前任务，此工具尚未执行。",
-        )
+        return ToolExecutor._error(call, "steering_superseded", "用户已调整当前任务，此工具尚未执行。")
 
     @staticmethod
     def _raise_if_cancelled(context: ToolContext) -> None:
-        if context.cancellation_token and context.cancellation_token.is_cancelled:
+        if context.cancellation_token is not None and context.cancellation_token.is_cancelled:
             raise asyncio.CancelledError

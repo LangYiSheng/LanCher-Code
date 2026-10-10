@@ -108,6 +108,11 @@ class SessionService:
             raise SessionRepositoryError('尚未创建会话。')
         self.writer.append(kind, data or {}, turn_id=turn_id)
 
+    def record_execution(self, kind, data, *, turn_id=None):
+        """保持日志与 checkpoint 投影同步，供后台运行时绑定的唯一写入者使用。"""
+        self.record(kind, data, turn_id=turn_id)
+        SessionCodec.apply_execution_event(self._saved['state']['execution'], kind, data)
+
     def rename(self, session_id, title):
         if self.paths is not None and self.paths.session_id == session_id and self.writer is not None:
             title = title.strip()

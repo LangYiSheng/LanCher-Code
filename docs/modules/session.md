@@ -22,7 +22,7 @@
 | `build_request(...)` / `estimate_request_tokens(...)` | 组装请求与上下文估算 |
 | `offload_large_tool_results()` / `compact_context()` | 工具结果卸载与上下文压缩 |
 | `list_sessions()` | 只读列出项目会话，返回 `SessionInfo` |
-| `new_session()` | 刷新关闭旧会话并重置为空白草稿 |
+| `new_session()` | 刷新旧会话并重置草稿；有后台资源时保留原Runtime及写入者 |
 | `resume_session(session_id, resolved_model=...)` | 恢复指定 UUID，返回恢复的会话权限条数 |
 | `rename_session(session_id, title)` | 只修改标题 |
 | `archive_session(session_id)` / `remove_session(session_id)` | 归档或删除非当前会话 |
@@ -51,3 +51,12 @@
 新建和恢复由 `TurnRunner` 协调有效模型。会话只保存稳定模型引用，不保存连接密钥；恢复找不到原模型时按当前可用默认模型处理并显示提示。模型切换清除旧模型的上下文用量锚点，保留对话与卸载引用。
 
 当前 `workspace/` 在全部阶段允许内置文件工具读写，日志和控制文件不在此批准范围；源码、Shell 与外部 MCP 继续遵守阶段和权限判定。这不构成操作系统沙箱。
+
+
+## 执行投影与后台写入
+
+SessionState.execution保存调用、进程和完成收件箱的投影。后台事件通过ExecutionRuntime绑定的原SessionService写入，切换界面不改变归属，也不创建第二个写入者。启动事实先提交再创建进程；退出后记录状态并生成完成通知。
+
+离开对话后，只在仍有后台或已提交控制操作时持有原写入者。最后一个进程和控制操作结束后保存快照并释放非当前 Session；以后从磁盘恢复。当前界面所属 Session 始终保留写入者。
+
+下一条用户消息最多附带20条结构化完成摘要，先保存协议消息再确认收件箱，避免通知丢失；它不是新指令，也不会自动唤醒模型。应用重启把未结束进程标为lost、调用标为interrupted，不接管旧PID或重复命令。详见 [工具执行](../workflows/tool-execution.md)。

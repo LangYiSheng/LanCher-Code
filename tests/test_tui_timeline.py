@@ -361,13 +361,17 @@ async def test_single_tool_uses_one_disclosure_and_contains_complete_result(open
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("state", ["error", "awaiting_permission"])
+@pytest.mark.parametrize("state", ["error", "awaiting_permission", "unknown"])
 async def test_failure_and_approval_remain_visible_without_expanding_group(openai_provider_config, tmp_path, state):
     app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
     message = session.create_assistant_message()
     message.trace.entries = [_call("a", state="complete"), _call("b", state=state), _result("a")]
     if state == "error":
         message.trace.entries.append(_result("b", state="error", content="拒绝读取：文件不存在"))
+    elif state == "unknown":
+        result = _result("b", state="unknown", content="远端结果未知，请先检查实际状态，勿重复执行")
+        result.metadata.update(started=True, error_code="mcp_outcome_unknown")
+        message.trace.entries.append(result)
     async with app.run_test() as pilot:
         await app._mount_message_widget(message)
         await pilot.pause()
@@ -376,10 +380,15 @@ async def test_failure_and_approval_remain_visible_without_expanding_group(opena
         assert not group.collapsed
         assert call.display
         status = _text(_header(call))
-        assert any(word in status for word in (("失败", "错误") if state == "error" else ("确认", "批准", "审批")))
+        expected = {"error": ("失败", "错误"), "awaiting_permission": ("确认", "批准", "审批"), "unknown": ("结果未知",)}
+        assert any(word in status for word in expected[state])
         if state == "error":
             assert not call.collapsed
             assert "文件不存在" in _text(call.query_one(".tool-call-body", Static))
+        elif state == "unknown":
+            assert not call.collapsed
+            assert "1 项结果未知" in _text(_header(group))
+            assert "勿重复执行" in _text(call.query_one(".tool-call-body", Static))
 
 
 @pytest.mark.asyncio

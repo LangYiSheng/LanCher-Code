@@ -18,7 +18,14 @@
 | `PermissionPolicy` | 权限策略：`default`（逐次确认）/ `acceptEdits`（自动编辑）/ `bypass`（跳过询问），不能突破阶段边界 |
 | `RuntimeMode` | 旧接口兼容类型；新状态分别保存工作阶段和权限策略 |
 | Plan Mode | 计划阶段：只读探索 + 专用计划写入，权限策略保持不变 |
-| `PermissionRule` | 权限规则：`{match, result, match_kind}`，match 形如 `Bash(git *)` |
+| `PermissionRule` | 权限规则：`{match, result, match_kind}`，match 形如 `RunCommand(git *)` |
+| Invocation | 一次工具请求的应用身份与状态；保留模型的调用 ID，和真实进程生命周期分开 |
+| Process | 所属 Session 托管的真实进程，以应用 UUID 标识；PID 仅作诊断信息 |
+| SessionRuntime | 绑定原对话状态、写入者与后台资源；界面切换后仍能保存原会话事件 |
+| ResourceClaim / Lease | 工具的资源需求及实际授予租约；进程接管租约后到退出才释放 |
+| generation | Session 执行代次；停止后拒绝旧审批、旧执行请求和迟到回调 |
+| 输出游标 | 累计 UTF-8 解码字符位置；模型与界面各自续读，不消费另一观察者的数据 |
+| 收件箱 | 后台完成事件在 Session 的投影；下次正常请求才交给模型，不自动开轮 |
 | `match_kind` | `exact` 精确匹配、`glob` 显式通配、`legacy` 旧规则兼容；新授权默认精确匹配 |
 | Rule scope | 规则作用域：`session`（随 Session 持久化）/ `project`（`./.lancher/permissions.yaml`）/ `user`（`~/.lancher/permissions.yaml`） |
 | PermissionResolution | 用户对权限请求的决议：`allow_once` / `allow_session` / `allow_project` / `deny` |

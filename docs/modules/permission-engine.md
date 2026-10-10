@@ -50,7 +50,7 @@
 
 ```yaml
 rules:
-  - match: 'Bash(git status --short)'
+  - match: 'RunCommand(git status --short)'
     match_kind: exact
     result: allow
   - match: 'WriteFile(src/[draft].py)'
@@ -69,9 +69,9 @@ rules:
 
 新权限确认默认 `exact`：Shell 授权完整命令，保留命令内部空白及大小写；文件授权精确路径，仍使用现有的正斜杠、小写路径规范化。`*`、`?`、`[` 在精确规则中按普通字符匹配。MCP 精确规则匹配整个可见工具名，仍允许该工具的不同参数组合。
 
-`glob` 只用于明确配置的通配匹配。缺失 `match_kind` 的旧规则按 `legacy` 读取，保留原行为；修改或保存旧规则时不能意外丢失已有的 `exact` 字段。不会从 `git status` 自动生成 `Bash(git *)` 一类宽授权。
+`glob` 只用于明确配置的通配匹配。缺失 `match_kind` 的旧规则按 `legacy` 读取，保留原行为；修改或保存旧规则时不能意外丢失已有的 `exact` 字段。不会从 `git status` 自动生成 `RunCommand(git *)` 一类宽授权。
 
-标签映射为 `Bash`、`ReadFile`、`WriteFile`、`EditFile`、`Glob`、`Grep`、`WritePlanFile`。MCP 使用 `mcp__<server>__<tool>` 可见名。
+标签映射为 `RunCommand`、`ReadFile`、`WriteFile`、`EditFile`、`Glob`、`Grep`、`WritePlanFile`。MCP 使用 `mcp__<server>__<tool>` 可见名。
 
 ## 权限请求与决议
 
@@ -85,6 +85,10 @@ rules:
 | `deny` | 返回 `permission_user_denied` |
 
 内部另有 `superseded`：用户补充当前任务时撤销等待中的审批，工具返回 `steering_superseded`，不保存允许规则。即使补充随后被删除或改成排队，已撤销的审批也不能再执行。它不是 UI 按钮，不应显示为用户拒绝。
+
+`process_write` 和 `process_background` 只提供本次允许与拒绝。向交互 Shell 输入内容可能执行任意新操作，不能把一次输入批准保存成整个 Session 或项目的永久放行；显式拒绝规则和命令黑名单仍生效。启动 `run_command` 的确认展示 cwd、归属、Pipe / PTY、有限等待和运行期限，让用户看清要启动的实际工作。
+
+JSON Schema 校验在权限询问和资源申请之前。审批不占资源锁；取得资源后重新检查取消令牌、generation、阶段、规则与真实目标，再应用决议。停止后的迟到批准不会保存允许规则或开始执行。
 
 `ToolExecutor.execute_calls(..., should_interrupt=...)` 在每组开始前与审批返回后检查任务补充。已启动的并行组等待结果；后续未启动调用全部记录为跳过。`TurnRunner` 最终发出 `permission_request_closed`，迟到的面板决议不生效。
 

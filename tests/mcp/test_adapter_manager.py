@@ -231,3 +231,24 @@ async def test_adapter_failure_writes_redacted_error_log(tmp_path: Path) -> None
     assert "RuntimeError" in log_text
     assert "private-token" not in log_text
     assert "must-not-be-logged" not in log_text
+
+
+@pytest.mark.asyncio
+async def test_side_effect_transport_failure_is_unknown_but_explicit_server_error_is_known(tmp_path: Path) -> None:
+    class FailedConnection(FakeConnection):
+        async def call_tool(self, name, arguments):
+            raise ConnectionError("transport disconnected")
+
+    class ServerErrorConnection(FakeConnection):
+        async def call_tool(self, name, arguments):
+            return types.CallToolResult(isError=True, content=[types.TextContent(type="text", text="操作被拒绝")])
+
+    config = MCPServerConfig(name="demo", type="stdio", command="python")
+    remote = remote_tool("modify", read_only=False)
+    context = ToolContext(cwd=tmp_path, timeout_seconds=10)
+    unknown = await MCPToolAdapter("demo", remote, FailedConnection(config)).execute({}, context)
+    explicit = await MCPToolAdapter("demo", remote, ServerErrorConnection(config)).execute({}, context)
+    assert unknown.error_code == "mcp_outcome_unknown"
+    assert unknown.metadata["automatic_retry"] is False
+    assert "可能已经发生" in unknown.content
+    assert explicit.error_code == "mcp_remote_error"

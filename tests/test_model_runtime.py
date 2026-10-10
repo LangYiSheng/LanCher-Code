@@ -417,8 +417,13 @@ async def test_interrupted_tools_are_paired_before_cross_protocol_switch(tmp_pat
             assert results[0]["content"] == "已完成的工具结果"
             assert results[0]["is_error"] is False
             assert results[1]["is_error"] is True
-            assert "未获得" in results[1]["content"]
-            assert "可能已部分执行" in results[1]["content"]
+            if interruption == "cancel":
+                assert "未获得" in results[1]["content"]
+                assert "可能已部分执行" in results[1]["content"]
+            else:
+                # 执行器在调用工具之前失败，明确未执行，仍须补齐协议结果。
+                assert "尚未启动，没有执行" in results[1]["content"]
+                assert "可能已部分执行" not in results[1]["content"]
             content = 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"继续完成"}}\n\ndata: {"type":"message_stop"}\n\n'
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content.encode())
 

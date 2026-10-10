@@ -331,7 +331,7 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
         menu = app.query_one(SlashCompletionMenu)
         assert menu.display
         assert _visible_slash_commands(app) == [
-            "discuss", "plan", "do", "session", "model", "permissions",
+            "discuss", "plan", "do", "session", "tasks", "model", "permissions",
             "compact", "settings", "status", "exit",
         ]
 
@@ -462,7 +462,7 @@ async def test_multilevel_session_completion_advances_until_terminal_value(
         await pilot.press("tab")
         await pilot.pause(0.05)
         assert composer.text == "/session "
-        assert _visible_slash_commands(app) == ["new", "list", "resume", "rename", "archive", "remove"]
+        assert _visible_slash_commands(app) == ["new", "list", "stop", "resume", "rename", "archive", "remove"]
 
         composer.text = "/session res"
         composer.cursor_location = composer.document.end

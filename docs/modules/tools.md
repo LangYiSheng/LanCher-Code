@@ -1,114 +1,80 @@
-# 模块：工具系统（Tools）
+# 模块：工具与托管执行
 
-## 作用
+工具层把模型请求变成可审计的实际操作：先确认身份与参数，检查权限，再取得资源，执行后返回一个结果。长进程由托管层继续管理，启动调用无需一直等待它退出。
 
-工具系统是模型与外部世界（文件系统、shell、MCP Server）之间的执行层。它负责：
+第一次阅读建议先看 [工具执行故事与实现细节](../workflows/tool-execution.md)。这页用于查接口和继续开发。
 
-- **注册**：内置工具 + MCP 远程工具的登记
-- **调度**：按并发安全分组执行、超时包装、错误归一化
-- **权限**：在执行前统一过权限引擎
-- **暴露**：把工具定义（名称 / 描述 / JSON Schema）交给模型
-
-实现位置：`lancher_code/tools/`。
-
-## 目录结构
+## 从请求到执行
 
 ```text
-tools/
-├── __init__.py        # create_default_tool_registry()：注册 8 个内置工具
-├── core/
-│   ├── base.py        # Tool 协议、build_tool_success / build_tool_error
-│   ├── registry.py    # ToolRegistry
-│   ├── executor.py    # ToolExecutor
-│   ├── common.py      # 路径沙箱、SKIP_DIRS、输出上限常量
-│   └── file_state_cache.py  # FileStateCache
-└── builtin/           # 内置工具实现
+模型 ToolCall
+  → ToolExecutor 冻结参数，创建 InvocationInfo，校验 JSON Schema
+  → 阶段、可见工具、PermissionEngine
+  → 资源队列与权限复核
+  → 短工具执行 / ProcessSupervisor 启动
+  → 结构化 ToolExecutionResult
 ```
 
-## 核心接口
+实际完成事件立即更新 TUI；一批结果按请求顺序交给模型。资源相互冲突的同批调用先排序，独立调用可以并行。`is_concurrency_safe` 已移除，未知工具默认项目独占，不用类别猜副作用。
 
-### `Tool`（协议，`core/base.py`）
+工具可以实现 `resource_claims(arguments, context)`，返回可信的 `ResourceClaim` 列表；模型参数不能覆盖这个声明。内置文件、搜索、命令与进程工具都有明确资源策略。没有声明的 MCP，即使提供 `readOnlyHint`，也保守使用项目独占；该提示影响工作阶段可见性，不足以证明并发独立。
 
-```python
-class Tool(Protocol):
-    @property
-    def definition(self) -> ToolDefinition: ...
-    async def execute(self, arguments: dict, context: ToolContext) -> ToolExecutionResult: ...
-```
+权限检查位于资源申请之前，避免等待用户批准时长期占锁。得到租约后再次校验阶段、规则、审批内容和 generation；文件预览或目标在等待期间变了，不能套用旧批准继续写。
 
-- `ToolDefinition`（`models.py`）：名称、描述、参数 JSON Schema、分类（read/write/command）、并发安全、可见模式等
-- `ToolContext`（`models.py`）：cwd、超时、阶段和审批策略、项目根、当前 Session workspace 和计划路径、取消令牌、文件状态缓存
-- `ToolExecutionResult`：`call_id`、`tool_name`、`content`、`is_error`、`metadata`、`summary`、`error_code`、`error_message`
+参数使用标准 JSON Schema 校验，支持局部引用、组合和条件；外部引用只在离线注册表解析，不读取网络或外部文件。无效参数或 Schema 在审批、资源占用和实际执行之前失败。
 
-### `ToolRegistry`（`core/registry.py`）
+## 文件与查询工具
 
-| 方法 | 作用 |
+| 工具 | 实现 | 行为 |
+|---|---|---|
+| `read_file` | `builtin/read_file.py` | 按行分页读取，记录完整读取与文件版本 |
+| `write_file` | `builtin/write_file.py` | 覆盖前验证已完整读过且版本未变；临时文件后原子提交 |
+| `edit_file` | `builtin/edit_file.py` | 唯一文本替换；读取版本守卫与原子提交 |
+| `glob` | `builtin/glob.py` | 查找文件，默认跳过 `.lancher` 等内部目录 |
+| `grep` | `builtin/grep.py` | 正则搜索，有模型和界面输出预算 |
+| `write_plan_file` | `builtin/write_plan_file.py` | 计划阶段写本 Session `workspace/plan.md`，更新计划快照 |
+| `tool_search` | `builtin/tool_search.py` | 查找并加载延迟 MCP 工具，下一次模型请求才使用 |
+
+当前 Session workspace 文件操作在各阶段自动批准，显式拒绝优先；源码修改仅执行阶段允许。控制记录和多硬链接文件受保护，bypass 无法放行。文件权限是应用层路径约束，不能据此声称 Shell 获得系统沙箱。
+
+FileStateCache 按 Session 分开，恢复旧会话时不会借用另一对话的「已读文件」证据。调度锁覆盖同一应用内的 Session；其他程序仍可能写文件，所以版本检查不省略。
+
+## 命令与进程工具
+
+| 工具 | 主要参数 | 返回 / 作用 |
+|---|---|---|
+| `run_command` | `command`、`description`、可选 `cwd`、`transport`、`lifetime`、`yield_ms`、`max_runtime_ms` | 很快完成就给退出结果，否则给 `running` 和 `process_id` |
+| `process_list` | 无 | 当前 Session 的进程及结束记录 |
+| `process_read` | `process_id`、`cursor`、`max_chars` | 输出分页与 `next_cursor`；读取不消费日志 |
+| `process_wait` | `process_id`、`timeout_ms` | 有限等待；等不到时进程继续运行 |
+| `process_write` | `process_id`、`text` | 精确写 stdin，换行由 text 明确提供 |
+| `process_stop` | `process_id` | 停止目标及托管子进程，日志保留 |
+| `process_background` | `process_id` | 本轮进程转交 Session 后台 |
+
+启动工具在 `builtin/command.py`，管理工具在 `builtin/process.py`。旧 `bash` 名称与旧命令路径已删除，不额外维持一条兼容执行路径。命令非零退出返回 `non_zero_exit`，不根据命令名字猜测失败是否正常。
+
+进程控制工具只接受所属 Session 的 UUID。列表、日志、等待和停止可以出现在各阶段；启动、输入、转后台遵守执行阶段和权限判断。已知内置的 stop/read/list/background 使用不占普通并发额度的管理通道，资源锁仍有效；wait/write 受普通额度约束。TUI 的实际输入和按钮是用户直接操作，经 runner 的有归属检查的 facade 控制；模型工具调用仍经过权限层。
+
+## 执行层目录
+
+| 文件 | 阅读时关注什么 |
 |---|---|
-| `register(tool)` | 注册工具（重名抛 ValueError） |
-| `get(name)` | 按名取工具（不存在抛 `ToolNotFoundError`） |
-| `list_definitions(...)` | 列出定义；支持按模式过滤、是否包含延迟工具、已发现名称 |
-| `list_deferred_index()` | 按 Server 分组的延迟工具索引 |
-| `search_deferred(query)` | 延迟工具搜索（`tool_search` 工具使用） |
+| `execution/contracts.py` | 调用、进程、资源、配置、输出页的数据契约 |
+| `execution/scheduler.py` | 冲突 FIFO、原子多资源授予、租约转交、跨 Session 项目调度器 |
+| `execution/runtime.py` | Session 写入者绑定、generation、调用事件、后台收件箱与恢复 |
+| `execution/processes.py` | 启动取消竞态、停止幂等、进程监控、期限和输出失败止损 |
+| `execution/output.py` | UTF-8 增量解码、字符游标、独立日志、稀疏索引与磁盘额度 |
+| `execution/backends.py` | 平台统一 Pipe / PTY 接口与 POSIX 进程组 |
+| `execution/windows.py` | 挂起创建、Job Object、ConPTY、句柄继承和关闭 |
+| `tools/core/executor.py` | 权限、可见性、资源请求、结果排序、取消和基础设施失败 |
+| `tools/core/validation.py` | 标准 JSON Schema、离线引用解析与执行前参数校验 |
 
-### `ToolExecutor`（`core/executor.py`）
+## 新增工具时需要回答的问题
 
-`execute_calls(...)` 接收独立的 `work_phase`、`permission_policy`、`should_interrupt`、计划路径、取消令牌、审批回调与可见工具集合；旧 `mode` 参数仅供兼容：
+1. 它读写哪些资源？共享还是独占，是否覆盖子目录？不能确认时维持默认项目独占。
+2. 它何时形成不可撤销副作用？提交前如何复核参数、权限与版本？
+3. 用户取消后能证明它没有执行吗？远端结果未知时要明确返回，不能自动重试。
+4. 它会产生真实长进程吗？使用现有 ProcessSupervisor，不在工具里自行藏一个 subprocess。
+5. 返回内容是否有预算，必要的审计事件是否在副作用前提交？
 
-```text
-对每个调用：
-  · 已取消 → 抛 CancelledError
-  · 不在可见工具集合 → tool_not_found（提示先 tool_search）
-  · 注册表中不存在 → tool_not_found
-  · 当前阶段不可用 → phase_disallowed（优先于规则与跳过询问）
-  · 并发安全 → 加入 safe_batch（最后并行执行）
-  · 非并发安全 → 先执行完 safe_batch，再串行执行本调用
-对每个调用（_execute_one）：
-  · PermissionEngine.evaluate() → deny/ask 处理
-  · asyncio.wait_for(tool.execute(...), timeout) → 超时/异常归一化为错误结果
-```
-
-## 内置工具一览
-
-| 工具 | 文件 | 分类 | 并发安全 | 可见阶段 | 说明 |
-|---|---|---|---|---|---|
-| `read_file` | `read_file.py` | read | 是 | 全部 | 按行读取，大文件要求分页（>400 行需 offset/limit），记录文件状态缓存 |
-| `write_file` | `write_file.py` | write | 否 | 全部，路径受阶段约束 | 当前 workspace 自动批准；源码只在 execute 写入，覆盖已有文件前必须完整读过且文件未变 |
-| `edit_file` | `edit_file.py` | write | 否 | 全部，路径受阶段约束 | 当前 workspace 自动批准；源码只在 execute 修改，old_text 必须唯一匹配 |
-| `bash` | `bash.py` | command | 否 | execute | 执行 Windows PowerShell 命令，输出截断 12000 字符，超时 kill |
-| `glob` | `glob.py` | read | 是 | 全部 | glob 查找文件，跳过 SKIP_DIRS，结果按修改时间倒序 |
-| `grep` | `grep.py` | read | 是 | 全部 | 正则逐行搜索，二进制跳过，单行截断 300 字符 |
-| `write_plan_file` | `write_plan_file.py` | write | 否 | **仅 plan** | 写当前 Session 的 `workspace/plan.md` |
-| `tool_search` | `tool_search.py` | read | 是 | 全部 | 搜索/加载 MCP 延迟工具，`select:<名称>` 精确加载 |
-
-别名的存在：`RunCommandTool = BashTool`、`ReplaceInFileTool = EditFileTool`、`FindFilesTool = GlobTool`、`SearchCodeTool = GrepTool`（兼容旧名）。
-
-### 关键行为细节
-
-- **read_file 大文件**：单次默认上限 400 行（`DEFAULT_MAX_INLINE_LINES`），超限且未给 `limit` 时返回 `large_file_requires_paging` 错误，提示分页。
-- **write_file 防盲写**（`_guard_existing_file_write`）：覆盖已有文件要求 ① 之前用 read_file 读过 ② 是完整读取 ③ mtime 未变化；否则返回 `stale_file_state` / `incomplete_file_read` / `file_changed_since_read`。
-- **edit_file 一致性**：基于缓存内容匹配，mtime 变化则拒绝。
-- **bash 特例**：退出码非零视为错误（`non_zero_exit`），但 `grep/find/diff/rg/fc/select-string` 与 `git diff` 视为"可能正常非零"（>2 才报错）。讨论与计划一律禁止通用 Shell。
-- **补充中断**：执行前及并发组边界检查 `should_interrupt`，尚未启动的调用补齐 `steering_superseded` 结果；已启动的操作等待结束。
-- **glob/grep 输出上限**：模型侧 800 条路径 / 400 条匹配，UI 侧 200 条，字符上限 24000。
-
-## 文件状态缓存（`core/file_state_cache.py`）
-
-`FileStateCache` 记录每个文件最近一次读取/写入的状态（路径、mtime、内容、是否完整读取）。write_file / edit_file 的"先读后写"守卫依赖它。缓存由 `ToolExecutor` 持有，**单个进程内跨工具、跨轮次共享**。
-
-## 文件工具路径边界（`core/common.py`）
-
-- `SKIP_DIRS`：`.git`、`.venv`、`node_modules`、`__pycache__` 等目录在 glob/grep 中跳过
-- `resolve_path_in_root()` / `ensure_path_in_root()`：解析符号链接后必须位于项目根内，越界抛 `PathSandboxError`
-- `iter_files()`：递归文件遍历（跳过 SKIP_DIRS）
-- 当前 Session 的 `workspace/` 文件写入在各阶段已批准；源码路径仍遵守阶段和权限规则，其他会话工作区没有自动批准范围，日志与控制文件也不属于工作区。
-- 这是内置文件工具的应用层校验，不是操作系统沙箱；Shell 与外部 MCP 不具有系统隔离保证。
-
-## 如何新增一个内置工具
-
-1. 在 `lancher_code/tools/builtin/` 新建文件，实现 `Tool` 协议（`definition` + `execute`）
-2. 在 `builtin/__init__.py` 导出
-3. 在 `tools/__init__.py` 的 `create_default_tool_registry()` 中注册
-4. 如需权限标签，加入 `_BUILTIN_LABELS`（否则默认使用工具名作为规则名）
-5. 补充 `tests/tools/` 下的测试
-
-详见 [development.md](../development.md)。
+将工具注册到 `tools/__init__.py`，配置权限标签并覆盖真实边界测试。详细开发步骤见 [开发指南](../development.md)。

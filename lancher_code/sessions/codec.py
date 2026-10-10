@@ -27,6 +27,7 @@ class SessionCodec:
             'plan_snapshot': asdict(state.plan_snapshot) if state.plan_snapshot else None,
             'pending_inputs': [asdict(item) for item in state.pending_inputs],
             'context_management': cls._encode_context_management(state.context_management),
+            'execution': copy.deepcopy(state.execution),
         }
         messages = []
         for message in state.messages:
@@ -58,6 +59,7 @@ class SessionCodec:
                 pending_plan_exit_notice=raw['pending_plan_exit_notice'],
                 pending_plan_entry_kind=raw['pending_plan_entry_kind'],
                 context_management=cls._decode_context_management(raw['context_management']),
+                execution=cls._decode_execution(raw.get('execution', {'processes': {}, 'invocations': {}, 'inbox': []})),
             )
             if len({item.id for item in state.messages}) != len(state.messages):
                 raise ValueError("消息 id 重复。")
@@ -110,11 +112,47 @@ class SessionCodec:
                 result['rules'] = copy.deepcopy(data['rules'])
             elif kind == 'model.changed':
                 result['model_ref'] = data['model_ref']
+            elif kind.startswith('process.') or kind.startswith('invocation.') or kind == 'execution.inbox_acknowledged':
+                execution = result['state'].setdefault('execution', {'processes': {}, 'invocations': {}, 'inbox': []})
+                SessionCodec.apply_execution_event(execution, kind, data)
             elif kind in {'session.renamed', 'session.archived', 'turn.started', 'turn.completed', 'turn.failed', 'turn.interrupted', 'tool.started', 'tool.finished'}:
                 pass
             else:
                 raise SessionRepositoryError(f'未知的会话事件：{kind}')
         return result
+
+    @staticmethod
+    def _decode_execution(raw):
+        if not isinstance(raw, dict) or any(key not in raw for key in ('processes', 'invocations', 'inbox')):
+            raise ValueError('执行状态格式无效。')
+        if not isinstance(raw['processes'], dict) or not isinstance(raw['invocations'], dict) or not isinstance(raw['inbox'], list):
+            raise ValueError('执行状态集合格式无效。')
+        for key, value in raw['processes'].items():
+            if not isinstance(value, dict) or value.get('process_id') != key or not isinstance(value.get('status'), str):
+                raise ValueError('进程记录格式无效。')
+        for key, value in raw['invocations'].items():
+            if not isinstance(value, dict) or value.get('invocation_id') != key or not isinstance(value.get('state'), str):
+                raise ValueError('调用记录格式无效。')
+        if any(not isinstance(item, dict) or not isinstance(item.get('notification_id'), str) for item in raw['inbox']):
+            raise ValueError('执行通知格式无效。')
+        return copy.deepcopy(raw)
+
+    @staticmethod
+    def apply_execution_event(execution, kind, data):
+        if kind.startswith('process.'):
+            info = copy.deepcopy(data)
+            notification_id = info.pop('notification_id', None)
+            execution['processes'][info['process_id']] = info
+            if kind == 'process.exited' and notification_id is not None:
+                if not any(item['notification_id'] == notification_id for item in execution['inbox']):
+                    execution['inbox'].append(dict(info, notification_id=notification_id))
+        elif kind.startswith('invocation.'):
+            execution['invocations'][data['invocation_id']] = copy.deepcopy(data)
+        elif kind == 'execution.inbox_acknowledged':
+            acknowledged = set(data['notification_ids'])
+            execution['inbox'][:] = [item for item in execution['inbox'] if item['notification_id'] not in acknowledged]
+        else:
+            raise ValueError(f'未知执行事件：{kind}')
 
     @staticmethod
     def _decode_plan_snapshot(value: object) -> PlanSnapshot | None:

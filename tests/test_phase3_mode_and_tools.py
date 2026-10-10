@@ -7,7 +7,7 @@ import pytest
 from lancher_code.models import ToolContext
 from lancher_code.session import SessionController
 from lancher_code.tools import create_default_tool_registry
-from lancher_code.tools.builtin.bash import BashTool
+from lancher_code.tools.builtin.command import RunCommandTool
 from lancher_code.tools.builtin.write_plan_file import WritePlanFileTool
 
 
@@ -25,11 +25,11 @@ def test_session_controller_filters_tools_for_plan_mode(openai_provider_config, 
     )
 
     tool_names = [tool.name for tool in request.tools]
-    assert tool_names == ["read_file", "write_file", "edit_file", "glob", "grep", "write_plan_file", "tool_search"]
+    assert set(tool_names) == {"read_file", "write_file", "edit_file", "glob", "grep", "write_plan_file", "tool_search", "process_list", "process_read", "process_wait", "process_stop"}
 
 
-def test_bash_tool_rejects_even_readonly_command_in_plan_mode(tmp_path: Path) -> None:
-    tool = BashTool()
+def test_run_command_tool_rejects_even_readonly_command_in_plan_mode(tmp_path: Path) -> None:
+    tool = RunCommandTool()
 
     result = __import__("asyncio").run(
         tool.execute(
@@ -39,12 +39,12 @@ def test_bash_tool_rejects_even_readonly_command_in_plan_mode(tmp_path: Path) ->
     )
 
     assert result.ok is False
-    assert result.error_code == "plan_mode_command_rejected"
-    assert result.payload["description"] == "查看当前目录"
+    assert result.error_code == "invalid_arguments"
+    assert "execute" in result.error_message
 
 
-def test_bash_tool_rejects_side_effect_command_in_plan_mode(tmp_path: Path) -> None:
-    tool = BashTool()
+def test_run_command_tool_rejects_side_effect_command_in_plan_mode(tmp_path: Path) -> None:
+    tool = RunCommandTool()
 
     result = __import__("asyncio").run(
         tool.execute(
@@ -54,8 +54,8 @@ def test_bash_tool_rejects_side_effect_command_in_plan_mode(tmp_path: Path) -> N
     )
 
     assert result.ok is False
-    assert result.error_code == "plan_mode_command_rejected"
-    assert result.payload["description"] == "尝试写入文件"
+    assert result.error_code == "invalid_arguments"
+    assert "execute" in result.error_message
 
 
 def test_write_plan_file_tool_only_writes_configured_path(tmp_path: Path) -> None:

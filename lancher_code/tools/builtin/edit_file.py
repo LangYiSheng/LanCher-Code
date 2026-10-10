@@ -4,7 +4,7 @@ from pathlib import Path
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import PathWriteDeniedError, relative_display_path, resolve_writable_path
+from lancher_code.tools.core.common import PathWriteDeniedError, atomic_write_text, relative_display_path, resolve_writable_path
 
 EDIT_FILE_DESCRIPTION = (
     "在文件中按原文做唯一匹配替换，适合局部修改代码或配置。"
@@ -40,7 +40,6 @@ class EditFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            is_concurrency_safe=False,
             allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
@@ -114,7 +113,12 @@ class EditFileTool:
         line_start = cached_content[:match_start].count("\n") + 1
         updated = cached_content.replace(old_text, new_text, 1)
         try:
-            path.write_text(updated, encoding="utf-8")
+            state = context.file_state_cache.get(path)
+            atomic_write_text(path, updated, context, expected_exists=True,
+                              expected_mtime_ns=state.mtime_ns if state is not None else None)
+        except PathWriteDeniedError as exc:
+            return build_tool_error(summary="改文件失败", error_code=exc.reason_code,
+                                    error_message=str(exc), tool_name=self.definition.name)
         except OSError as exc:
             return build_tool_error(
                 summary=f"写入文件失败: {path}",
@@ -174,6 +178,3 @@ def _build_display_lines(old_text: str, new_text: str, *, line_start: int) -> li
     for index, line in enumerate(new_lines):
         lines.append({"text": f"+ {line_start + index}\t{line}", "tone": "success"})
     return lines
-
-
-ReplaceInFileTool = EditFileTool

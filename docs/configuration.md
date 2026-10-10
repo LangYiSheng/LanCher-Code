@@ -94,6 +94,41 @@ default_model: deepseek/chat
 
 旧 `runtime.permission_mode` 仍可读取：`plan` 映射到计划阶段与标准权限，其他值映射到执行阶段与同名权限。新字段优先，保存时写入新字段。工具记录与思考显示开关独立；关闭思考显示不会隐藏工具活动。
 
+### `execution`：资源额度与已知命令约定
+
+这一组配置控制本地工具调度与进程托管，不影响供应商请求超时。设置页保存其他域时会保留它；修改后重启应用使用新执行配置。
+
+| 配置项 | 默认值 | 作用 |
+|---|---|---|
+| `limits.max_concurrency` | `8` | 普通工具同时持有的执行额度；后台进程不长期占用 |
+| `limits.max_processes` | `32` | 应用托管的活动进程数量上限 |
+| `limits.max_processes_per_session` | `8` | 单 Session 活动进程上限，不能高于全局上限 |
+| `limits.output_limit_bytes` | `104857600` | 每个进程输出 JSONL 的字节额度，含记录元信息；到期停止进程 |
+| `limits.max_read_chars` | `16000` | 单次输出读取的字符预算 |
+| `limits.stop_grace_seconds` | `1.0` | 支持温和中断时的收尾窗口 |
+| `limits.drain_timeout_seconds` | `3.0` | 输出排空等待期限 |
+
+数值必须为正，未知项会报错。进程启动的 `yield_ms` 是本次等待时间，`max_runtime_ms` 是真实运行期限；它们由每次命令参数明确给出，不能与上述额度混淆。
+
+未知命令保守独占项目。下面的例子只适用于你确认脚本写入范围、端口与资源的情况：
+
+```yaml
+execution:
+  command_profiles:
+    - name: 开发服务
+      command_match: npm run dev
+      resources:
+        - {kind: path, key: .cache, mode: exclusive, recursive: true}
+        - {kind: external, key: 'port:5173', mode: exclusive}
+      readiness: {kind: tcp, host: 127.0.0.1, port: 5173, timeout_ms: 30000}
+```
+
+匹配按列表顺序取首次命中，支持 glob；建议精确匹配已知脚本。每个 profile 必须明确填写 `resources`，省略或拼错配置字段会报错。资源种类为 `path`、`project`、`process`、`external`，模式为 `shared` 或 `exclusive`；`recursive` 只适用于路径，路径 key 相对项目根解析。`resources: []` 明确表示用户约定无调度资源需求，不能用它假装未知命令安全。
+
+系统输出每次读取 4096 字节，分别增量解码；任务窗口显示缓冲固定保留约 48,000 个最近字符，不提供空配置项承诺无限缓冲。
+
+就绪探针只支持本机回环 TCP 地址，检测端口能否建立连接。它证明监听存在，不保证响应内容或应用健康；未配置探针时就绪状态为未知，探测超时也不等同于进程退出。配置是协作约定，不限制 Shell 真正能访问哪些路径。具体租约与后台语义见 [工具执行](workflows/tool-execution.md)。
+
 ### 环境变量展开
 
 - 供应商与模型的 `base_url`、`api_key`，以及模型 `model_name` 在生成有效连接时使用 `os.path.expandvars` 展开（`${NAME}` 或 `$NAME` 形式）。配置目录保留变量原文；保存设置不会把密钥变量替换成环境变量值，也不会把继承值写成模型覆盖。
@@ -106,7 +141,7 @@ default_model: deepseek/chat
 
 ```yaml
 rules:
-  - match: "Bash(git *)"
+  - match: "RunCommand(git *)"
     result: allow
   - match: "WriteFile(.env)"
     result: deny
@@ -120,7 +155,7 @@ rules:
 
 | 工具 | 规则写法 | 匹配对象 |
 |---|---|---|
-| `bash` | `Bash(<命令>)` | 规范化后的命令文本（小写、折叠空白），支持 glob |
+| `run_command` | `RunCommand(<命令>)` | exact 保留完整命令的大小写与内部空白；glob / legacy 按声明方式匹配 |
 | `read_file` | `ReadFile(<路径>)` | 项目相对路径（正斜杠、小写） |
 | `write_file` | `WriteFile(<路径>)` | 同上 |
 | `edit_file` | `EditFile(<路径>)` | 同上 |

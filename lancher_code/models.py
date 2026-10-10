@@ -6,8 +6,14 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 from uuid import uuid4
+
+from lancher_code.execution.contracts import ExecutionConfig
+
+if TYPE_CHECKING:
+    from lancher_code.execution.runtime import ExecutionRuntime
+    from lancher_code.execution.scheduler import ResourceLease
 
 ProviderProtocol = Literal["openai", "claude"]
 MessageRole = Literal["system", "user", "assistant"]
@@ -168,6 +174,7 @@ class AppConfig:
     providers: dict[str, ProviderDefinition] = field(default_factory=dict)
     default_model: str = ""
     legacy_format: bool = False
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
 
     def __post_init__(self) -> None:
         if self.providers or self.provider is None:
@@ -249,7 +256,6 @@ class ToolDefinition:
     description: str
     params_model: dict[str, object]
     category: ToolCategory
-    is_concurrency_safe: bool = True
     is_system_tool: bool = False
     should_defer: bool = False
     allowed_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass")
@@ -261,7 +267,6 @@ class ToolDefinition:
         description: str,
         params_model: dict[str, object] | None = None,
         category: ToolCategory = "read",
-        is_concurrency_safe: bool = True,
         is_system_tool: bool = False,
         should_defer: bool = False,
         allowed_modes: tuple[RuntimeMode, ...] = ("default", "plan", "acceptEdits", "bypass"),
@@ -272,7 +277,6 @@ class ToolDefinition:
         self.description = description
         self.params_model = params_model or input_schema or {}
         self.category = category
-        self.is_concurrency_safe = is_concurrency_safe
         self.is_system_tool = is_system_tool
         self.should_defer = should_defer
         self.allowed_modes = allowed_modes
@@ -291,7 +295,9 @@ def tool_available_in_phase(tool: ToolDefinition, work_phase: WorkPhase) -> bool
         return True
     if work_phase == "execute":
         return any(mode in tool.allowed_modes for mode in ("default", "acceptEdits", "bypass"))
-    if tool.name == "bash":
+    if tool.name in {"process_list", "process_read", "process_wait", "process_stop"}:
+        return True
+    if tool.name in {"run_command", "process_write", "process_background"}:
         return False
     # MCP adapter 仅在服务端明确 readOnlyHint=true 时标记 read；缺省为 command。
     return tool.category == "read" and "plan" in tool.allowed_modes
@@ -326,6 +332,11 @@ class ToolContext:
     file_state_cache: "FileStateCache | None" = None
     work_phase: WorkPhase | None = None
     permission_policy: PermissionPolicy | None = None
+    execution_runtime: "ExecutionRuntime | None" = None
+    turn_id: str | None = None
+    invocation_id: str | None = None
+    generation: int = 0
+    resource_lease: "ResourceLease | None" = None
 
     def __post_init__(self) -> None:
         self.work_phase, self.permission_policy = resolve_runtime_axes(self.mode, self.work_phase, self.permission_policy)
@@ -551,6 +562,9 @@ class SessionState:
     pending_plan_exit_notice: bool = False
     pending_plan_entry_kind: PlanModeEntryKind | None = None
     context_management: ContextManagementState = field(default_factory=ContextManagementState)
+    execution: dict[str, object] = field(default_factory=lambda: {
+        "processes": {}, "invocations": {}, "inbox": [],
+    })
 
     def snapshot(self) -> list[SessionMessage]:
         return list(self.messages)

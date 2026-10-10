@@ -11,6 +11,7 @@ from lancher_code.config import (
     resolve_config_bootstrap_state,
 )
 from lancher_code.errors import ConfigError
+from lancher_code.execution.runtime import ExecutionRuntime
 from lancher_code.model_catalog import resolve_model
 from lancher_code.config_system.paths import get_global_mcp_config_path, get_project_mcp_config_path
 from lancher_code.mcp import MCPClientManager, load_mcp_config
@@ -83,6 +84,7 @@ async def run_app() -> int:
         cwd=cwd,
         timeout_seconds=DEFAULT_TOOL_TIMEOUT_SECONDS,
         permission_engine=permission_engine,
+        execution_runtime=ExecutionRuntime(cwd, config.execution),
     )
     turn_runner = TurnRunner(
         provider,
@@ -107,6 +109,9 @@ async def run_app() -> int:
         return await tui.run()
     finally:
         try:
-            session_controller.close()
+            await turn_runner.shutdown()
         finally:
-            await mcp_manager.close()
+            try:
+                session_controller.close()
+            finally:
+                await mcp_manager.close()

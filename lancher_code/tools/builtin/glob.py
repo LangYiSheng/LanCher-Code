@@ -40,7 +40,6 @@ class GlobTool:
                 "additionalProperties": False,
             },
             category="read",
-            is_concurrency_safe=True,
             allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
@@ -128,6 +127,3 @@ def _truncate_text(text: str) -> str:
     if len(text) <= MODEL_TEXT_CHAR_LIMIT:
         return text
     return text[:MODEL_TEXT_CHAR_LIMIT] + "\n... [结果已截断]"
-
-
-FindFilesTool = GlobTool

@@ -6,10 +6,12 @@ from pathlib import Path
 import json
 
 import pytest
-from lancher_code.models import ChatRequest, StreamEvent, ToolCallChunk
+from lancher_code.models import ChatRequest, StreamEvent, ToolCallChunk, PermissionRequest
 from lancher_code.session import SessionController
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
-from lancher_code.tools.builtin.bash import BashTool, POWERSHELL
+from lancher_code.tools.builtin.command import RunCommandTool
+from lancher_code.execution import processes as process_module
+import os
 from lancher_code.tools.builtin.write_file import WriteFileTool
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
@@ -37,7 +39,7 @@ def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Pat
         permission_storage=permission_storage,
     )
     registry = ToolRegistry()
-    registry.register(BashTool())
+    registry.register(RunCommandTool())
     registry.register(WriteFileTool())
     executor = ToolExecutor(
         registry,
@@ -66,7 +68,7 @@ def _permission_request_responses() -> list[list[StreamEvent]]:
     return [
         [
             StreamEvent(kind="message_start"),
-            StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="bash")),
+            StreamEvent(kind="tool_call_delta", tool_call_chunk=ToolCallChunk(call_index=0, provider_call_id="call-1", name_delta="run_command")),
             StreamEvent(
                 kind="tool_call_delta",
                 tool_call_chunk=ToolCallChunk(
@@ -174,8 +176,8 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
         await pilot.press("m")
         await pilot.pause(0.05)
         assert len(panel._options()) == 4
-        assert "Bash(git status)" in options[2].render().plain
-        assert "Bash(git status)" in options[3].render().plain
+        assert "RunCommand(git status)" in options[2].render().plain
+        assert "RunCommand(git status)" in options[3].render().plain
 
         await pilot.press("tab")
         await pilot.pause(0.05)
@@ -194,6 +196,26 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
 
         assert session.state.messages[-1].status == "complete"
         assert session.state.messages[-1].content == "已改用无需执行命令的策略"
+
+
+@pytest.mark.asyncio
+async def test_process_input_permission_never_offers_permanent_scope(openai_provider_config, ui_config, tmp_path):
+    app, _ = _build_app(FakeProvider([]), openai_provider_config, ui_config, tmp_path)
+    request = PermissionRequest("input-request", "input-call", "process_write", "ProcessWrite", "command", "default",
+                                "发送进程输入", "这可能执行新的命令", "待发送正文", command="npm run build",
+                                metadata={"allow_once_only": True})
+    async with app.run_test(size=(100, 40)) as pilot:
+        await app._request_inline_permission(request)
+        await pilot.pause()
+        panel = app.query_one(InlinePermissionPanel)
+        assert [item.outcome for item in panel.query(PermissionOption)] == ["allow_once", "deny"]
+        await pilot.press("m")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
+        panel.set_compact(True)
+        await pilot.press("m")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1
 
 
 @pytest.mark.asyncio
@@ -257,13 +279,13 @@ async def test_allow_session_resolution_is_persisted_with_automatic_session(
     restored = SessionController(openai_provider_config, cwd=tmp_path)
     try:
         assert restored.resume_session(saved_id) == 1
-        assert restored._permission_storage.rules_for_scope("session")[0].match == "Bash(git status)"
+        assert restored._permission_storage.rules_for_scope("session")[0].match == "RunCommand(git status)"
         assert restored._permission_storage.rules_for_scope("session")[0].match_kind == "exact"
     finally:
         restored.close()
 
 
-@pytest.mark.skipif(not Path(POWERSHELL).is_file(), reason="需要 Windows PowerShell 子进程")
+@pytest.mark.skipif(os.name != "nt", reason="此 UI 收尾测试使用 Windows PowerShell 命令")
 @pytest.mark.asyncio
 async def test_closing_ui_waits_for_running_command_cleanup(openai_provider_config, ui_config, tmp_path, monkeypatch):
     responses = _permission_request_responses()
@@ -272,7 +294,7 @@ async def test_closing_ui_waits_for_running_command_cleanup(openai_provider_conf
     })
     app, _ = _build_app(FakeProvider(responses), openai_provider_config, ui_config, tmp_path)
     app._turn_runner.set_permission_policy("bypass")
-    original_spawn = asyncio.create_subprocess_exec
+    original_spawn = process_module.spawn_backend
     started = asyncio.Event()
     processes = []
 
@@ -282,20 +304,17 @@ async def test_closing_ui_waits_for_running_command_cleanup(openai_provider_conf
         started.set()
         return process
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
+    monkeypatch.setattr(process_module, "spawn_backend", capture_spawn)
     try:
         async with app.run_test() as pilot:
             await _submit_message(app, pilot, "启动命令")
             await asyncio.wait_for(started.wait(), 5)
             assert app._turn_runner.has_active_turn
         assert not app._turn_runner.has_active_turn
-        assert all(process.returncode is not None for process in processes)
-        assert all(process.stdout.at_eof() and process.stderr.at_eof() for process in processes)
+        assert processes
+        for process in processes:
+            assert await asyncio.wait_for(process.wait(), 5) is not None
     finally:
         for process in processes:
-            if process.returncode is None:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-            await asyncio.wait_for(process.communicate(), 5)
+            await process.terminate()
+            await process.close()

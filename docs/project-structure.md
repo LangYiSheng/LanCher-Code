@@ -26,6 +26,7 @@ lancher-code/
 │   ├── models.py                  # 全项目数据模型（dataclass + Literal 类型）
 │   ├── session.py                 # SessionController：会话状态与 transcript 管理
 │   ├── sessions/                  # 路径、事件仓库、状态编解码与服务
+│   ├── execution/                 # 资源调度、调用与进程状态、输出和平台后端
 │   ├── turn_runner.py             # TurnRunner：ReAct 工具循环与事件流
 │   ├── context_management.py      # 上下文治理：Token 估算、结果卸载、摘要压缩
 │   ├── prompting.py               # 提示词构建（system prompt / Plan Mode / 动态提醒）
@@ -45,18 +46,20 @@ lancher-code/
 │   │   ├── openai.py              # OpenAIProvider（/chat/completions 流式）
 │   │   └── factory.py             # create_provider：按 protocol 选择实现
 │   ├── tools/                     # 工具系统
-│   │   ├── __init__.py            # create_default_tool_registry()：注册 8 个内置工具
+│   │   ├── __init__.py            # create_default_tool_registry()：注册 14 个内置工具
 │   │   ├── core/
 │   │   │   ├── base.py            # Tool 协议 + 成功/失败结果构造
 │   │   │   ├── registry.py        # ToolRegistry：注册、列出、延迟工具搜索
 │   │   │   ├── executor.py        # ToolExecutor：权限判定 + 并发/超时执行
+│   │   │   ├── validation.py      # 标准 JSON Schema 参数校验与离线引用
 │   │   │   ├── common.py          # 路径沙箱工具与 SKIP_DIRS 列表
 │   │   │   └── file_state_cache.py# FileStateCache：读/写状态缓存（防盲写）
 │   │   └── builtin/               # 内置工具实现
 │   │       ├── read_file.py       # read_file
 │   │       ├── write_file.py      # write_file
 │   │       ├── edit_file.py       # edit_file
-│   │       ├── bash.py            # bash（Windows PowerShell）
+│   │       ├── command.py         # run_command：启动托管进程
+│   │       ├── process.py         # 六个进程读取与控制工具
 │   │       ├── glob.py            # glob
 │   │       ├── grep.py            # grep
 │   │       ├── write_plan_file.py # write_plan_file（仅 plan 模式）
@@ -73,6 +76,7 @@ lancher-code/
 │       ├── composer.py            # 输入框与斜杠命令补全菜单
 │       ├── message.py             # 消息气泡、思考轨迹、顶部横幅
 │       ├── permission.py          # 内联权限确认面板
+│       ├── tasks.py               # Session 任务列表、增量输出与控制
 │       └── settings.py            # 设置面板（模型 / MCP / 权限规则）
 ├── tests/                         # 测试（pytest，asyncio_mode = auto）
 │   ├── conftest.py                # 共享 fixture（provider 配置、mock http client）
@@ -103,6 +107,7 @@ lancher-code/
     ├── mcp.yaml                   # 项目级 MCP Server 配置
     └── sessions/                  # 首条消息自动创建 UUID Session
         └── <uuid>/                # events.jsonl、meta.json、checkpoint.json
+            ├── processes/         # 进程元信息、输出日志与索引
             ├── blobs/             # 会话内部工具结果等内容
             └── workspace/         # plan.md、tmp/、artifacts/，所有阶段可写
 ```
@@ -158,6 +163,6 @@ lancher-code/
 
 ### `lancher_code/tools/core/executor.py`
 
-- **负责**：执行一批工具调用（权限判定、并发安全分组、超时包装）
+- **负责**：执行一批工具调用（权限复核、资源调度、托管进程和结果排序）
 - **被谁调用**：`turn_runner.py`
 - **会调用谁**：`registry.ToolRegistry`、`permission_engine.PermissionEngine`、具体工具实现

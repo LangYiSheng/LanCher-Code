@@ -119,9 +119,9 @@ class InlinePermissionPanel(VerticalScroll):
                 option = PermissionOption(index, outcome, label, rule)
                 option.display = False
                 yield option
-        if self.request.kind in {"command", "external_tool"}:
+        if len(specs) > 2:
             yield Button("更多授权范围 (M)", id="permission-more", classes="quiet-action")
-        yield Static("↑↓ 选择 · Enter 确认 · Esc 拒绝 · D 详情 · M 范围 · Ctrl+I 草稿", id="permission-help")
+        yield Static("↑↓ 选择 · Enter 确认 · Esc 拒绝 · D 详情" + (" · M 范围" if len(specs) > 2 else "") + " · Ctrl+I 草稿", id="permission-help")
         with Horizontal(id="permission-compact-actions"):
             yield Button("D 详情", id="permission-show-details", classes="quiet-action")
             if len(specs) > 2:
@@ -220,6 +220,8 @@ class InlinePermissionPanel(VerticalScroll):
         self.action_toggle_scopes()
 
     def action_toggle_scopes(self) -> None:
+        if len(_option_specs(self.request)) <= 2:
+            return
         if self.has_class("-compact"):
             if self.request.kind in {"command", "external_tool"}:
                 self._request_screen = PermissionScopesScreen(self.request)
@@ -318,6 +320,8 @@ class PermissionScopesScreen(ModalScreen[PermissionResolutionOutcome | None]):
 def _option_specs(
     request: PermissionRequest,
 ) -> list[tuple[PermissionResolutionOutcome, str, str | None]]:
+    if request.metadata.get("allow_once_only"):
+        return [("allow_once", "仅允许本次", None), ("deny", "拒绝执行", None)]
     if request.kind == "command":
         return [
             ("allow_once", "仅允许本次", None),

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from lancher_code.models import ToolContext
-from lancher_code.tools.builtin.edit_file import ReplaceInFileTool
+from lancher_code.tools.builtin.edit_file import EditFileTool
 from lancher_code.tools.builtin.read_file import ReadFileTool
 
 
@@ -11,7 +11,7 @@ def test_replace_in_file_tool_replaces_unique_match(tmp_path: Path) -> None:
     path = tmp_path / "demo.txt"
     path.write_text("hello world", encoding="utf-8")
     read_tool = ReadFileTool()
-    tool = ReplaceInFileTool()
+    tool = EditFileTool()
     context = ToolContext(cwd=tmp_path, timeout_seconds=1)
 
     read_result = __import__("asyncio").run(read_tool.execute({"path": "demo.txt"}, context))
@@ -35,7 +35,7 @@ def test_replace_in_file_tool_returns_error_for_zero_matches(tmp_path: Path) -> 
     path = tmp_path / "demo.txt"
     path.write_text("hello world", encoding="utf-8")
     read_tool = ReadFileTool()
-    tool = ReplaceInFileTool()
+    tool = EditFileTool()
     context = ToolContext(cwd=tmp_path, timeout_seconds=1)
     __import__("asyncio").run(read_tool.execute({"path": "demo.txt"}, context))
 
@@ -55,7 +55,7 @@ def test_replace_in_file_tool_returns_error_for_multiple_matches(tmp_path: Path)
     path = tmp_path / "demo.txt"
     path.write_text("hello\nhello", encoding="utf-8")
     read_tool = ReadFileTool()
-    tool = ReplaceInFileTool()
+    tool = EditFileTool()
     context = ToolContext(cwd=tmp_path, timeout_seconds=1)
     __import__("asyncio").run(read_tool.execute({"path": "demo.txt"}, context))
 

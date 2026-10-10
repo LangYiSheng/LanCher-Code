@@ -49,13 +49,13 @@ def test_settings_service_saves_layers_and_hot_replaces_permissions(tmp_path: Pa
     snapshot = service.load()
     snapshot.config.providers["legacy"].models["default"].model_name = "gpt-updated"
     snapshot.global_mcp["demo"] = {"type": "http", "url": "https://example.test/mcp", "enabled": True}
-    snapshot.project_rules.append(PermissionRule("Bash(git *)", "allow", "project"))
+    snapshot.project_rules.append(PermissionRule("RunCommand(git *)", "allow", "project"))
 
     service.save(snapshot)
 
     assert load_config(service.config_path).provider.model == "gpt-updated"
     assert yaml.safe_load(service.global_mcp_path.read_text(encoding="utf-8"))["mcp_servers"]["demo"]["type"] == "http"
-    assert service.permission_storage.rules_for_scope("project")[0].match == "Bash(git *)"
+    assert service.permission_storage.rules_for_scope("project")[0].match == "RunCommand(git *)"
 
 
 def _settings_app(service: SettingsService, **kwargs) -> App:
@@ -91,7 +91,7 @@ def test_domain_saves_do_not_touch_other_files_and_preserve_latest_config(tmp_pa
     service.save_mcp("project", {"demo": {"type": "http", "url": "https://example.test"}})
     assert service.config_path.read_bytes() == before
     assert not service.global_mcp_path.exists()
-    service.save_rules("project", [PermissionRule("Bash(git status)", "allow", "project", match_kind="exact")])
+    service.save_rules("project", [PermissionRule("RunCommand(git status)", "allow", "project", match_kind="exact")])
     persisted = yaml.safe_load(service.permission_storage.project_rules_path.read_text(encoding="utf-8"))
     assert persisted["rules"][0]["match_kind"] == "exact"
     assert service.permission_storage.rules_for_scope("project")[0].match_kind == "exact"
@@ -273,7 +273,7 @@ async def test_mcp_save_restart_cumulative_and_no_implicit_other_domain_save(tmp
 @pytest.mark.asyncio
 async def test_permission_editor_preserves_matching_semantics_and_order(tmp_path) -> None:
     service = _service(tmp_path)
-    service.save_rules("project", [PermissionRule("Bash(git *)", "allow", "project", match_kind="glob"), PermissionRule("Bash(git status)", "deny", "project", match_kind="exact")])
+    service.save_rules("project", [PermissionRule("RunCommand(git *)", "allow", "project", match_kind="glob"), PermissionRule("RunCommand(git status)", "deny", "project", match_kind="exact")])
     app = _settings_app(service)
     async with app.run_test(size=(100, 40)) as pilot:
         screen = app.screen

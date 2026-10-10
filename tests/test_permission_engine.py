@@ -8,7 +8,7 @@ from lancher_code.models import (
     PermissionResolution, PermissionRule, ToolCall, ToolContext, ToolDefinition, ToolPermissionMetadata,
 )
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
-from lancher_code.tools.builtin.bash import BashTool
+from lancher_code.tools.builtin.command import RunCommandTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
 from lancher_code.tools.builtin.write_plan_file import WritePlanFileTool
 
@@ -36,8 +36,8 @@ def test_blacklisted_command_is_denied_even_in_bypass_mode(tmp_path: Path) -> No
     engine = PermissionEngine(PermissionStorage())
 
     check = engine.evaluate(
-        call=_call("bash", {"description": "危险删除", "command": "Remove-Item -Recurse demo"}),
-        tool=BashTool().definition,
+        call=_call("run_command", {"description": "危险删除", "command": "Remove-Item -Recurse demo"}),
+        tool=RunCommandTool().definition,
         context=_context(tmp_path, mode="bypass"),
     )
 
@@ -48,19 +48,19 @@ def test_blacklisted_command_is_denied_even_in_bypass_mode(tmp_path: Path) -> No
 def test_project_rule_overrides_user_rule(tmp_path: Path) -> None:
     user_rules = tmp_path / "home" / ".lancher" / "permissions.yaml"
     user_rules.parent.mkdir(parents=True, exist_ok=True)
-    user_rules.write_text("rules:\n  - match: \"Bash(git *)\"\n    result: allow\n", encoding="utf-8")
+    user_rules.write_text("rules:\n  - match: \"RunCommand(git *)\"\n    result: allow\n", encoding="utf-8")
 
     project_rules = tmp_path / ".lancher" / "permissions.yaml"
     project_rules.parent.mkdir(parents=True, exist_ok=True)
-    project_rules.write_text("rules:\n  - match: \"Bash(git *)\"\n    result: deny\n", encoding="utf-8")
+    project_rules.write_text("rules:\n  - match: \"RunCommand(git *)\"\n    result: deny\n", encoding="utf-8")
 
     engine = PermissionEngine(
         PermissionStorage(project_rules_path=project_rules, user_rules_path=user_rules)
     )
 
     check = engine.evaluate(
-        call=_call("bash", {"description": "查看状态", "command": "git status"}),
-        tool=BashTool().definition,
+        call=_call("run_command", {"description": "查看状态", "command": "git status"}),
+        tool=RunCommandTool().definition,
         context=_context(tmp_path),
     )
 
@@ -71,15 +71,15 @@ def test_project_rule_overrides_user_rule(tmp_path: Path) -> None:
 def test_session_rule_overrides_project_rule(tmp_path: Path) -> None:
     project_rules = tmp_path / ".lancher" / "permissions.yaml"
     project_rules.parent.mkdir(parents=True, exist_ok=True)
-    project_rules.write_text("rules:\n  - match: \"Bash(git *)\"\n    result: deny\n", encoding="utf-8")
+    project_rules.write_text("rules:\n  - match: \"RunCommand(git *)\"\n    result: deny\n", encoding="utf-8")
 
     storage = PermissionStorage(project_rules_path=project_rules)
-    storage.add_session_rule("Bash(git *)", "allow")
+    storage.add_session_rule("RunCommand(git *)", "allow")
     engine = PermissionEngine(storage)
 
     check = engine.evaluate(
-        call=_call("bash", {"description": "查看状态", "command": "git status"}),
-        tool=BashTool().definition,
+        call=_call("run_command", {"description": "查看状态", "command": "git status"}),
+        tool=RunCommandTool().definition,
         context=_context(tmp_path),
     )
 
@@ -92,7 +92,7 @@ def test_replace_session_rules_normalizes_scope_and_notifies_without_touching_pe
     project_rules = tmp_path / ".lancher" / "permissions.yaml"
     project_rules.parent.mkdir(parents=True)
     project_rules.write_text(
-        'rules:\n  - match: "Bash(git *)"\n    result: deny\n',
+        'rules:\n  - match: "RunCommand(git *)"\n    result: deny\n',
         encoding="utf-8",
     )
     storage = PermissionStorage(project_rules_path=project_rules)
@@ -100,14 +100,14 @@ def test_replace_session_rules_normalizes_scope_and_notifies_without_touching_pe
     storage.subscribe_session_rules_changed(lambda: notifications.append(True))
 
     storage.replace_session_rules(
-        [PermissionRule(match="  Bash(pnpm *)  ", result="allow", scope="project")]
+        [PermissionRule(match="  RunCommand(pnpm *)  ", result="allow", scope="project")]
     )
 
     assert storage.rules_for_scope("session") == [
-        PermissionRule(match="Bash(pnpm *)", result="allow", scope="session")
+        PermissionRule(match="RunCommand(pnpm *)", result="allow", scope="session")
     ]
     assert storage.rules_for_scope("project") == [
-        PermissionRule(match="Bash(git *)", result="deny", scope="project")
+        PermissionRule(match="RunCommand(git *)", result="deny", scope="project")
     ]
     assert notifications == [True]
 
@@ -132,7 +132,7 @@ def test_default_mode_asks_for_file_write(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("tool_name", "phase", "policy", "arguments", "kind"),
     [
-        ("bash", "execute", "acceptEdits", {"command": "git status"}, "command"),
+        ("run_command", "execute", "acceptEdits", {"command": "git status"}, "command"),
         ("write_file", "execute", "default", {"path": "demo.txt", "content": "hello"}, "file_edit"),
         ("mcp__github__create_issue", "execute", "acceptEdits", {"title": "问题"}, "external_tool"),
     ],
@@ -147,7 +147,7 @@ def test_permission_request_metadata_uses_tool_context_not_process_cwd(
     monkeypatch.chdir(process_cwd)
     external_name = "mcp__github__create_issue"
     definitions = {
-        "bash": BashTool().definition,
+        "run_command": RunCommandTool().definition,
         "write_file": WriteFileTool().definition,
         "write_plan_file": WritePlanFileTool().definition,
         external_name: ToolDefinition(
@@ -198,8 +198,8 @@ def test_allow_project_resolution_persists_rule_to_project_file(tmp_path: Path) 
     engine = PermissionEngine(storage)
 
     check = engine.evaluate(
-        call=_call("bash", {"description": "查看状态", "command": "git status"}),
-        tool=BashTool().definition,
+        call=_call("run_command", {"description": "查看状态", "command": "git status"}),
+        tool=RunCommandTool().definition,
         context=_context(tmp_path),
     )
     assert check.request is not None
@@ -213,20 +213,84 @@ def test_allow_project_resolution_persists_rule_to_project_file(tmp_path: Path) 
     )
 
     assert project_rules.exists()
-    assert "Bash(git status)" in project_rules.read_text(encoding="utf-8")
+    assert "RunCommand(git status)" in project_rules.read_text(encoding="utf-8")
     assert "match_kind: exact" in project_rules.read_text(encoding="utf-8")
 
 
 def test_rule_glob_matches_command_prefix(tmp_path: Path) -> None:
     project_rules = tmp_path / ".lancher" / "permissions.yaml"
     project_rules.parent.mkdir(parents=True, exist_ok=True)
-    project_rules.write_text("rules:\n  - match: \"Bash(git *)\"\n    result: allow\n", encoding="utf-8")
+    project_rules.write_text("rules:\n  - match: \"RunCommand(git *)\"\n    result: allow\n", encoding="utf-8")
     engine = PermissionEngine(PermissionStorage(project_rules_path=project_rules))
 
     check = engine.evaluate(
-        call=_call("bash", {"description": "查看差异", "command": "git diff --stat"}),
-        tool=BashTool().definition,
+        call=_call("run_command", {"description": "查看差异", "command": "git diff --stat"}),
+        tool=RunCommandTool().definition,
         context=_context(tmp_path),
     )
 
     assert check.decision == "allow"
+
+
+@pytest.mark.parametrize("name", ["process_write", "process_background"])
+@pytest.mark.parametrize("mode", ["default", "acceptEdits"])
+def test_process_input_and_transfer_need_once_only_approval(tmp_path: Path, name: str, mode: str) -> None:
+    from lancher_code.tools.builtin.process import ProcessTool
+
+    storage = PermissionStorage()
+    storage.add_session_rule(name, "allow")
+    check = PermissionEngine(storage).evaluate(
+        call=_call(name, {"process_id": "a" * 32, "text": "Write-Output hello\n"}),
+        tool=ProcessTool(name).definition, context=_context(tmp_path, mode=mode),
+    )
+    assert check.decision == "ask" and check.request is not None
+    assert check.request.session_rule is None and check.request.project_rule is None
+    assert check.request.metadata["allow_once_only"] is True
+    assert "Write-Output" in check.request.details
+
+
+@pytest.mark.parametrize("name", ["process_write", "process_background"])
+def test_explicit_process_deny_cannot_be_bypassed(tmp_path: Path, name: str) -> None:
+    from lancher_code.tools.builtin.process import ProcessTool
+
+    storage = PermissionStorage()
+    storage.add_session_rule(name, "deny")
+    check = PermissionEngine(storage).evaluate(
+        call=_call(name, {"process_id": "a" * 32, "text": "echo hello\n"}),
+        tool=ProcessTool(name).definition, context=_context(tmp_path, mode="bypass"),
+    )
+    assert check.decision == "deny"
+
+
+@pytest.mark.parametrize("phase", ["discuss", "plan", "execute"])
+@pytest.mark.parametrize("name", ["process_list", "process_read", "process_wait", "process_stop"])
+def test_observing_and_stopping_owned_processes_available_in_all_phases(tmp_path: Path, name: str, phase: str) -> None:
+    from lancher_code.tools.builtin.process import ProcessTool
+
+    check = PermissionEngine().evaluate(
+        call=_call(name, {"process_id": "a" * 32}), tool=ProcessTool(name).definition,
+        context=ToolContext(cwd=tmp_path, timeout_seconds=1, work_phase=phase),
+    )
+    assert check.decision == "allow"
+
+
+@pytest.mark.parametrize("phase", ["discuss", "plan"])
+@pytest.mark.parametrize("name", ["process_write", "process_background"])
+def test_process_side_effects_require_execution_phase(tmp_path: Path, name: str, phase: str) -> None:
+    from lancher_code.tools.builtin.process import ProcessTool
+
+    check = PermissionEngine().evaluate(
+        call=_call(name, {"process_id": "a" * 32, "text": "hello\n"}), tool=ProcessTool(name).definition,
+        context=ToolContext(cwd=tmp_path, timeout_seconds=1, work_phase=phase, permission_policy="bypass"),
+    )
+    assert check.decision == "deny" and check.reason_code == "phase_disallowed"
+
+
+def test_process_input_cannot_bypass_command_blacklist(tmp_path: Path) -> None:
+    from lancher_code.tools.builtin.process import ProcessTool
+
+    check = PermissionEngine().evaluate(
+        call=_call("process_write", {"process_id": "a" * 32, "text": "echo ready\nRemove-Item target\n"}),
+        tool=ProcessTool("process_write").definition, context=_context(tmp_path, mode="bypass"),
+    )
+    assert check.decision == "deny" and check.reason_code == "permission_blacklist_denied"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,11 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
             "unknown_tool_streak_limit": config.runtime.unknown_tool_streak_limit,
             "work_phase": config.runtime.work_phase,
             "permission_policy": config.runtime.permission_policy,
+        },
+        "execution": {
+            "limits": asdict(config.execution.limits),
+            "command_profiles": [dict(asdict(profile), resources=[asdict(claim) for claim in profile.resources])
+                                 for profile in config.execution.command_profiles],
         },
     }
 

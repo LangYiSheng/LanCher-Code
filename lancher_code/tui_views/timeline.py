@@ -116,20 +116,22 @@ def _thinking_display_parts(entries: list[TraceEntry]) -> tuple[str, str]:
 
 
 TOOL_LABELS = {
-    "read_file": ("▤", "读取文件"), "find_files": ("⌕", "查找文件"),
-    "search_code": ("⌕", "搜索代码"), "tool_search": ("⌕", "查找工具"),
-    "write_file": ("✎", "写入文件"), "replace_in_file": ("✎", "修改文件"),
-    "write_plan_file": ("✎", "保存计划"), "bash": ("›_", "运行命令"),
+    "read_file": ("▤", "读取文件"), "tool_search": ("⌕", "查找工具"),
+    "write_file": ("✎", "写入文件"),
+    "write_plan_file": ("✎", "保存计划"),
     "run_command": ("›_", "运行命令"),
+    "process_list": ("▤", "进程列表"), "process_read": ("▤", "读取输出"),
+    "process_wait": ("◷", "等待进程"), "process_write": ("›_", "进程输入"),
+    "process_stop": ("■", "停止进程"), "process_background": ("↗", "转入后台"),
     "glob": ("⌕", "查找文件"), "grep": ("⌕", "搜索代码"), "edit_file": ("✎", "修改文件"),
 }
 STATE_LABELS = {
     "queued": "等待执行", "running": "执行中", "awaiting_permission": "待批准",
     "complete": "✓ 完成", "error": "× 失败", "cancelled": "已停止", "skipped": "已跳过",
-    "not_executed": "未执行",
+    "not_executed": "未执行", "unknown": "结果未知",
 }
 ACTIVE_STATES = {"queued", "running", "awaiting_permission"}
-ISSUE_STATES = {"error", "cancelled", "skipped", "awaiting_permission", "not_executed"}
+ISSUE_STATES = {"error", "cancelled", "skipped", "awaiting_permission", "not_executed", "unknown"}
 
 
 def call_state(call: TraceEntry, result: TraceEntry | None, status: str) -> str:
@@ -292,11 +294,11 @@ class ToolActivityWidget(TraceSection):
             executed = sum(
                 widget.result is not None
                 and (widget.result.metadata.get("started") is True
-                     or ("started" not in widget.result.metadata and widget.state in {"complete", "error"}))
+                     or ("started" not in widget.result.metadata and widget.state in {"complete", "error", "unknown"}))
                 for widget in self._calls.values()
             )
             labels.append(f"已执行 {executed} 个工具")
-        for state in ("error", "not_executed", "cancelled", "skipped"):
+        for state in ("error", "unknown", "not_executed", "cancelled", "skipped"):
             count = states.count(state)
             if count:
                 labels.append(f"{count} 项{STATE_LABELS[state].removeprefix('× ')}")

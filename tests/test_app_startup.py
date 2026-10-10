@@ -45,6 +45,9 @@ class _FakeTurnRunner:
     def configure_models(self, config) -> None:
         self.model_config = config
 
+    async def shutdown(self) -> None:
+        self.closed = True
+
 
 def _bootstrap_state(tmp_path: Path, *, needs_setup: bool, legacy_exists: bool = False) -> ConfigBootstrapState:
     config_path = (tmp_path / "home" / ".lancher" / "lancher.yaml").resolve()

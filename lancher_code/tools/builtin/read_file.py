@@ -43,7 +43,6 @@ class ReadFileTool:
                 "additionalProperties": False,
             },
             category="read",
-            is_concurrency_safe=True,
             allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 

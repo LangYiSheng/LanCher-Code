@@ -57,10 +57,12 @@ load_mcp_config(cwd) 合并全局+项目配置
 |---|---|
 | 可见名 | `mcp__<server>__<tool>` |
 | 分类 | 远程标注 `readOnlyHint` → read，否则 command |
-| 并发安全 | 只读工具并发安全 |
+| 资源调度 | 未知 MCP 副作用保守项目独占；readOnlyHint 影响阶段可见性，不作为并发安全证明 |
 | 权限 | `source="external"`，规则键为可见名；讨论／计划仅接纳服务器明确声明 `readOnlyHint=true` 的工具，再按独立审批策略处理。声明不等于系统隔离保证；规则与 bypass 不能越过阶段限制 |
 
 调用通过 `MCPServerConnection.call_tool()` 转发；返回内容只保留 `TextContent`，其他块类型标记 `[已忽略非文本 MCP 内容: <类型>]`。
+
+外部写操作已经开始后，取消本地等待、超时或运输故障不能证明远端失败或回滚。结果标为 `mcp_outcome_unknown`，保留未知状态并禁止自动重试；用户应先检查远端真实状态。审批或排队期间取消则明确未执行。服务器主动返回 `isError` 是可确认的远端失败，与运输未知结果分开表示。
 
 ## 连接生命周期（`MCPServerConnection`）
 

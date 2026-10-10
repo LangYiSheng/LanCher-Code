@@ -85,7 +85,7 @@ run_user_turn(text)
 
 ## 事件流（TurnEvent）
 
-`TurnEvent`（定义在 `models.py`）是 TUI 与 TurnRunner 之间的唯一通信协议，`kind` 包括：
+`TurnEvent`（定义在 `models.py`）是当前轮次的界面事件协议；任务窗口另通过 runner facade 查询并控制所属 Session 的进程，`kind` 包括：
 
 主要包括 `user_message_created`、`assistant_message_started`、`assistant_text_delta`、`tool_call_started`、`tool_result_received`、`usage_updated`、`progress_updated`、`phase_changed`、`policy_changed`、`permission_request_created`、`permission_request_resolved`、`permission_request_closed`、`pending_input_changed`、`steering_applied`、`assistant_message_completed`、`turn_completed`、`turn_cancelled`、`turn_failed`。
 
@@ -93,7 +93,8 @@ run_user_turn(text)
 
 ## 关键设计
 
-- **取消语义**：`CancellationToken`（`asyncio.Event`）贯穿请求与工具执行；bash 工具在等待子进程时同时监听该令牌，取消即 `kill` 子进程。取消或失败会暂停队列；消费方关闭事件流也回收后台任务与审批 Future。
+- **取消语义**：取消令牌与 Session generation 贯穿审批、资源排队和执行；停止本轮会收尾本轮进程，保留明确交给 Session 的后台进程。取消或失败暂停队列；应用退出通过执行 Runtime 清理所有托管资源。
+- **停止范围**：`stop_session()` 等到本轮及会话后台全部回收；期间拒绝新轮次与文件执行。用户实际提交的进程输入由独立 Runtime 控制任务持有，关闭详情页不撤销输入。
 - **权限挂起**：工具需要确认时，`_request_permission()` 创建 Future 并发送 `permission_request_created`；UI 挂载面板后继续消费事件，用户决议按请求 ID 回传。面板通过 closed 事件移除，过期请求无效。
 - **补充边界**：当前响应结束或正在运行的并发工具组结束后生效；后续工具补齐 `steering_superseded` 结果而不执行。撤销旧审批使用独立 superseded 决议，不写规则，也不伪装为用户拒绝。
 - **计划快照**：只有本任务成功调用 `write_plan_file` 且计划回合成功结束才 ready；新计划开始即失效旧版本。执行用会话内冻结正文，磁盘中的旧计划文件不能成为已确认计划。

@@ -9,7 +9,7 @@ import pytest
 from lancher_code.models import ToolCall, ToolContext, ToolDefinition, ToolPermissionMetadata
 from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.tools import create_default_tool_registry
-from lancher_code.tools.builtin.bash import BashTool
+from lancher_code.tools.builtin.command import RunCommandTool
 from lancher_code.tools.builtin.edit_file import EditFileTool
 from lancher_code.tools.builtin.glob import GlobTool
 from lancher_code.tools.builtin.grep import GrepTool
@@ -131,7 +131,7 @@ def test_shell_and_external_tool_do_not_inherit_workspace_approval(tmp_path):
         permission=ToolPermissionMetadata(source="external", rule_key="mcp__demo__write", display_name="MCP 写入"),
     )
     for tool, arguments in (
-        (BashTool().definition, {"description": "打印", "command": "Write-Output hello"}),
+        (RunCommandTool().definition, {"description": "打印", "command": "Write-Output hello"}),
         (external, {"path": str(context.session_workspace / "remote.txt")}),
     ):
         assert PermissionEngine().evaluate(call=_call(tool.name, arguments), tool=tool, context=context).decision == "ask"

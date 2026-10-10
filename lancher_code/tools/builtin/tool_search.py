@@ -32,7 +32,6 @@ class ToolSearchTool:
                 "additionalProperties": False,
             },
             category="read",
-            is_concurrency_safe=True,
             is_system_tool=True,
         )
 

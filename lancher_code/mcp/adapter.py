@@ -23,7 +23,6 @@ class MCPToolAdapter:
             description=remote.description or f"来自 MCP Server {server_name} 的工具 {remote.name}",
             params_model=dict(schema or {"type": "object", "properties": {}}),
             category="read" if read_only else "command",
-            is_concurrency_safe=read_only,
             is_system_tool=False,
             should_defer=True,
             permission=ToolPermissionMetadata(
@@ -48,12 +47,16 @@ class MCPToolAdapter:
                 "event=mcp_tool_call_failed server=%s tool=%s",
                 self._server_name, self._remote_name,
             )
+            unknown = self.definition.category != "read"
+            message = (f"MCP 工具 {self._server_name}/{self._remote_name} 连接中断，远端结果无法确认。"
+                       "操作可能已经发生，请先查询实际状态，再决定是否重试。" if unknown else
+                       f"MCP 工具 {self._server_name}/{self._remote_name} 调用失败或连接已断开。")
             return ToolExecutionResult(
                 call_id="", tool_name=self.definition.name,
-                content=f"MCP 工具 {self._server_name}/{self._remote_name} 调用失败或连接已断开。",
-                is_error=True, summary="MCP 工具调用失败", error_code="mcp_tool_error",
-                error_message="MCP 工具调用失败",
-                metadata={"server": self._server_name, "remote_tool": self._remote_name},
+                content=message, is_error=True, summary="远端结果未知" if unknown else "MCP 工具调用失败",
+                error_code="mcp_outcome_unknown" if unknown else "mcp_tool_error", error_message=message,
+                metadata={"server": self._server_name, "remote_tool": self._remote_name,
+                          "outcome_unknown": unknown, "automatic_retry": False},
             )
         content, block_types = _extract_content(result.content)
         is_error = bool(result.isError)

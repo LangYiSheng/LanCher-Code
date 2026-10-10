@@ -9,7 +9,7 @@ def complete(text, **kwargs):
 
 def test_root_only_has_commands_and_supports_chinese_intent():
     rows = complete("/")
-    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "model", "permissions", "compact", "settings", "status", "exit"]
+    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "tasks", "model", "permissions", "compact", "settings", "status", "exit"]
     assert all("<" not in r.display and "[" not in r.display for r in rows)
     assert complete("/切换对话")[0].apply("/切换对话") == "/session "
     assert create_default_slash_command_registry().parse_submission("/mode plan") is None
@@ -18,7 +18,7 @@ def test_root_only_has_commands_and_supports_chinese_intent():
 @pytest.mark.parametrize("text", ["/session", "/session "])
 def test_exact_parent_shows_next_level(text):
     rows = complete(text)
-    assert [r.display for r in rows] == ["new", "list", "resume", "rename", "archive", "remove"]
+    assert [r.display for r in rows] == ["new", "list", "stop", "resume", "rename", "archive", "remove"]
     assert rows[0].apply(text) == "/session new"
 
 
@@ -58,6 +58,8 @@ def test_settings_and_policy_values_are_discoverable():
     ("session", "save name force"), ("session", "rename old"), ("session", "list extra"),
     ("session", "resume uuid --force"), ("session", "new extra"), ("session", "archive"),
     ("session", "remove uuid extra"),
+    ("tasks", "unknown"), ("tasks", "stop"), ("tasks", "list extra"),
+    ("tasks", "show uuid extra"), ("session", "stop uuid"),
     ("settings", "theme blue"), ("settings", "theme"), ("settings", "open extra"),
     ("model", "one two"), ("status", "extra"), ("mode", "plan"),
 ])
@@ -76,3 +78,13 @@ def test_session_title_preserves_spaces():
     match = registry.parse_submission('/session rename uuid 新标题  保留空格')
     assert match.arguments_text.split(maxsplit=2)[2] == "新标题  保留空格"
     registry.validate("session", match.arguments_text)
+
+
+def test_process_commands_have_discoverable_scope_and_full_ids():
+    process_id = "12345678123442348123456781234567"
+    rows = complete("/tasks show 123", process_choices=((process_id, "运行中 · 开发服务器"),))
+    assert rows[0].apply("/tasks show 123") == f"/tasks show {process_id}"
+    assert [row.display for row in complete("/tasks ")] == ["list", "show", "read", "stop", "background"]
+    assert "后台进程" in create_default_slash_command_registry().hint("/session stop")
+    for arguments in ("", "list", f"read {process_id}", f"background {process_id}"):
+        create_default_slash_command_registry().validate("tasks", arguments)

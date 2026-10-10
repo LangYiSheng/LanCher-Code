@@ -75,10 +75,12 @@ sequenceDiagram
 ### 4. 工具执行（`ToolExecutor.execute_calls`）
 
 - 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、阶段不可用（`phase_disallowed`）。讨论／计划禁止源码写入与通用 Shell，但当前 Session workspace 的文件读写已批准
-- 并发安全工具批量并行，非安全工具串行
+- 参数复制冻结，按标准 JSON Schema 校验；离线解析局部与内嵌引用，无效参数或 Schema 在审批与资源申请前失败
+- 按资源声明判断冲突，无冲突工具并行，同资源操作按请求顺序执行
 - 每个调用：`PermissionEngine.evaluate()` → deny 直接返回错误；ask 通过非阻塞内联审批面板等待结果
-- 每项启动、等待批准和完成时立即通知界面；安全工具可以同时显示执行中，先完成的调用立即显示结果，不等待整组最慢的工具
-- 统一 `asyncio.wait_for` 超时（默认 10 秒），异常归一化为 `ToolExecutionResult(is_error=True)`
+- 每项启动、等待批准和完成时立即通知界面；独立工具可以同时显示执行中，先完成的调用立即显示结果，不等待整组最慢的工具
+- 普通工具有限时执行；命令的 `yield_ms`、`process_wait.timeout_ms` 只限制本次等待，`max_runtime_ms` 才限制真实进程运行期限
+- 管理入口 stop/read/list/background 不占普通并发额度；资源锁与 FIFO 仍有效，wait/write 继续计入额度
 
 ### 有序记录与折叠
 
@@ -113,5 +115,5 @@ turn_completed | turn_cancelled | turn_failed（任务结束）
 ## 失败与取消后的状态
 
 - **拒绝**：工具循环不中断，模型收到 `permission_user_denied` / `permission_blacklist_denied` 等结构化错误，可自行调整策略。
-- **取消**：取消令牌贯穿请求与 bash 子进程；消息内容为空时填充"本轮已取消。"
+- **取消**：先封闭旧执行代次、撤回排队与审批，再收尾本轮所属进程；Session 后台保留。消息内容为空时填充"本轮已取消。"
 - **失败**：消息标记 `error`，内容为错误文本；错误详情记入日志（`event=turn_failed_unexpected` 等）。

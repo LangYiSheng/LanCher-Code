@@ -53,13 +53,13 @@ flowchart TD
 
 | 工具 | 新确认产生的精确规则 |
 |---|---|
-| `bash` | 完整命令，例如 `Bash(git status --short)`；保留大小写及命令内部空白 |
+| `run_command` | 完整命令，例如 `RunCommand(git status --short)`；保留大小写及命令内部空白 |
 | `read_file` / `write_file` / `edit_file` | 解析符号链接后的项目相对路径，按现有路径规范化规则比较 |
 | `write_plan_file` | 专用计划文件的项目相对路径 |
 | `glob` / `grep` | 分别为搜索模式、搜索范围 |
 | MCP 工具 | 完整可见名，例如 `mcp__github__get_issue`；授权该工具，不绑定某组参数 |
 
-新确认保存 `match_kind: exact`，字符 `*`、`?`、`[` 不会被当作授权通配符。不会把 `git status` 自动扩成 `Bash(git *)`。人工维护的 `match_kind: glob` 支持通配符；未带 `match_kind` 的旧规则作为 `legacy` 保留原匹配行为。
+新确认保存 `match_kind: exact`，字符 `*`、`?`、`[` 不会被当作授权通配符。不会把 `git status` 自动扩成 `RunCommand(git *)`。人工维护的 `match_kind: glob` 支持通配符；未带 `match_kind` 的旧规则作为 `legacy` 保留原匹配行为。
 
 ## 确认与关闭
 
@@ -83,11 +83,13 @@ ToolExecutor → PermissionEngine.evaluate → ask
 
 提交“补充当前任务”立即撤销仍在等待的审批。`superseded` 不是用户可选按钮，也不表示用户拒绝；即使随后删除该补充，已撤销的审批仍不会执行或保存允许规则。旧面板的迟到决议返回 `False`。
 
+进程输入和转后台请求仅提供允许本次与拒绝，不生成 Session 或项目永久输入授权。任务窗口中用户实际点击和发送的控制操作则直接交给有归属检查的 Runtime；模型请求仍经过这条权限判定链。管理进程的停止、查询和等待不因切到讨论或计划阶段失去入口。
+
 每个审批退出时发 `permission_request_closed`，用于移除内联面板；撤销的审批不发 `permission_request_resolved`。正常等待审批时输入区仍可用于补充或排队。
 
 ## 中断与恢复
 
 - 取消任务会取消挂起的审批并暂停待处理队列；没有权限处理器时返回 `permission_confirmation_unavailable`。
-- 工具调用中断后，历史记录补齐未知结果，并说明操作可能已经部分执行，不能直接重试。
+- 尚未启动的取消明确记录未执行；已开始的本地操作说明可能部分执行；已开始的远端写操作记录结果未知，先检查实际状态，不自动重试。
 - 新 Session 事件格式 v1 恢复时，所有待处理输入均为 `paused`。尚在生成的消息收拢为已取消；缺少结果的工具调用按批次补齐未知错误结果，不自动重放工具。
 - 恢复会话不会读取项目旧 `plan.md` 并把它当成已确认计划。执行计划使用当前会话的快照正文与摘要，阶段切换不附带权限升级。

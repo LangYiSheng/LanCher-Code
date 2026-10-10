@@ -51,7 +51,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 
 | 现象 | 检查点 |
 |---|---|
-| 规则总是命中不了 | 匹配格式是否正确：`Bash(git *)` / `WriteFile(.env)` / `mcp__server__tool`；路径是否为项目相对路径（正斜杠、小写）；glob 用 `* ? [` |
+| 规则总是命中不了 | 匹配格式是否正确：`RunCommand(git *)` / `WriteFile(.env)` / `mcp__server__tool`；路径是否为项目相对路径（正斜杠、小写）；glob 用 `* ? [` |
 | 项目规则不生效 | 检查文件在 `./.lancher/permissions.yaml`（不是 `~/.lancher/`）；注意**同一作用域内最后一条命中规则生效**，后面的规则会覆盖前面的 |
 | bypass 策略下仍被拒绝 | 正常：工作阶段、危险命令黑名单、路径限制与显式 `deny` 规则依然生效 |
 | 文件写入总被要求确认 | 当前 Session workspace 已批准；其他项目文件在执行阶段按 `default` 询问写入，可选择规则或 `acceptEdits`。讨论／计划阶段源码只读 |
@@ -84,12 +84,18 @@ Test-Path $HOME\.lancher\lancher.yaml
 | `large_file_requires_paging` | read_file 大文件需要 `offset` + `limit` |
 | `match_not_found` / `match_not_unique` | edit_file 的 `old_text` 找不到或匹配多次，提供更精确原文 |
 | `permission_user_denied` / `permission_blacklist_denied` / `permission_mode_denied` | 权限拒绝。调整模式、加规则或换命令 |
-| `command_timeout` | bash 命令超时（默认 10 秒，`DEFAULT_TOOL_TIMEOUT_SECONDS`）被 kill |
-| `non_zero_exit` | 命令退出码非零（`grep/find/diff/git diff` 等退出码 ≤2 视为正常） |
+| `runtime_limit` | 进程达到本次设置的 `max_runtime_ms`，已执行停止；增大运行期限前先确认是否卡住 |
+| `output_limit` | 输出达到磁盘额度，已停止进程，已保存日志保留；检查是否无限打印 |
+| `process_error` | 启动或控制失败，检查所属 Session、工作目录、系统后端与错误正文 |
+| `non_zero_exit` | 命令退出码非零；结合输出判断原因，不根据命令名称推断成功 |
 
-### bash 工具报 `spawn_error`（找不到 PowerShell）
+### 命令启动失败或后台任务不往下走
 
-`bash.py` 硬编码 `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`。非 Windows 或精简系统上该路径不存在会导致失败。当前版本**未做跨平台适配**。
+Windows 后端从系统目录使用 PowerShell，通过 Job Object 托管；ConPTY 要求系统支持对应 API。POSIX 后端使用 `/bin/sh`。先检查错误正文，不以后台工具返回句柄作为命令最终成功的证据。
+
+未知命令长期持有项目独占资源时，其他文件工具会排队，这是保守调度的结果。停止进程，或为确实已知的开发脚本配置合适的 `execution.command_profiles`。`process_read/list/stop` 管理入口不会被目标进程的项目锁挡住。
+
+等待超时不停止进程，真实运行期限才停止。重启后看到 `lost` 表示应用没有重新接管旧进程；它不会自动重跑，日志仍可阅读。停止后队列保持暂停，需要用户明确继续。
 
 ### 连续"未知工具"导致本轮停止
 

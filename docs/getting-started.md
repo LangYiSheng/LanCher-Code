@@ -7,7 +7,7 @@
 | 项目 | 要求 | 依据 |
 |---|---|---|
 | Python | **>= 3.14** | `pyproject.toml` 中 `requires-python = ">=3.14"` |
-| 操作系统 | 主要面向 **Windows**（终端命令执行依赖 Windows PowerShell） | `tools/builtin/bash.py` 硬编码 `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`；提示词中系统标签为 "Windows PowerShell"。其他平台未做适配，**非 Windows 上 `bash` 工具会因找不到 PowerShell 而失败（无法确认其他平台兼容性）** |
+| 操作系统 | 主要开发与验证环境为 **Windows** | Windows 命令使用 PowerShell，Pipe / ConPTY 后端采用 Job Object 托管；POSIX 后端使用 `/bin/sh` 与进程组。平台后端已分离，具体测试边界见工具执行文档 |
 | 终端 | 支持 Textual 的现代终端（Windows Terminal 等） | Textual 框架要求 |
 
 > 注意：Python 3.14 是当前项目的硬性版本下限，低于 3.14 的环境无法安装依赖。

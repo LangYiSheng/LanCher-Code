@@ -5,14 +5,17 @@ from lancher_code.models import ToolPermissionMetadata
 
 _BUILTIN_LABELS = {
     "read_file": "ReadFile", "write_file": "WriteFile", "edit_file": "EditFile",
-    "bash": "Bash", "glob": "Glob", "grep": "Grep", "write_plan_file": "WritePlanFile",
+    "run_command": "RunCommand", "glob": "Glob", "grep": "Grep", "write_plan_file": "WritePlanFile",
     "tool_search": "ToolSearch",
+    "process_list": "ProcessList", "process_read": "ProcessRead", "process_wait": "ProcessWait",
+    "process_write": "ProcessWrite", "process_stop": "ProcessStop", "process_background": "ProcessBackground",
 }
 
 
 def create_default_tool_registry() -> ToolRegistry:
     from lancher_code.tools.builtin import (
-        BashTool,
+        RunCommandTool,
+        create_process_tools,
         EditFileTool,
         GlobTool,
         GrepTool,
@@ -26,7 +29,9 @@ def create_default_tool_registry() -> ToolRegistry:
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
-    registry.register(BashTool())
+    registry.register(RunCommandTool())
+    for process_tool in create_process_tools():
+        registry.register(process_tool)
     registry.register(GlobTool())
     registry.register(GrepTool())
     registry.register(WritePlanFileTool())

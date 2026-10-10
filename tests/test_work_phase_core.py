@@ -20,7 +20,7 @@ from lancher_code.permission_engine import PermissionEngine, PermissionStorage
 from lancher_code.session import SessionController
 from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.tools import create_default_tool_registry
-from lancher_code.tools.builtin.bash import BashTool
+from lancher_code.tools.builtin.command import RunCommandTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
@@ -34,14 +34,14 @@ def _call(name: str, arguments: dict[str, object] | None = None, index: int = 0)
 @pytest.mark.parametrize("policy", ["default", "acceptEdits", "bypass"])
 def test_phase_boundaries_override_even_explicit_permission_rules(tmp_path, phase, policy):
     storage = PermissionStorage()
-    storage.add_session_rule("Bash(*)", "allow")
+    storage.add_session_rule("RunCommand(*)", "allow")
     storage.add_session_rule("WriteFile(*)", "allow")
     storage.add_session_rule("mcp__demo__*", "allow")
     engine = PermissionEngine(storage)
     context = ToolContext(cwd=tmp_path, timeout_seconds=1, work_phase=phase, permission_policy=policy)
     remote = MCPToolAdapter("demo", mcp_types.Tool(name="write", inputSchema={}), None)
     for definition, call in [
-        (BashTool().definition, _call("bash", {"command": "git status", "description": "状态"})),
+        (RunCommandTool().definition, _call("run_command", {"command": "git status", "description": "状态"})),
         (WriteFileTool().definition, _call("write_file", {"path": "a.py", "content": "x"})),
         (remote.definition, _call(remote.definition.name)),
     ]:
@@ -76,7 +76,7 @@ def test_discuss_and_plan_share_tools_except_plan_writer(openai_provider_config,
     request = session.build_request(registry.list_definitions(), allow_tool_calls=True)
     assert request.work_phase == "discuss"
     assert request.permission_policy == "bypass"
-    assert {tool.name for tool in request.tools} == {"read_file", "write_file", "edit_file", "glob", "grep", "tool_search"}
+    assert {tool.name for tool in request.tools} == {"read_file", "write_file", "edit_file", "glob", "grep", "tool_search", "process_list", "process_read", "process_wait", "process_stop"}
     session.set_work_phase("plan")
     plan_tools = registry.list_definitions(work_phase=session.work_phase)
     assert {tool.name for tool in plan_tools} == {tool.name for tool in request.tools} | {"write_plan_file"}
@@ -87,10 +87,10 @@ def test_discuss_and_plan_share_tools_except_plan_writer(openai_provider_config,
 def test_exact_command_grant_keeps_wildcards_case_and_quoted_whitespace_literal(tmp_path):
     storage = PermissionStorage()
     engine = PermissionEngine(storage)
-    definition = BashTool().definition
+    definition = RunCommandTool().definition
     context = ToolContext(cwd=tmp_path, timeout_seconds=1)
     command = 'Write-Output "A *  B"'
-    request = engine.evaluate(call=_call("bash", {"command": command}), tool=definition, context=context).request
+    request = engine.evaluate(call=_call("run_command", {"command": command}), tool=definition, context=context).request
     assert request is not None and request.match_kind == "exact"
     engine.apply_resolution(request, PermissionResolution(request.request_id, "allow_session"))
     for candidate, expected in [
@@ -98,7 +98,7 @@ def test_exact_command_grant_keeps_wildcards_case_and_quoted_whitespace_literal(
         ('Write-Output "A * B"', "ask"), ('Write-Output "a *  B"', "ask"),
         ('Write-Output "A *  B" -NoNewline', "ask"),
     ]:
-        assert engine.evaluate(call=_call("bash", {"command": candidate}), tool=definition, context=context).decision == expected
+        assert engine.evaluate(call=_call("run_command", {"command": candidate}), tool=definition, context=context).decision == expected
 
 
 def test_exact_file_grant_does_not_treat_brackets_as_glob(tmp_path):
@@ -170,8 +170,14 @@ def test_new_config_axes_override_invalid_legacy_mode_and_light_theme_roundtrips
 
 class _RecordingTool:
     def __init__(self, name, events, *, safe=True, wait=None, after=None, category="read"):
-        self.definition = ToolDefinition(name=name, description=name, category=category, is_concurrency_safe=safe)
+        self.definition = ToolDefinition(name=name, description=name, category=category)
+        self.safe = safe
         self.events, self.wait, self.after = events, wait, after
+
+    def resource_claims(self, arguments, context):
+        from lancher_code.execution.contracts import ResourceClaim
+        from lancher_code.execution.scheduler import project_claim
+        return (ResourceClaim("external", "test:read", "shared"),) if self.safe else (project_claim(context.project_root),)
 
     async def execute(self, arguments, context):
         self.events.append(self.definition.name)
@@ -215,7 +221,7 @@ async def test_executor_finishes_started_parallel_group_then_skips_later_groups(
 @pytest.mark.parametrize("outcome", ["allow_session", "allow_project", "superseded"])
 async def test_executor_interrupt_after_approval_does_not_execute_or_persist_grant(tmp_path, outcome):
     events, registry = [], ToolRegistry()
-    registry.register(_RecordingTool("bash", events, safe=False, category="command"))
+    registry.register(_RecordingTool("run_command", events, safe=False, category="command"))
     storage = PermissionStorage(project_rules_path=tmp_path / "permissions.yaml")
     executor = ToolExecutor(registry, cwd=tmp_path, permission_engine=PermissionEngine(storage))
     interrupted = False
@@ -226,7 +232,7 @@ async def test_executor_interrupt_after_approval_does_not_execute_or_persist_gra
         return PermissionResolution(request.request_id, outcome)
 
     results = await executor.execute_calls(
-        [_call("bash", {"command": "git status", "description": "查看状态"})],
+        [_call("run_command", {"command": "git status", "description": "查看状态"})],
         permission_resolver=approve, should_interrupt=lambda: interrupted,
     )
     assert results[0].error_code == "steering_superseded"

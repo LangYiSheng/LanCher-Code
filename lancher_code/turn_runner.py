@@ -87,6 +87,8 @@ class TurnRunner:
         self._session = session_controller
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor
+        self._execution_runtime = tool_executor.execution_runtime
+        self._session.bind_execution_runtime(self._execution_runtime)
         self._max_tool_loops = max_tool_loops
         self._unknown_tool_streak_limit = unknown_tool_streak_limit
         self._active_turn: _ActiveTurn | None = None
@@ -138,6 +140,8 @@ class TurnRunner:
         return self._model_notice
 
     def _ensure_model_idle(self) -> None:
+        if not self._execution_runtime.accepting(self._session.session_id):
+            raise ConfigError("会话正在停止或执行运行时已关闭，暂时不能开始新的操作。")
         if self.has_active_turn or self._manual_compaction:
             raise ConfigError("模型正在响应或压缩上下文，请等待完成后再切换模型。")
 
@@ -375,7 +379,11 @@ class TurnRunner:
         if self._active_turn is None:
             return False
         self._active_turn.accepting_input = False
+        if self._session.session_id is not None:
+            self._execution_runtime.processes.seal_turn(self._session.session_id, self._active_turn.task_id)
         self._pause_queue_best_effort()
+        if not self._active_turn.cancellation_token.is_cancelled:
+            self._execution_runtime.invalidate(self._session.session_id)
         self._active_turn.cancellation_token.cancel()
         if not self._active_turn.task.cancelling():
             self._active_turn.task.cancel()
@@ -398,7 +406,70 @@ class TurnRunner:
             if self._active_turn is active:
                 self._active_turn = None
 
+    def _process_session_id(self, session_id=None) -> str:
+        selected = session_id or self._session.session_id
+        if selected is None:
+            raise ValueError('发送第一条消息后才会创建 Session。')
+        return selected
+
+    def list_processes(self, session_id=None) -> list[dict]:
+        if session_id is None and self._session.session_id is None:
+            return []
+        return [item.to_dict() for item in self._execution_runtime.processes.list(self._process_session_id(session_id))]
+
+    def list_execution_tasks(self, session_id=None) -> list[dict]:
+        return self._execution_runtime.list_invocations(session_id or self._session.session_id)
+
+    def execution_summary(self, session_id=None) -> dict[str, int]:
+        owner = session_id or self._session.session_id
+        binding = self._execution_runtime.sessions.get(owner) if owner else None
+        execution = binding.state.execution if binding else self._session.state.execution if owner == self._session.session_id else {}
+        active = [item for item in execution.get('processes', {}).values()
+                  if item['status'] in {'starting', 'running', 'stopping'}]
+        waiting = sum(item['state'] in {'queued', 'awaiting_permission', 'waiting_resources'}
+                      for item in execution.get('invocations', {}).values())
+        return {'running': len(active), 'background': sum(item['lifetime'] == 'session' for item in active),
+                'notifications': len(execution.get('inbox', [])), 'waiting': waiting}
+
+    def read_process_output(self, process_id, cursor=0, max_chars=16000, session_id=None) -> dict:
+        owner = self._process_session_id(session_id)
+        supervisor = self._execution_runtime.processes
+        return dict(supervisor.read(process_id, owner, cursor=cursor, max_chars=max_chars).to_dict(),
+                    process=supervisor.get(process_id, owner).to_dict())
+
+    async def stop_process(self, process_id, session_id=None):
+        return await self._execution_runtime.processes.stop(process_id, self._process_session_id(session_id))
+
+    async def background_process(self, process_id, session_id=None):
+        return await self._execution_runtime.processes.background(process_id, self._process_session_id(session_id))
+
+    async def write_process_input(self, process_id, text, session_id=None) -> None:
+        # 只有用户实际操作任务界面才进入这里；模型写入仍须执行器审批。
+        await self._execution_runtime.run_control(self._execution_runtime.processes.write(
+            process_id, self._process_session_id(session_id), text))
+
+    async def stop_session(self, session_id=None) -> None:
+        owner = self._process_session_id(session_id)
+        self._execution_runtime.begin_session_stop(owner)
+        self._execution_runtime.processes.seal_session(owner)
+        try:
+            try:
+                if owner == self._session.session_id:
+                    await self.stop_and_wait()
+            finally:
+                await self._execution_runtime.processes.stop_session(owner)
+        finally:
+            self._execution_runtime.finish_session_stop(owner)
+
+    async def shutdown(self) -> None:
+        try:
+            await self.stop_and_wait()
+        finally:
+            await self._execution_runtime.close()
+
     async def compact_context(self) -> ContextCompactionResult:
+        if not self._execution_runtime.accepting(self._session.session_id):
+            raise ContextCompactionError("会话正在停止或执行运行时已关闭，暂时不能压缩上下文。")
         if self.has_active_turn or self._manual_compaction:
             raise ContextCompactionError("模型正在响应，暂时不能压缩上下文。")
         self._manual_compaction = True
@@ -442,6 +513,9 @@ class TurnRunner:
             if not active_turn.task.done():
                 # 消费者退出也必须收拢后台任务，不能遗留仍在等待批准的执行器。
                 active_turn.cancellation_token.cancel()
+                if self._session.session_id is not None:
+                    self._execution_runtime.processes.seal_turn(self._session.session_id, active_turn.task_id)
+                    self._execution_runtime.invalidate(self._session.session_id)
                 # 重复停止不能打断工具正在进行的子进程及管道清理。
                 if not active_turn.task.cancelling():
                     active_turn.task.cancel()
@@ -471,9 +545,14 @@ class TurnRunner:
         policy = self._session.permission_policy
         completed = False
         written_plan_digest: str | None = None
+        turn_id = self._active_turn.task_id if self._active_turn else None
+        owner_session_id = None
+        generation = 0
 
         try:
             user_message = self._session.create_user_message(text)
+            owner_session_id = self._session.session_id
+            generation = self._execution_runtime.generation(owner_session_id)
             self._session.record_event('turn.started', turn_id=self._active_turn.task_id if self._active_turn else None)
             await self._emit(queue, TurnEvent(kind="user_message_created", message=user_message))
 
@@ -757,6 +836,8 @@ class TurnRunner:
                         session_workspace=self._session.paths.workspace if self._session.paths else None,
                         session_root=self._session.paths.root if self._session.paths else None,
                         cancellation_token=cancellation_token,
+                        turn_id=turn_id,
+                        generation=generation,
                         permission_resolver=self._request_permission,
                         available_tool_names={tool.name for tool in visible_tools},
                         should_interrupt=self._has_steering,
@@ -831,6 +912,9 @@ class TurnRunner:
             await self._emit(queue, TurnEvent(kind='turn_failed', message=message, error_text=error_text))
         finally:
             try:
+                if owner_session_id is not None:
+                    # 正常结束与取消都结束 turn 作用域；session 进程继续托管。
+                    await self._execution_runtime.processes.stop_turn(owner_session_id, turn_id)
                 if self._active_turn is not None:
                     self._active_turn.accepting_input = False
                     self._active_turn.pending_permissions.clear()
@@ -870,19 +954,31 @@ class TurnRunner:
         if not pending:
             return
         # 仅补齐尚未记录结果的调用，不能把中断误报为工具完全没有执行。
-        message = f"{reason}，未获得此工具调用的完整结果。操作可能已部分执行，请先检查当前状态，勿直接重复执行。"
-        results = [
-            ToolExecutionResult(
+        trace = self._session.get_message(message_id).trace.entries
+        results = []
+        for call in pending:
+            entry = next((item for item in reversed(trace) if item.kind == 'tool_call' and item.call_id == call.call_id), None)
+            started = bool(entry and entry.metadata.get('started'))
+            try:
+                definition = self._tool_registry.get(call.tool_name).definition
+                external = bool(definition.permission and definition.permission.source == 'external' and definition.category != 'read')
+            except Exception:
+                external = False
+            unknown_remote = started and external
+            message = (f'{reason}，远端操作结果未知；停止本地等待不能证明远端已撤销。请先检查远端状态，勿直接重复提交。'
+                       if unknown_remote else
+                       f'{reason}，未获得此工具调用的完整结果。操作可能已部分执行，请先检查当前状态，勿直接重复执行。'
+                       if started else f'{reason}，此工具尚未启动，没有执行。')
+            results.append(ToolExecutionResult(
                 call_id=call.call_id,
                 tool_name=call.tool_name,
                 content=message,
                 is_error=True,
-                summary="工具结果未完成",
-                error_code="tool_result_interrupted",
+                summary='远端结果未知' if unknown_remote else '工具结果未完成' if started else '工具未启动',
+                error_code='mcp_outcome_unknown' if unknown_remote else 'tool_result_interrupted',
                 error_message=message,
-            )
-            for call in pending
-        ]
+                metadata={'started': started, 'outcome': 'unknown' if started else 'not_started'},
+            ))
         self._session.append_tool_results(results)
         pending.clear()
         self._session.append_trace_tool_results(message_id, results)

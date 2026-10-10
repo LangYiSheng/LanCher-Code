@@ -4,7 +4,7 @@ from pathlib import Path
 
 from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import PathWriteDeniedError, relative_display_path, resolve_writable_path
+from lancher_code.tools.core.common import PathWriteDeniedError, atomic_write_text, relative_display_path, resolve_writable_path
 
 WRITE_FILE_DESCRIPTION = (
     "写入完整文本文件。适合创建新文件，或在已经完整阅读过旧文件且确认没有外部变更后整体重写文件。"
@@ -35,7 +35,6 @@ class WriteFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            is_concurrency_safe=False,
             allowed_modes=("default", "plan", "acceptEdits", "bypass"),
         )
 
@@ -81,8 +80,12 @@ class WriteFileTool:
                 return guard_error
 
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            cached = context.file_state_cache.get(path)
+            atomic_write_text(path, content, context, expected_exists=existed_before,
+                              expected_mtime_ns=cached.mtime_ns if existed_before and cached is not None else None)
+        except PathWriteDeniedError as exc:
+            return build_tool_error(summary="写文件失败", error_code=exc.reason_code,
+                                    error_message=str(exc), tool_name=self.definition.name)
         except OSError as exc:
             return build_tool_error(
                 summary=f"写入文件失败: {path}",

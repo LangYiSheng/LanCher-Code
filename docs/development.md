@@ -27,12 +27,15 @@ uv run pytest            # 运行全部测试
 ### 新增内置工具
 
 1. 在 `lancher_code/tools/builtin/` 新建文件，实现 `Tool` 协议：
-   - `definition`：`ToolDefinition`（名称、描述、参数 JSON Schema、分类、并发安全、可见模式）
+   - `definition`：`ToolDefinition`（名称、描述、参数 JSON Schema、分类、权限元信息、可见阶段）
    - `execute(arguments, context)`：返回 `ToolExecutionResult`（用 `build_tool_success` / `build_tool_error`）
+   - `resource_claims(arguments, context)`：根据可信实现声明读写资源；没有声明时默认项目独占
 2. 在 `tools/builtin/__init__.py` 导出类
 3. 在 `tools/__init__.py` 的 `create_default_tool_registry()` 中注册
 4. 如需要专属权限标签，加入 `_BUILTIN_LABELS`（`tools/__init__.py`）
 5. 在 `tests/tools/` 添加测试
+
+参数 Schema 由执行入口统一验证，不要再实现一套部分校验器。保持 Schema 本身有效，局部与内嵌引用可用；未知外部引用会被离线解析器拒绝。普通工具和远端写操作分别说明提交边界与取消后结果，详见 [工具执行](workflows/tool-execution.md)。
 
 ### 新增模型协议（Provider）
 
@@ -119,5 +122,14 @@ uv run pyinstaller --clean --noconfirm lancher.spec
 
 ## 文档维护
 
-- 本文档目录 `docs/` 已被 `.gitignore` 忽略（"docs/"，当前不纳入版本控制）。如需入库，需调整 `.gitignore`。
+- `docs/` 已纳入版本控制，行为变更与对应文档一起提交。
 - 修改行为（配置项、命令、事件、文件格式）时，同步更新 `docs/` 下对应文档与 [glossary.md](glossary.md)。
+
+
+## 给工具声明资源
+
+新工具可实现 `resource_claims(arguments, context)`，返回 `ResourceClaim`；声明由工具代码提供，不能信任模型自己提供的安全标签。相同文件的共享读可以并行，独占写与它冲突；目录声明需要考虑 recursive。多个资源一次取得，租约转交给进程以后由退出清理释放。
+
+没有资源声明时默认项目独占。MCP 的 readOnlyHint 只决定阶段与权限能力，不能证明它与其他操作没有资源冲突。新增后端要实现现有 ProcessBackend，不在 Tool.execute 里另藏不受Session管理的长进程。
+
+先用 [工具执行](workflows/tool-execution.md) 的场景确认归属、取消和提交边界，再写测试：取消发生在资源排队、审批通过后、系统创建期间和文件提交边界，都应有明确结果。事件写入失败时阻止新副作用，停止现存进程仍要完成。

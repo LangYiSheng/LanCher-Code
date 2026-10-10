@@ -30,7 +30,7 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 - **事件流解耦**：`TurnRunner.run_user_turn()` 是一个异步生成器，产出 `TurnEvent`；TUI 只消费事件更新界面，不直接调用 Provider。
 - **阶段与权限独立**：讨论、计划、执行决定可用工具范围，逐次确认、自动编辑、跳过询问决定范围内工具的审批方式。阶段边界同时应用于工具发现和实际执行。
 - **权限判定在工具执行前**：`ToolExecutor` 对每个工具调用先过 `PermissionEngine`，只有 `allow` 才真正执行。
-- **全程异步**：`app.py` 在 `asyncio.run()` 中运行；网络请求（httpx）、子进程（bash 工具）、文件卸载（`asyncio.to_thread`）都是异步的。
+- **全程异步**：`app.py` 在 `asyncio.run()` 中运行；网络请求（httpx）、子进程（run_command 工具）、文件卸载（`asyncio.to_thread`）都是异步的。
 
 ## 核心组件
 
@@ -111,9 +111,10 @@ graph TD
            │    └─ tool_call_delta → ToolCallAssembler 拼接
            ├─ ToolCallAssembler.finalize() → ToolCall 列表
            ├─ ToolExecutor.execute_calls()：
+           │    ├─ 冻结参数 + 标准 JSON Schema 校验（离线引用解析）
            │    ├─ 阶段工具边界 + PermissionEngine.evaluate()（五层判定）
            │    ├─ 需要确认 → PermissionRequest → TUI InlinePermissionPanel → 用户选择
-           │    └─ 执行工具（并发安全分组 + 超时）
+           │    └─ 执行工具（权限复核 + 资源调度 + 托管执行）
            ├─ 工具结果写回 transcript，事件回传 TUI
            └─ 循环直到模型不再调用工具
 → SessionController.complete_message()  标记完成 + 累计用量
@@ -122,11 +123,11 @@ graph TD
 
 ## 阶段边界与权限系统
 
-`tool_available_in_phase()` 先限定阶段工具范围：讨论与计划的源码只读，但当前 Session workspace 允许内置文件读写；计划另可保存计划正文；执行允许常规工具。讨论/计划阶段不开放 Bash；MCP 仅在服务端明确标记只读时进入只读范围。随后 `PermissionEngine.evaluate()` 处理以下检查：
+`tool_available_in_phase()` 先限定阶段工具范围：讨论与计划的源码只读，但当前 Session workspace 允许内置文件读写；计划另可保存计划正文；执行允许常规工具。讨论/计划阶段不开放 run_command；MCP 仅在服务端明确标记只读时进入只读范围。随后 `PermissionEngine.evaluate()` 处理以下检查：
 
 ```text
 ① 文件路径边界 —— 项目根、当前 Session workspace 和内部控制文件边界
-② 危险命令黑名单（bash 工具）—— 命中即 deny，不可绕过
+② 危险命令黑名单（run_command 工具）—— 命中即 deny，不可绕过
 ③ 规则引擎 —— session > project > user 三层规则，格式 ToolLabel(value)
 ④ 权限策略 —— default / acceptEdits / bypass
 ⑤ 人在回路 —— 仍未放行时生成 PermissionRequest，TUI 弹窗由用户决定
@@ -145,7 +146,8 @@ app.run_app() 创建
 → 首条用户消息：先创建 UUID Session 和 workspace，再调用模型
 → 状态变更：增量追加事件，流式短间隔刷新、关键边界同步刷新
 → /session new 或 resume：刷新旧会话并切换写入者
-→ 进程退出：close 刷新、写快照、释放文件锁
+→ 有后台或控制操作的原会话保留写入者；闲置后保存快照并释放
+→ 应用退出：先收尾托管进程，再 close 刷新、写快照、释放文件锁
 ```
 
 ### `TurnRunner`（`turn_runner.py`）
@@ -179,6 +181,29 @@ MCPClientManager.initialize() → 每个 Server 并行 connect_and_list_tools()
 ## 并发与异步模型
 
 - 单 asyncio 事件循环，无多线程业务逻辑；文件 IO 通过 `asyncio.to_thread` 卸载（如大工具结果落盘）。
-- `ToolExecutor` 对 `is_concurrency_safe=True` 的工具（读类工具）做**批量并发执行**；写类工具串行执行。
+- `ToolExecutor` 按可信资源声明调度共享/独占访问，无冲突操作并行，冲突操作按顺序执行；后台进程保留资源租约但不占普通调用并发额度。
 - MCP Server 初始化并发进行，单个失败不影响其他 Server。
 - 权限弹窗期间，`TurnRunner` 通过 `asyncio.Future` 挂起等待用户决议，不阻塞事件循环。
+
+
+## 托管执行与 Session Runtime
+
+```mermaid
+flowchart TD
+    TUI[聊天 / 任务窗口] --> TR[TurnRunner]
+    TR --> EX[ToolExecutor：权限与执行]
+    EX --> RS[ResourceScheduler：共享 / 独占资源]
+    RS --> FILE[文件与 MCP 工具]
+    RS --> PROC[ProcessSupervisor]
+    PROC --> OUT[OutputStore：字符游标与独立日志]
+    PROC --> BACK[Pipe / PTY 平台后端]
+    EX --> RT[ExecutionRuntime]
+    PROC --> RT
+    RT --> SR[SessionRuntimeRegistry：原会话单写入者]
+```
+
+一次工具调用结束与进程退出分别建模。调用返回 running 后，进程保留UUID、所属Session和资源租约；停止本轮只回收turn进程，Session后台继续。TUI只是观察者，关闭任务窗口不停止进程，应用退出先收尾所有托管资源再关闭写入者。
+
+后台事件先落到原Session日志与收件箱，下一条用户消息时纳入协议上下文；完成不会自动开新轮次。Session切换保留有活动资源的运行绑定，重启则标记旧活动记录lost，不认领PID、不重跑命令。
+
+细节与实际场景见 [工具执行](workflows/tool-execution.md)，包括停止竞态、Windows Job Object、ConPTY输出关闭与UTF-8分页。

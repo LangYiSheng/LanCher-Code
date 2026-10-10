@@ -195,7 +195,7 @@ class SettingsScreen(Screen[SettingsResult]):
                     with Vertical(id="rule-editor", classes="form"):
                         yield Static("权限规则", classes="editor-title")
                         yield Static("", id="rule-editor-scope", classes="scope-note")
-                        yield from self._field("匹配表达式", Input(placeholder="例如 Bash(git status)", id="rule-match"))
+                        yield from self._field("匹配表达式", Input(placeholder="例如 RunCommand(git status)", id="rule-match"))
                         yield from self._field("匹配方式", Select((("精确匹配", "exact"), ("通配规则（glob）", "glob"), ("旧版规则（保留兼容）", "legacy")), value="exact", allow_blank=False, id="rule-match-kind"))
                         yield Static("精确匹配只授权完整目标；通配规则可覆盖多个目标。旧版仅用于保留已有规则。", classes="scope-note")
                         yield from self._field("处理方式", Select((("允许", "allow"), ("拒绝", "deny")), value="allow", allow_blank=False, id="rule-result"))

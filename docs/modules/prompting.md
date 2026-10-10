@@ -30,7 +30,7 @@
 
 | 状态 | 提醒内容 |
 |---|---|
-| 首次进入 plan（`pending_plan_entry_kind=initial`） | 完整约束：只读探索、只允许写计划文件 |
+| 首次进入 plan（`pending_plan_entry_kind=initial`） | 完整约束：源码只读探索，当前Session workspace可写；最终计划由专用工具确认快照 |
 | 重新进入且本会话有计划快照（`reentry`） | 注入该快照，继续修改本会话版本；旧磁盘文件不代表用户批准 |
 | 持续多轮（每 5 轮刷新一次） | 重新强调完整约束 |
 | 常规 plan 轮次 | 简短的持续生效提醒 |
@@ -91,3 +91,6 @@ PromptPayload(
 - `build_system_prompt()` 是**固定文本**，不含环境信息；环境信息在 `build_environment_prompt()` 中，二者分离（有对应测试保证）。
 - 延迟工具索引中的 Server 标题/描述会经过 HTML 转义（`escape`），防止注入。
 - 平台标签：Windows → "Windows PowerShell"，Linux → "Linux shell"，macOS → "macOS shell"（`_runtime_label()`）。
+
+
+进程工具指南明确区分yield_ms与max_runtime_ms、turn与session归属、Pipe与PTY。收到running句柄不能宣称命令最终成功；后台输出仍通过process_read读取。后台完成摘要作为记录事实附在下一条协议用户消息中，与新任务指令区分，不因后台输出自动开轮。
