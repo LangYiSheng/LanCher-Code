@@ -8,13 +8,13 @@
 
 ## 配置与模型解析
 
-- `models.ProviderDefinition` 保存供应商名称、公共协议、Base URL、API Key、超时和模型目录。
-- `models.ModelDefinition` 保存 API 模型名、可选显示名、连接覆盖以及上下文窗口/thinking。`None` 表示继承供应商的对应连接字段。
-- `AppConfig.providers` 与 `default_model` 是配置源；旧 `AppConfig.provider` 仅兼容默认模型的有效快照，编辑它不会写回目录。
-- `model_catalog.resolve_model(config, ref)` 逐字段合并覆盖、展开环境变量，产生独立的 `ProviderConfig`。原配置保留变量原文和缺省字段，`ref` 为稳定的 `供应商ID/模型ID`。
+- `providers.models.ProviderDefinition` 保存供应商名称、公共协议、Base URL、API Key、超时和模型目录。
+- `providers.models.ModelDefinition` 保存 API 模型名、可选显示名、连接覆盖以及上下文窗口/thinking。`None` 表示继承供应商的对应连接字段。
+- `config.models.AppConfig.providers` 与 `default_model` 是配置源；不再维护单供应商快照。
+- `providers.catalog.resolve_model(providers, ref)` 逐字段合并覆盖、展开环境变量，产生独立的 `ProviderConfig`。原配置保留变量原文和缺省字段，`ref` 为稳定的 `供应商ID/模型ID`。
 - `model_display_name()` 优先显示模型的 `display_name`，否则显示 `model_name (供应商名称)`；显示名称不发送给 API。
 
-配置文件可读旧单 `provider` 格式，保存时迁移并保留 `.bak`。详细 schema 见 [configuration.md](../configuration.md)。
+目录解析只接收供应商映射与显式模型引用，不依赖 `AppConfig`，避免配置加载与模型解析循环依赖。旧单 `provider` 格式明确拒绝，原文件保留，不迁移。详细 schema 见 [configuration.md](../configuration.md)。
 
 ## 接口与实现
 
@@ -27,7 +27,7 @@
 
 ## 流式事件（StreamEvent）
 
-`Provider.stream_chat()` 把厂商的流解析为统一的 `StreamEvent`（`models.py`）：
+`Provider.stream_chat()` 把厂商的流解析为统一的 `StreamEvent`（`contracts/messages.py`）：
 
 | kind | 含义 |
 |---|---|
@@ -80,10 +80,10 @@
 
 | 方向 | 说明 |
 |---|---|
-| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / mode / cancellation_token / max_output_tokens / 请求归属） |
+| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / work_phase / permission_policy / cancellation_token / max_output_tokens / 请求归属） |
 | 输出 | `StreamEvent` 异步迭代器 |
 
-正常结束事件的 `assistant_blocks` 是单次完整助手响应，包含原始思考、签名或加密数据、正文和真实工具调用。`response_complete` 区分完整结束与提前 EOF。Claude 兼容协议按内容块顺序回传；OpenAI 兼容协议保留 `reasoning_content`／`reasoning` 的字段来源，避免把展示思考误当完整协议。
+正常结束事件必须显式携带 `response_complete=True` 和非空缺的 `assistant_blocks`；未设置完成标记默认不完整，不从文本增量补造终态。`assistant_blocks` 是单次完整助手响应，包含原始思考、签名或加密数据、正文和真实工具调用。`response_complete` 区分完整结束与提前 EOF。Claude 兼容协议按内容块顺序回传；OpenAI 兼容协议保留 `reasoning_content`／`reasoning` 的字段来源，避免把展示思考误当完整协议。
 
 详见 [思考协议、工具截断与会话恢复](../workflows/thinking-and-tool-recovery.md)。
 
@@ -91,19 +91,19 @@
 
 - ← `factory.py` ← `app.py`：启动时解析默认模型后创建
 - ← `TurnRunner.configure_models/switch_model/reload_models`：协调模型目录、协议适配器和会话有效配置的切换；正在响应或压缩时禁止切换
-- ← `turn_runner.py`：`_stream_request()` 消费流事件
-- ← `context_management.py`：摘要压缩请求也走 `stream_chat()`
-- ← `session.py`：`_request_thinking()` 只在 claude 协议下启用 thinking
+- ← `agent/streaming.py`：`collect_response()` 消费流事件并验证完整响应
+- ← `context/compaction.py`：摘要压缩请求也走 `stream_chat()`
+- ← `context/request.py`：`build_request()` 只在 claude 协议下启用 thinking
 
 切换保留协议无关 transcript、消息、工具结果和权限；模型、thinking、context_window 一起更新，同时清除旧模型的 token 校准锚点和压缩失败计数。工具历史由当前协议重新序列化，OpenAI 会把同一批工具结果逐条展开为 `tool` 消息。摘要压缩也使用当前主模型，不另设摘要模型。
 
 ## 如何新增一个协议
 
 1. 在 `providers/` 新增实现类，继承 `BaseChatProvider`，实现 `stream_chat()`
-2. 在 `models.py` 的 `ProviderProtocol` Literal 中增加协议名
+2. 在 `providers/models.py` 的 `ProviderProtocol` Literal 中增加协议名
 3. 在 `factory.py` 中按协议分发
-4. 在 `config_system/loader.py` 的 `SUPPORTED_PROTOCOLS` 与 `model_catalog.resolve_model()` 中登记，并更新默认上下文窗口策略
-5. 更新设置与引导界面的协议选项，参考 `tests/providers/` 和 `tests/test_model_config.py` 补测试
+4. 在 `config/loader.py` 的 `SUPPORTED_PROTOCOLS` 与 `providers.catalog.resolve_model()` 中登记，并更新默认上下文窗口策略
+5. 更新设置与引导界面的协议选项，参考 `tests/providers/` 和 `tests/config/test_model_config.py` 补测试
 
 ## 注意事项
 

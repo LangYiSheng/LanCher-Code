@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from lancher_code.execution.contracts import ProcessSpec, ResourceClaim
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
-from lancher_code.sessions.repository import SessionRepositoryError
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
+from lancher_code.sessions.storage import SessionRepositoryError
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import resolve_path_in_root
+from lancher_code.filesystem.access import resolve_path_in_root
 
 
 def _integer(arguments: dict, name: str, default: int, minimum: int, maximum: int) -> int:
@@ -25,7 +26,7 @@ class RunCommandTool:
                          "yield_ms 只限制本次等待，max_runtime_ms 才限制真实运行时间。"
                          "开发服务器等跨轮次任务必须明确 lifetime=session；turn 进程在本轮停止或结束时收尾。"
                          "普通命令用 pipe，需要终端交互时用 pty。文件读写和搜索优先使用对应文件工具。"),
-            params_model={"type": "object", "properties": {
+            input_schema={"type": "object", "properties": {
                 "description": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "一句话说明命令用途。"},
                 "command": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "Windows 使用 PowerShell，POSIX 使用 /bin/sh。"},
                 "cwd": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "可选，项目内的现存工作目录。"},
@@ -35,7 +36,7 @@ class RunCommandTool:
                 "max_runtime_ms": {"type": ["integer", "null"], "minimum": 1},
             }, "required": ["description", "command"], "additionalProperties": False},
             category="command", is_system_tool=True,
-            allowed_modes=("default", "acceptEdits", "bypass"))
+            allowed_phases=("execute",))
 
     def resource_claims(self, arguments: dict, context: ToolContext) -> tuple[ResourceClaim, ...]:
         cwd = self._cwd(arguments, context)

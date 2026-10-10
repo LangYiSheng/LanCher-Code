@@ -22,7 +22,7 @@
 
 ## 一个请求，一份不断更新的记录
 
-[`RunUsageTracker`](../../lancher_code/run_usage.py) 为每次实际调用生成请求 UUID。记录关联当前 Session、助手消息或轮次、用途、供应商协议和模型。正常对话与摘要请求走同一条观察路径；真正重发的请求取得新 UUID，不能把重试当成前一次请求的尾帧。
+[`RunUsageTracker`](../../lancher_code/usage/ledger.py) 为每次实际调用生成请求 UUID。记录关联当前 Session、助手消息或轮次、用途、供应商协议和模型。正常对话与摘要请求走同一条观察路径；真正重发的请求取得新 UUID，不能把重试当成前一次请求的尾帧。
 
 流式用量通常是累计快照：
 
@@ -50,7 +50,7 @@ Checkpoint 保留完整账本，用空间换取较快的恢复：读取快照后
 
 ## 未知、真实零和部分上报
 
-[`MessageUsage`](../../lancher_code/models.py) 的数值字段允许 `None`：
+[`MessageUsage`](../../lancher_code/usage/models.py) 的数值字段允许 `None`：
 
 | 情况 | 内部值 | 显示 |
 |---|---|---|
@@ -86,7 +86,7 @@ Claude 的普通输入、缓存读取与缓存创建在协议中分开提供，�
 
 ## 最近有效 usage 为什么能校准
 
-[`context_tokens.py`](../../lancher_code/context_tokens.py) 将请求拆成模型可见内容：system、消息正文、工具定义、工具参数、工具结果及消息包装开销。内部 metadata、空的数据类字段和外层 JSON 转义不作为模型正文计数。
+[`context/tokens.py`](../../lancher_code/context/tokens.py) 将请求拆成模型可见内容：system、消息正文、工具定义、工具参数、工具结果及消息包装开销。内部 metadata、空的数据类字段和外层 JSON 转义不作为模型正文计数。
 
 第一份请求还没有真实用量可参考，只能粗估。Provider 返回可信输入后，记录“输入 token + 这次请求发出前的快照边界”。下一次请求如果保留同样的 system、工具与消息前缀，计算：
 
@@ -120,7 +120,7 @@ Claude 的普通输入、缓存读取与缓存创建在协议中分开提供，�
 
 ## 预算随窗口变化，输出预留必须真的发出去
 
-[`context_budget.py`](../../lancher_code/context_budget.py) 根据上下文窗口、请求输出上限和安全余量生成预算。正常回答与摘要的实际请求都携带对应的输出上限，Provider 使用该上限构造请求；不能只在本地“预留 2K”，实际却允许生成 20K。
+[`context/budget.py`](../../lancher_code/context/budget.py) 根据上下文窗口、请求输出上限和安全余量生成预算。正常回答与摘要的实际请求都携带对应的输出上限，Provider 使用该上限构造请求；不能只在本地“预留 2K”，实际却允许生成 20K。
 
 预算分别给出输入上限、自动整理阈值、近期历史规模以及单条和同批工具结果额度。8K 窗口也能得到正的有效预算，不会再被固定的 20K 摘要预留和 13K 余量减成负数。
 

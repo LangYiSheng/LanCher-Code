@@ -1,173 +1,147 @@
 # 项目结构
 
+代码按领域组织。根包只保留启动装配、异常和日志；类型与逻辑放在所属领域，公共契约放在 `contracts/`。目录名说明职责，`__init__.py` 不承担旧模块路径的转导出。
+
 ## 核心目录树
 
-以下为项目核心结构（省略 `.git`、`.idea`、`__pycache__`、`.venv`、`build`、`dist`、`.pytest_cache` 等无关/生成目录）：
+以下省略缓存、虚拟环境、构建产物与大部分测试文件：
 
 ```text
 lancher-code/
-├── main.py                        # 仓库根入口，仅调用 lancher_code.cli:main
-├── pyproject.toml                 # 项目元数据、依赖、命令入口、pytest 配置
-├── uv.lock                        # uv 锁定依赖版本
-├── lancher.spec                   # PyInstaller 打包配置
-├── lancher.example.yaml           # 配置文件结构示例（无真实密钥）
-├── lancher.yaml                   # 本地运行配置（gitignore，含真实密钥，勿提交）
-├── AGENTS.md                      # 面向 AI 编码助手的项目说明
+├── main.py                      # 仓库和打包入口，调用 lancher_code.cli:main
+├── pyproject.toml               # 依赖、测试配置、lancher / lancher-code 双 CLI 入口
+├── uv.lock
+├── lancher.spec                 # PyInstaller 配置
+├── lancher.example.yaml         # 当前主配置示例
 ├── assets/
-│   └── lancher_code.ico           # Windows 可执行文件图标
-├── lancher_code/                  # 主包
-│   ├── __init__.py                # 包版本号 __version__ = "0.1.0"
-│   ├── __main__.py                # python -m lancher_code 入口
-│   ├── cli.py                     # CLI 入口 main()：日志初始化 + asyncio.run(run_app)
-│   ├── app.py                     # 应用装配：启动流程核心（详见 workflows/startup.md）
-│   ├── config.py                  # 配置系统对外的统一 re-export
-│   ├── errors.py                  # 异常层次（ConfigError / ProviderError / ...）
-│   ├── logging_system.py          # 日志系统：ERROR 级滚动文件日志 + 敏感信息脱敏
-│   ├── models.py                  # 全项目数据模型（dataclass + Literal 类型）
-│   ├── session.py                 # SessionController：会话状态与 transcript 管理
-│   ├── sessions/                  # 路径、事件仓库、状态编解码与服务
-│   ├── execution/                 # 资源调度、调用与进程状态、输出和平台后端
-│   ├── turn_runner.py             # TurnRunner：ReAct 工具循环与事件流
-│   ├── context_tokens.py          # 模型可见内容粗估、可靠输入 usage 校准
-│   ├── context_budget.py          # 窗口、实际输出、工具结果及近期历史的动态额度
-│   ├── context_management.py      # 工具结果卸载、摘要验证与候选上下文
-│   ├── run_usage.py               # 实际请求尝试的统一用量账本
-│   ├── usage_display.py           # 已上报、未知、部分统计和缓存比的统一显示
-│   ├── prompting.py               # 提示词构建（system prompt / Plan Mode / 动态提醒）
-│   ├── permission_engine.py       # PermissionEngine + PermissionStorage：五层权限
-│   ├── settings_service.py        # SettingsService：设置页数据读写与校验
-│   ├── slash_commands.py          # 斜杠命令注册、解析、补全
-│   ├── tool_call_parser.py        # ToolCallAssembler：流式工具调用分片拼接
-│   ├── transcript_projection.py   # 旧协议和跨模型工具历史的请求副本投影
-│   ├── tui.py                     # TUI 视图对外 re-export
-│   ├── config_system/             # 配置系统
-│   │   ├── paths.py               # 所有配置文件路径常量与函数
-│   │   ├── bootstrap.py           # 首次引导状态判定
-│   │   ├── loader.py              # YAML 加载与校验（load_config）
-│   │   └── writer.py              # 配置序列化与写回
-│   ├── providers/                 # 模型供应商
-│   │   ├── base.py                # BaseChatProvider：SSE 解析、错误分类、用量统计
-│   │   ├── claude.py              # ClaudeProvider（/v1/messages 流式）
-│   │   ├── openai.py              # OpenAIProvider（/chat/completions 流式）
-│   │   └── factory.py             # create_provider：按 protocol 选择实现
-│   ├── tools/                     # 工具系统
-│   │   ├── __init__.py            # create_default_tool_registry()：注册 14 个内置工具
-│   │   ├── core/
-│   │   │   ├── base.py            # Tool 协议 + 成功/失败结果构造
-│   │   │   ├── registry.py        # ToolRegistry：注册、列出、延迟工具搜索
-│   │   │   ├── executor.py        # ToolExecutor：权限判定 + 并发/超时执行
-│   │   │   ├── validation.py      # 标准 JSON Schema 参数校验与离线引用
-│   │   │   ├── common.py          # 路径沙箱工具与 SKIP_DIRS 列表
-│   │   │   └── file_state_cache.py# FileStateCache：读/写状态缓存（防盲写）
-│   │   └── builtin/               # 内置工具实现
-│   │       ├── read_file.py       # read_file
-│   │       ├── write_file.py      # write_file
-│   │       ├── edit_file.py       # edit_file
-│   │       ├── command.py         # run_command：启动托管进程
-│   │       ├── process.py         # 六个进程读取与控制工具
-│   │       ├── glob.py            # glob
-│   │       ├── grep.py            # grep
-│   │       ├── write_plan_file.py # write_plan_file（仅 plan 模式）
-│   │       └── tool_search.py     # tool_search（MCP 延迟工具搜索加载）
-│   ├── mcp/                       # MCP（Model Context Protocol）客户端
-│   │   ├── config.py              # MCP Server 配置加载与校验
-│   │   ├── connection.py          # stdio / Streamable HTTP 连接管理
-│   │   ├── manager.py             # MCPClientManager：并发初始化、工具注册、进度事件
-│   │   ├── adapter.py             # MCPToolAdapter：远程工具 → 本地 Tool
-│   │   └── template.py            # 全局 mcp.yaml 模板生成
-│   └── tui_views/                 # Textual 界面
-│       ├── bootstrap.py           # 首次配置引导界面
-│       ├── chat.py                # 主聊天界面 LanCherTextualApp / ChatTUI
-│       ├── composer.py            # 输入框与斜杠命令补全菜单
-│       ├── message.py             # 消息气泡、思考轨迹、顶部横幅
-│       ├── permission.py          # 内联权限确认面板
-│       ├── tasks.py               # Session 任务列表、增量输出与控制
-│       └── settings.py            # 设置面板（模型 / MCP / 权限规则）
-├── tests/                         # 测试（pytest，asyncio_mode = auto）
-│   ├── conftest.py                # 共享 fixture（provider 配置、mock http client）
-│   ├── test_app_startup.py        # 启动流程（引导/装配）
-│   ├── test_config.py             # 配置加载与校验
-│   ├── test_config_bootstrap.py   # 引导界面
-│   ├── test_context_management.py # 上下文治理
-│   ├── test_logging_system.py     # 日志与脱敏
-│   ├── test_permission_engine.py  # 权限引擎
-│   ├── test_prompting.py          # 提示词构建
-│   ├── test_session.py            # 会话层
-│   ├── test_session_repository.py # Session事件仓库、锁与路径校验
-│   ├── test_session_lifecycle.py  # 首条消息、恢复与会话隔离
-│   ├── test_settings.py           # 设置服务/界面
-│   ├── test_slash_commands.py     # 斜杠命令
-│   ├── test_tool_call_parser.py   # 工具调用解析
-│   ├── test_tui_flow.py           # TUI 主流程
-│   ├── test_tui_permissions.py    # TUI 权限面板
-│   ├── test_tui_phase3.py         # TUI Plan Mode / 模式切换
-│   ├── test_turn_runner.py        # 工具循环
-│   ├── test_phase3_mode_and_tools.py
-│   ├── providers/                 # 供应商测试（mock httpx）
-│   ├── mcp/                       # MCP 配置/适配/管理器测试 + stdio 测试服务器
-│   └── tools/                     # 各内置工具与执行器测试
-├── docs/                          # 项目文档（本目录）
-└── .lancher/                      # 项目级运行时数据（gitignore）
-    ├── permissions.yaml           # 项目级权限规则
-    ├── mcp.yaml                   # 项目级 MCP Server 配置
-    └── sessions/                  # 首条消息自动创建 UUID Session
-        └── <uuid>/                # events.jsonl、meta.json、checkpoint.json
-            ├── processes/         # 进程元信息、输出日志与索引
-            ├── blobs/             # 会话内部工具结果等内容
-            └── workspace/         # plan.md、tmp/、artifacts/，所有阶段可写
+├── lancher_code/
+│   ├── __init__.py              # 包版本
+│   ├── __main__.py              # python -m lancher_code
+│   ├── cli.py                  # 参数解析、日志和退出码
+│   ├── app.py                  # 配置、服务、运行时与 TUI 装配
+│   ├── errors.py
+│   ├── logging_system.py
+│   ├── contracts/              # 跨领域契约，不承载业务流程
+│   │   ├── control.py          # 工作阶段、权限策略、取消令牌
+│   │   ├── messages.py         # ChatRequest、ContentBlock、StreamEvent
+│   │   └── tools.py            # 工具定义、调用、结果、阶段能力
+│   ├── agent/                  # 单轮任务编排
+│   │   ├── runner.py           # TurnRunner 公开入口与任务循环
+│   │   ├── inputs.py           # 忙时输入与队列
+│   │   ├── selection.py        # ModelSelection：当前模型与 Provider 切换
+│   │   ├── streaming.py        # 完整模型响应收集
+│   │   ├── tool_batch.py       # 工具批次与待处理调用收尾
+│   │   └── events.py           # TurnEvent
+│   ├── context/                # 模型可见上下文
+│   │   ├── models.py           # 上下文状态与结果类型
+│   │   ├── tokens.py           # 估算、指纹、输入 usage 校准
+│   │   ├── budget.py           # 输入、输出、工具结果与近期历史预算
+│   │   ├── request.py          # 请求组装与发送副本
+│   │   ├── projection.py       # 跨来源工具历史投影
+│   │   ├── offload.py          # 大工具结果落盘与引用
+│   │   ├── compaction.py       # 压缩候选与请求编排
+│   │   ├── summary.py          # 摘要提示与结构验证
+│   │   ├── recovery.py         # 压缩后的恢复提示
+│   │   ├── prompts.py          # 系统、环境、阶段与工具索引提示
+│   │   └── prompt_models.py    # PromptContext / PromptPayload
+│   ├── sessions/               # 会话状态与持久化
+│   │   ├── controller.py       # SessionController
+│   │   ├── models.py           # 消息展示、轨迹、计划、队列等会话类型
+│   │   ├── messages.py         # 消息与轨迹更新
+│   │   ├── compaction.py       # 会话压缩活动与状态协调
+│   │   ├── recovery.py         # 未完成消息与执行记录恢复
+│   │   ├── paths.py            # UUID 目录与路径边界
+│   │   ├── repository.py       # 会话创建、列表、读取、归档、删除
+│   │   ├── event_log.py        # 事件读写、版本验证与写入者生命周期
+│   │   ├── locking.py          # Windows / POSIX 会话独占锁
+│   │   ├── cache.py            # 列表摘要缓存
+│   │   ├── storage.py          # 格式常量、存储结果与错误
+│   │   ├── codec.py            # 当前状态编解码
+│   │   ├── projection.py       # 事件重放
+│   │   └── service.py          # 生命周期与增量持久化协调
+│   ├── config/                 # 应用配置与设置
+│   │   ├── models.py           # AppConfig、RuntimeConfig、UIConfig
+│   │   ├── paths.py
+│   │   ├── bootstrap.py        # 首次引导状态
+│   │   ├── loader.py           # 当前 YAML 格式校验
+│   │   ├── writer.py           # 序列化与单文件原子写入
+│   │   └── settings.py         # 按领域保存设置
+│   ├── providers/              # 模型目录与协议适配
+│   │   ├── models.py           # 供应商、模型、有效连接配置
+│   │   ├── catalog.py          # 显式模型引用与逐字段继承解析
+│   │   ├── base.py             # Provider 契约、SSE、错误与 usage
+│   │   ├── factory.py
+│   │   ├── openai.py
+│   │   └── claude.py
+│   ├── permissions/            # 审批与规则
+│   │   ├── models.py
+│   │   ├── engine.py           # 阶段、边界、规则和策略判定
+│   │   ├── storage.py          # 用户、项目、会话规则存储
+│   │   ├── rules.py            # 目标匹配与黑名单
+│   │   └── preview.py          # 审批展示内容
+│   ├── filesystem/access.py    # 公共路径访问与写入边界
+│   ├── tools/                  # 本地与远端工具执行入口
+│   │   ├── __init__.py         # 默认内置工具注册工厂
+│   │   ├── context.py          # ToolContext
+│   │   ├── parser.py           # 流式工具调用拼接与整批参数检查
+│   │   ├── core/              # 注册、执行、Schema 校验、文件状态缓存
+│   │   └── builtin/           # 文件、搜索、计划、命令与进程工具
+│   ├── execution/              # 资源调度、进程、输出与平台后端
+│   ├── usage/                  # 实际请求消耗
+│   │   ├── models.py
+│   │   ├── ledger.py
+│   │   └── tracking.py
+│   ├── mcp/                    # 连接、工具适配、配置校验与模板
+│   └── tui/                    # Textual 界面
+│       ├── app.py              # 主应用装配与生命周期
+│       ├── chat/               # 布局、补全、HUD、消息与命令控制
+│       ├── settings/           # 设置页与模型、MCP、权限、外观编辑器
+│       ├── commands.py         # 斜杠命令定义、解析、补全
+│       ├── bootstrap.py        # 首次引导
+│       ├── composer.py         # 输入框
+│       ├── message.py          # 消息容器
+│       ├── timeline.py         # 正文、思考与工具顺序呈现
+│       ├── permission.py       # 内联审批
+│       ├── tasks.py            # 进程任务列表与详情
+│       ├── compaction.py       # 压缩活动
+│       ├── usage.py            # 用量显示
+│       └── exit_summary.py     # 退出后的终端小结
+├── tests/                      # 按领域与行为覆盖
+└── docs/                       # 架构、配置、模块与流程说明
 ```
 
-## 分层说明
+## 依赖与职责
 
-| 层 | 目录 | 说明 |
-|---|---|---|
-| 入口层 | `main.py`、`lancher_code/cli.py`、`__main__.py` | 解析参数、初始化日志、启动事件循环 |
-| 装配层 | `lancher_code/app.py` | 组装所有核心对象，编排启动顺序 |
-| 界面层 | `lancher_code/tui_views/`、`tui.py` | Textual 界面，只消费事件、不直接接触网络 |
-| 会话/流程层 | `session.py`、`turn_runner.py`、`context_tokens.py`、`context_budget.py`、`context_management.py`、`run_usage.py`、`prompting.py` | 对话状态、工具循环、上下文治理、请求消耗、提示词 |
-| 能力层 | `tools/`、`providers/`、`mcp/` | 工具执行、模型请求、MCP 扩展 |
-| 基础层 | `models.py`、`errors.py`、`logging_system.py`、`config_system/` | 数据模型、异常、日志、配置 |
+- `app.py` 负责装配；TUI 消费 `TurnEvent` 并调用公开服务，不直接调用模型网络接口。
+- `agent/` 编排一轮任务，`sessions/` 持有对话事实，`context/` 构造模型可见副本并管理容量。请求副本的变化不覆盖原始事件。
+- `config/models.py` 持有应用配置组合；供应商定义属于 `providers/models.py`。`providers/catalog.py` 只接收供应商映射与显式引用，不导入 `AppConfig`，避免配置加载与目录解析的循环依赖。
+- `contracts/` 只承载真正跨领域的消息、工具、控制契约。会话、权限、用量等类型由自己的领域维护，不再集中到根层 `models.py`。
+- `permissions/` 判定是否执行，`tools/` 组织工具调用，`execution/` 负责资源与进程；公共路径访问规则集中在 `filesystem/access.py`。
+- `usage/` 保存真实请求消耗，`context/` 管理下一次请求大小，两者分别建模；界面的格式化逻辑位于 `tui/usage.py`。
 
-## 重要文件的调用关系
+测试按相同领域放在 `tests/agent`、`config`、`context`、`sessions`、`permissions`、`usage`、`tui` 等目录；跨领域链路放在 `tests/integration`。根级只保留共享 fixture 和测试供应商辅助函数，测试替身也必须明确标记响应完成。
 
-### `main.py`
+## 运行数据
 
-- **负责**：仓库根入口
-- **被谁调用**：`python main.py`、PyInstaller 打包入口
-- **会调用谁**：`lancher_code.cli.main`
+```text
+~/.lancher/
+├── lancher.yaml                 # 唯一主配置
+├── permissions.yaml             # 用户权限规则
+├── mcp.yaml                     # 全局 MCP
+└── logs/
 
-### `lancher_code/cli.py`
+<项目>/.lancher/
+├── permissions.yaml             # 项目权限规则
+├── mcp.yaml                     # 项目 MCP 覆盖
+└── sessions/<UUID>/
+    ├── events.jsonl             # 版本 2，持久化事实来源
+    ├── meta.json                # 版本 2，列表缓存
+    ├── checkpoint.json          # 版本 2，投影快照
+    ├── processes/               # 进程元信息与输出
+    ├── blobs/                   # 大工具结果
+    └── workspace/               # plan.md、tmp/、artifacts/
+```
 
-- **负责**：进程级入口。构建 argparse 解析器（当前**没有定义任何参数**，仅保留 `prog="lancher"` 描述）、初始化日志、`asyncio.run(run_app())`、统一异常处理与退出码
-- **被谁调用**：`main.py`、`__main__.py`、console script（`lancher` / `lancher-code`）
-- **会调用谁**：`app.run_app`、`logging_system.configure_logging / close_logging`
+主配置不读取项目根的 `lancher.yaml`。旧配置和旧会话格式会明确报错，原文件保留，不迁移、不自动删除；可用会话与列表中的格式问题分别返回。公开启动入口 `lancher`、`lancher-code`、`python -m lancher_code` 和仓库 `main.py` 保留。
 
-### `lancher_code/app.py`
-
-- **负责**：装配整个应用（`run_app()`），详见 [workflows/startup.md](workflows/startup.md)
-- **被谁调用**：`cli.main`
-- **会调用谁**：`config_system`（读配置）、`providers.factory.create_provider`、`session.SessionController`、`tools.create_default_tool_registry`、`mcp.MCPClientManager`、`permission_engine`、`settings_service`、`tools.core.executor.ToolExecutor`、`turn_runner.TurnRunner`、`tui_views.bootstrap.ConfigBootstrapTUI`、`tui_views.chat.ChatTUI`
-
-### `lancher_code/turn_runner.py`
-
-- **负责**：一次用户输入的完整工具循环
-- **被谁调用**：`app.py`（构造）、`tui_views/chat.py`（`run_user_turn()` 消费事件流）
-- **会调用谁**：`session.SessionController`、`providers.base.ChatProvider`、`tools.core.executor.ToolExecutor`、`tools.core.registry.ToolRegistry`、`tool_call_parser.ToolCallAssembler`、`context_management`
-
-### `lancher_code/session.py`
-
-- **负责**：会话状态、协议无关 transcript、模式切换、会话保存/恢复
-- **被谁调用**：`app.py`、`turn_runner.py`、`tui_views/chat.py`
-- **会调用谁**：`prompting`（组装请求）、`context_management`（估算/压缩）、`sessions`（事件持久化）
-
-### `lancher_code/permission_engine.py`
-
-- **负责**：工具调用的权限判定与规则存储
-- **被谁调用**：`tools/core/executor.py`（每次工具执行前）
-- **会调用谁**：`tools/core/common.py`（路径沙箱）
-
-### `lancher_code/tools/core/executor.py`
-
-- **负责**：执行一批工具调用（权限复核、资源调度、托管进程和结果排序）
-- **被谁调用**：`turn_runner.py`
-- **会调用谁**：`registry.ToolRegistry`、`permission_engine.PermissionEngine`、具体工具实现
+详细运行链路见 [架构](architecture.md)、[启动流程](workflows/startup.md)、[会话生命周期](workflows/session-lifecycle.md) 与 [工具执行](workflows/tool-execution.md)。

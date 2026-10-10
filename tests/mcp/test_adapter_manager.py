@@ -9,7 +9,8 @@ from lancher_code.mcp.adapter import MCPToolAdapter
 from lancher_code.mcp.config import MCPServerConfig
 from lancher_code.mcp.manager import MCPClientManager
 from lancher_code.mcp.connection import MCPServerConnection, MCPServerDiscovery
-from lancher_code.models import DeferredToolGroup, ToolContext
+from lancher_code.contracts.tools import DeferredToolGroup
+from lancher_code.tools.context import ToolContext
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.logging_system import close_logging, configure_logging, register_sensitive_values
 

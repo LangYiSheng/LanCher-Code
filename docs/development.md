@@ -18,11 +18,11 @@ uv run pytest            # 运行全部测试
 ## 代码组织方式
 
 - 入口 → 装配 → 界面 → 会话/流程 → 能力 → 基础，共六层（见 [project-structure.md](project-structure.md)）。
-- **数据模型集中在 `models.py`**：先看它就能了解全系统的"词汇表"。
+- **数据类型归属领域**：配置、供应商、会话、上下文、权限、用量各有自己的模型；跨领域的消息、工具与控制协议放在 `contracts/`。从类型的所有者模块直接导入，不添加根层转导出。
 - **事件驱动**：TurnRunner → TUI 通过 `TurnEvent` 通信；Provider → TurnRunner 通过 `StreamEvent` 通信。
 - **协议无关**：会话层只存抽象消息，Provider 负责序列化差异。
 
-退出确认、实际收尾和终端小结有各自职责：`tui_views/exit_flow.py` 用单调时钟决定停止与退出意图，界面持有异步操作任务，`app.py` 统一等待清理，`run_summary.py` 只展示最终结果。`run_usage.py` 的本次启动账本观察实际 Provider 请求，切换 Session 或模型时要继续注入同一个 observer，不能改成累计恢复的历史消息。完整场景和统计口径见 [结束工作与恢复对话](workflows/app-exit.md)。
+退出确认、实际收尾和终端小结有各自职责：`tui/exit_flow.py` 用单调时钟决定停止与退出意图，界面持有异步操作任务，`app.py` 统一等待清理，`tui/exit_summary.py` 只展示最终结果。`usage/ledger.py` 的本次启动账本观察实际 Provider 请求，切换 Session 或模型时要继续注入同一个 observer，不能改成累计恢复的历史消息。完整场景和统计口径见 [结束工作与恢复对话](workflows/app-exit.md)。
 
 ## 如何增加一个新功能
 
@@ -42,29 +42,29 @@ uv run pytest            # 运行全部测试
 ### 新增模型协议（Provider）
 
 1. `providers/` 新建实现类，继承 `BaseChatProvider`，实现 `stream_chat()`
-2. `models.py` 的 `ProviderProtocol` Literal 加协议名
+2. `providers/models.py` 的 `ProviderProtocol` Literal 加协议名
 3. `providers/factory.py` 按协议分发
-4. `config_system/loader.py` 的 `SUPPORTED_PROTOCOLS` 登记
+4. `config/loader.py` 的 `SUPPORTED_PROTOCOLS` 登记
 5. 用 `httpx.MockTransport` 写流式测试（参考 `tests/providers/`）
 
 ### 新增 MCP Server 支持类型
 
-- 在 `mcp/config.py` 的 `_parse_server` 扩展类型分支，`mcp/connection.py` 的 `_connect_transport` 增加对应 transport
-- 注意 `settings_service._validate_mcp` 与设置面板的类型列表也要同步
+- 在 `mcp/config.py` 的 `validate_server_config` 扩展类型分支，`mcp/connection.py` 的 `_connect_transport` 增加对应 transport
+- 设置服务复用 `validate_server_config`；同步界面的类型选项，避免再写第二套校验。凭据只在加载启用连接时展开，保存保留变量原文。
 
 ### 新增斜杠命令
 
-1. `slash_commands.py` 的 `create_default_slash_command_registry()` 注册 `SlashCommandDefinition`
-2. `tui_views/chat.py` 的 `_execute_slash_command()` 实现处理逻辑
+1. `tui/commands.py` 的 `create_default_slash_command_registry()` 注册 `SlashCommandDefinition`
+2. `tui/app.py` 的 `_execute_slash_command()` 实现处理逻辑
 3. 如需参数补全，提供 `argument_completer`
-4. `tests/test_slash_commands.py` 与 TUI 测试补充覆盖
+4. `tests/tui/test_slash_commands.py` 与 TUI 测试补充覆盖
 
 ### 新增配置项
 
-1. `models.py` 对应 dataclass 加字段
-2. `config_system/loader.py` 的 `_load_*` 加读取与校验（沿用 `_read_positive_int` 等辅助）
-3. `config_system/writer.py` 的 `serialize_config` 加写回
-4. 需要界面编辑时，扩展 `settings_service.py` 与 `tui_views/settings.py`
+1. `config/models.py` 或所属领域的 dataclass 加字段
+2. `config/loader.py` 的 `_load_*` 加读取与校验（沿用 `_read_positive_int` 等辅助）
+3. `config/writer.py` 的 `serialize_config` 加写回
+4. 需要界面编辑时，扩展 `config/settings.py` 与 `tui/settings/screen.py`
 5. 更新 [configuration.md](configuration.md) 配置表
 
 ## 设计模式速查
@@ -72,16 +72,16 @@ uv run pytest            # 运行全部测试
 | 模式 | 位置 | 说明 |
 |---|---|---|
 | 策略 + 工厂 | `providers/` | `create_provider` 按协议选实现 |
-| 注册表 | `tools/core/registry.py`、`slash_commands.py` | 注册 + 查询 + 模式过滤 |
+| 注册表 | `tools/core/registry.py`、`tui/commands.py` | 注册 + 查询；工具另按工作阶段过滤 |
 | 协议（Protocol） | `tools/core/base.py`、`providers/base.py` | 定义"工具/供应商必须长什么样" |
-| 异步生成器 + 队列 | `turn_runner.py` | 后台任务产事件，消费者逐条消费 |
+| 异步生成器 + 队列 | `agent/runner.py` | 后台任务产事件，消费者逐条消费 |
 | 门面 | `ChatTUI` / `ConfigBootstrapTUI` | 包装 Textual App |
-| 状态机 | `SessionController.set_work_phase` / `set_permission_policy` | 阶段与策略独立，旧模式入口仅供兼容 |
-| 退出意图状态机 | `tui_views/exit_flow.py` | 停止期间锁存请求，空闲双按在 3 秒内确认；时钟可注入 |
-| 请求用量账本 | `run_usage.py` | 每次实际尝试独立记录，快照按已知字段合并；会话与本次启动共享汇总口径 |
-| 容量与消耗分层 | `context_tokens.py`、`context_budget.py` | 可靠输入 usage 校准下一次请求，动态预算控制容量；粗估不填补实际消耗 |
-| 用量显示 | `usage_display.py` | 详情与退出共享未知、部分上报、子项和异常比例格式 |
-| 持久化 | `sessions.repository`、`settings_service._atomic_write_many` | Session 追加事件 + 文件锁；摘要与配置采用临时文件 + `os.replace` |
+| 状态机 | `SessionController.set_work_phase` / `set_permission_policy` | 阶段与策略独立，只使用当前两轴接口 |
+| 退出意图状态机 | `tui/exit_flow.py` | 停止期间锁存请求，空闲双按在 3 秒内确认；时钟可注入 |
+| 请求用量账本 | `usage/ledger.py` | 每次实际尝试独立记录，快照按已知字段合并；会话与本次启动共享汇总口径 |
+| 容量与消耗分层 | `context/tokens.py`、`context/budget.py` | 可靠输入 usage 校准下一次请求，动态预算控制容量；粗估不填补实际消耗 |
+| 用量显示 | `tui/usage.py` | 详情与退出共享未知、部分上报、子项和异常比例格式 |
+| 持久化 | `sessions.event_log`、`config.writer.write_yaml_atomic` | Session 追加事件 + 文件锁；摘要与配置采用临时文件 + `os.replace` |
 
 ## 运行测试
 
@@ -89,15 +89,15 @@ uv run pytest            # 运行全部测试
 uv run pytest                    # 全部
 uv run pytest tests/tools/       # 工具系统
 uv run pytest tests/mcp/         # MCP（含真实 stdio 测试服务器）
-uv run pytest tests/test_tui_flow.py -k streaming   # 按关键字过滤
+uv run pytest tests/tui/test_tui_flow.py -k streaming   # 按关键字过滤
 ```
 
 注意：
 
 - `pytest-asyncio` 为 `auto` 模式，`async def test_*` 自动以 asyncio 运行。
 - Provider 测试通过注入 `httpx.MockTransport` 模拟流式响应（fixture 见 `tests/conftest.py`）。
-- TUI 测试直接驱动 `LanCherTextualApp`（`tests/test_tui_*.py`），不依赖真实终端。
-- `tests/test_exit_flow.py` 用注入时钟检查确认窗口，不靠睡眠；`tests/test_run_summary.py` 检查本次访问的恢复目标、完整 UUID、纯文本标题、窄终端和缺失统计。
+- TUI 测试直接驱动 `LanCherTextualApp`（`tests/tui/test_tui_*.py`），不依赖真实终端。
+- `tests/tui/test_exit_flow.py` 用注入时钟检查确认窗口，不靠睡眠；`tests/tui/test_run_summary.py` 检查本次访问的恢复目标、完整 UUID、纯文本标题、窄终端和缺失统计。
 - 修改退出流程时，状态机测试不能替代真实应用入口：需要确认停止与关闭等待完成后才打印小结，并覆盖清理失败。模型用量测试应同时检查跨 Session/模型、手动/自动压缩、重复 usage 帧和中断流。
 - Windows 上将测试临时目录放到系统 Temp 下的具名目录，例如 `--basetemp="$env:TEMP/lancher-exit-tests"`；配合 `PYTHONDONTWRITEBYTECODE=1` 和 `-p no:cacheprovider`，避免在项目根留下验证产物。
 
@@ -118,7 +118,7 @@ uv run pytest tests/test_tui_flow.py -k streaming   # 按关键字过滤
 - 不要向日志写入密钥：新加的敏感值记得 `register_sensitive_values`。
 - 新增依赖时更新 `pyproject.toml`，并用 `uv lock` 刷新 `uv.lock`。
 - 修改 TUI 时注意窄终端布局（`-narrow` class）与键盘可用性（参考现有测试）。
-- 提交前跑一遍 `uv run pytest`，保证全量通过（README 声称"全量测试当前通过"）。
+- 提交前运行全量测试，结合领域测试检查接口和持久化行为。
 
 ## 打包
 

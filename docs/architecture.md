@@ -8,11 +8,11 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 用户
  ↓ 键盘输入
 ┌─────────────────────────────┐
-│ Textual TUI（tui_views/）    │  界面层：渲染、键盘、弹窗
+│ Textual TUI（tui/）          │  界面层：渲染、键盘、弹窗
 └─────────────────────────────┘
  ↓ ComposerSubmitted / 事件流
 ┌─────────────────────────────┐
-│ TurnRunner（turn_runner.py） │  流程层：ReAct 工具循环
+│ TurnRunner（agent/runner.py） │  流程层：ReAct 工具循环
 └─────────────────────────────┘
      ↓             ↓              ↓
 ┌──────────┐ ┌───────────┐ ┌──────────────────┐
@@ -37,16 +37,18 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 | 组件 | 类 / 入口 | 职责边界 |
 |---|---|---|
 | 应用装配 | `app.run_app()` | 只做组装，不做业务逻辑 |
-| 会话控制器 | `SessionController`（`session.py`）与 `sessions/` | 会话状态、transcript、阶段、权限、计划与队列；独立 UUID 和事件日志持久化 |
-| 工具循环 | `TurnRunner`（`turn_runner.py`） | 回合调度、忙时输入投递、取消、压缩与计划确认 |
-| 上下文治理 | `context_tokens.py`、`context_budget.py`、`context_management.py` | 可靠输入校准、动态额度、结果卸载及摘要候选验证 |
-| 请求用量 | `run_usage.py`、`usage_display.py` | 按请求事实保存消耗，生成会话/本次启动统计并一致显示未知与部分字段 |
-| 权限引擎 | `PermissionEngine` / `PermissionStorage`（`permission_engine.py`） | 权限判定与规则存储，不执行工具 |
+| 会话控制器 | `SessionController`（`sessions/controller.py`）与 `sessions/` | 会话状态、transcript、阶段、权限、计划与队列；独立 UUID 和事件日志持久化 |
+| 工具循环 | `TurnRunner`（`agent/runner.py`） | 回合调度、忙时输入投递、取消、压缩与计划确认 |
+| 上下文治理 | `context/`（tokens、budget、request、offload、compaction、summary、recovery） | 可靠输入校准、动态额度、结果卸载及摘要候选验证 |
+| 请求用量 | `usage/ledger.py`、`tui/usage.py` | 按请求事实保存消耗，生成会话/本次启动统计并一致显示未知与部分字段 |
+| 权限引擎 | `PermissionEngine`（`permissions/engine.py`）/ `PermissionStorage`（`permissions/storage.py`） | 权限判定与规则存储，不执行工具 |
 | 工具系统 | `ToolRegistry` / `ToolExecutor` / `Tool`（`tools/`） | 工具注册、调度、执行 |
 | 模型供应商 | `ChatProvider` 协议 + `BaseChatProvider`（`providers/`） | 统一流式事件输出 |
 | MCP 客户端 | `MCPClientManager`（`mcp/`） | MCP Server 生命周期与工具注册 |
-| 设置服务 | `SettingsService`（`settings_service.py`） | 模型、界面偏好、MCP、权限规则的隔离保存与校验 |
-| TUI | `LanCherTextualApp` / `ChatTUI`（`tui_views/chat.py`） | 界面渲染与交互 |
+| 设置服务 | `SettingsService`（`config/settings.py`） | 模型、界面偏好、MCP、权限规则的隔离保存与校验 |
+| TUI | `LanCherTextualApp` / `ChatTUI`（`tui/app.py`） | 界面渲染与交互 |
+
+领域类型由各自的 `models.py` 维护，跨领域消息、工具和控制契约位于 `contracts/`。`providers/catalog.py` 接收供应商映射与显式模型引用，不依赖 `AppConfig`；`config/loader.py` 可以复用目录解析而不形成循环。`agent/` 拆分输入、模型选择、流收集和工具批次；`sessions/` 分开事件存储、状态编解码与控制；`context/` 集中预算、提示词、请求组装、卸载与摘要。
 
 ## 模块依赖关系
 
@@ -54,7 +56,7 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 graph TD
     CLI[cli.py main] --> APP[app.py run_app]
     APP --> BS[ConfigBootstrapTUI]
-    APP --> CFG[config_system]
+    APP --> CFG[config]
     APP --> SVC[SessionController]
     APP --> PF[ProviderFactory]
     APP --> REG[create_default_tool_registry]
@@ -68,8 +70,8 @@ graph TD
     TR --> SVC
     TR --> PF
     TR --> TE
-    TR --> CM[context_management]
-    TR --> TCP[tool_call_parser]
+    TR --> CM[context.compaction]
+    TR --> TCP[tools.parser]
     TE --> REG
     TE --> PE
     TE --> FS[FileStateCache]
@@ -81,7 +83,7 @@ graph TD
     PF --> CLA[ClaudeProvider]
     OAI --> BASE[BaseChatProvider]
     CLA --> BASE
-    SVC --> PR[prompting]
+    SVC --> PR[context.prompts]
     SVC --> CM
     SVC --> ST[sessions.service / repository / codec]
     TUI --> TR
@@ -96,10 +98,10 @@ graph TD
 
 ```text
 用户输入
-→ ComposerTextArea 提交（tui_views/composer.py 发出 ComposerSubmitted）
-→ ChatTUI.handle_input_submitted
+→ ComposerTextArea 提交（tui/composer.py 发出 ComposerSubmitted）
+→ LanCherTextualApp.handle_input_submitted
    ├─ 工作中：按用户选择保留草稿、补充当前任务或排到下一轮
-   ├─ 解析斜杠命令（slash_commands.py），命中则先执行命令
+   ├─ 解析斜杠命令（tui/commands.py），命中则先执行命令
    └─ TurnRunner.run_user_turn(text)
        ├─ SessionController.create_user_message()  创建用户消息 + 动态提醒
        ├─ SessionController.create_assistant_message()
@@ -134,11 +136,11 @@ graph TD
 ⑤ 人在回路 —— 仍未放行时生成 PermissionRequest，TUI 弹窗由用户决定
 ```
 
-阶段边界、文件路径边界与黑名单均不可被允许规则或 `bypass` 覆盖。当前 Session workspace 的文件工具写入已批准，但显式拒绝仍生效；普通路径按 **规则 > 权限策略 > 用户确认** 判定，同层规则最后匹配者生效。新权限授权使用 `exact` 精确匹配，设置中可显式维护 `glob` 通配或保留 `legacy` 旧规则。文件工具边界不构成操作系统沙箱。详见 [modules/permission-engine.md](modules/permission-engine.md)。
+阶段边界、文件路径边界与黑名单均不可被允许规则或 `bypass` 覆盖。当前 Session workspace 的文件工具写入已批准，但显式拒绝仍生效；普通路径按 **规则 > 权限策略 > 用户确认** 判定，同层规则最后匹配者生效。新权限授权使用 `exact` 精确匹配，设置中可显式维护 `glob` 通配，文件规则必须指定 `exact` 或 `glob`。文件工具边界不构成操作系统沙箱。详见 [modules/permission-engine.md](modules/permission-engine.md)。
 
 ## 关键对象生命周期
 
-### `SessionController`（`session.py`）
+### `SessionController`（`sessions/controller.py`）
 
 ```text
 app.run_app() 创建
@@ -151,7 +153,7 @@ app.run_app() 创建
 → 应用退出：先收尾托管进程，再 close 刷新、写快照、释放文件锁
 ```
 
-### `TurnRunner`（`turn_runner.py`）
+### `TurnRunner`（`agent/runner.py`）
 
 ```text
 构造时注入 provider / session / registry / executor
@@ -177,7 +179,7 @@ MCPClientManager.initialize() → 每个 Server 并行 connect_and_list_tools()
 
 设置默认打开供应商与模型目录，分别显示“本次对话使用”和“新对话默认”。切换本次模型只更新运行时；更改默认只影响新对话。每个表单独立保存，成功后返回目录，返回时只丢弃当前未提交草稿，此前提交保留。
 
-`SettingsService.save_models/save_ui/save_mcp/save_rules` 隔离保存域；模型和偏好通过回调更新运行时，权限规则立即热更新，MCP 保留待重启标记。模型运行时更新失败时，已保存配置保留，旧运行时继续使用并显示错误。旧单模型配置只在有效提交时迁移，原文件保留为 `.bak`。
+`SettingsService.save_models/save_ui/save_mcp/save_rules` 隔离保存域；模型和偏好通过回调更新运行时，权限规则立即热更新，MCP 保留待重启标记。模型运行时更新失败时，已保存配置保留，旧运行时继续使用并显示错误。旧单模型配置明确拒绝并提示重新配置，原文件保留，不迁移或生成备份。
 
 ## 并发与异步模型
 

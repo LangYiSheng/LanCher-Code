@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from lancher_code.tools.core.file_state_cache import FileStateCache
+
 import pytest
 
-from lancher_code.models import ToolContext, ToolDefinition
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.tools.builtin.tool_search import ToolSearchTool
 from lancher_code.tools.core.registry import ToolRegistry
 
@@ -29,7 +32,7 @@ async def test_tool_search_returns_discovered_names(tmp_path) -> None:
 
     result = await tool.execute(
         {"query": "prometheus"},
-        ToolContext(cwd=tmp_path, timeout_seconds=1),
+        ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1),
     )
 
     assert not result.is_error
@@ -40,7 +43,7 @@ async def test_tool_search_returns_discovered_names(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_tool_search_returns_structured_errors(tmp_path) -> None:
     tool = ToolSearchTool(ToolRegistry())
-    context = ToolContext(cwd=tmp_path, timeout_seconds=1)
+    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1)
 
     invalid = await tool.execute({"query": "  "}, context)
     missing = await tool.execute({"query": "unknown"}, context)
@@ -73,7 +76,7 @@ async def test_tool_search_requires_narrower_query_when_result_limit_is_exceeded
 
     result = await ToolSearchTool(registry).execute(
         {"query": "lookup"},
-        ToolContext(cwd=tmp_path, timeout_seconds=1),
+        ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1),
     )
 
     assert result.error_code == "too_many_deferred_tools"

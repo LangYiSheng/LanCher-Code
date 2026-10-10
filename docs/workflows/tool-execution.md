@@ -83,7 +83,7 @@ Esc 遵守焦点层：命令补全菜单中关闭菜单，审批面板中拒绝�
 
 停止保护还必须包住整个批次。只保护每个进程内部的清理并不够：用户再次停止时，某个子任务可能还没获得第一次执行机会，外层批次取消就会直接跳过它。现在整组停止任务独立运行，调用者即使被取消也会等它们真正完成；本轮收尾才能继续保存终态日志并结束事件消费者。
 
-任务界面每次打开都会捕获所属 Session；后续刷新、输入和停止都携带这个身份。不能在按钮点击时读取「当前对话」来决定归属。实现见 [`tui_views/tasks.py`](../../lancher_code/tui_views/tasks.py) 和 [`tui_views/chat.py`](../../lancher_code/tui_views/chat.py)。
+任务界面每次打开都会捕获所属 Session；后续刷新、输入和停止都携带这个身份。不能在按钮点击时读取「当前对话」来决定归属。实现见 [`tui/tasks.py`](../../lancher_code/tui/tasks.py) 和 [`tui/app.py`](../../lancher_code/tui/app.py)。
 
 模型向现存进程写输入或转后台仍要经过权限层。stdin 可能是交互 Shell，也可能触发下一项副作用，所以此类请求只允许本次授权，不保存会话或项目的永久输入放行规则；显式拒绝和危险命令检查仍生效。用户在任务窗口实际发送输入属于直接操作，输入保留前后空白并加一个换行。
 
@@ -156,7 +156,7 @@ profile 中的每项资源默认 `lifetime=process`，也可显式指定 `invoca
 
 已经完成的文件修改不自动回滚。文件写工具使用同目录临时文件，刷新并同步内容，再于提交前检查取消、权限和读取版本，最后原子替换；提交成功后记录成功。远端 MCP 则不同：停止本地等待无法证明服务器撤销了操作。已开始的外部写操作在取消、超时或运输故障后，保留 `mcp_outcome_unknown`，界面显示「结果未知」，提醒先检查远端真实状态，不自动重试。尚未获准或仍在排队的请求明确显示「未执行」，不能把它说成可能已经修改过。
 
-创建、控制和收尾在 [`execution/processes.py`](../../lancher_code/execution/processes.py)；轮次取消在 [`turn_runner.py`](../../lancher_code/turn_runner.py)。
+创建、控制和收尾在 [`execution/processes.py`](../../lancher_code/execution/processes.py)；轮次取消在 [`agent/runner.py`](../../lancher_code/agent/runner.py)。
 
 ## Windows：只杀 PowerShell 为什么不够
 
@@ -235,7 +235,7 @@ sequenceDiagram
     Note over M,S: 下一次正常模型请求才读取通知，不自动开轮
 ```
 
-实现见 [`execution/runtime.py`](../../lancher_code/execution/runtime.py)、[`sessions/codec.py`](../../lancher_code/sessions/codec.py) 与 [`turn_runner.py`](../../lancher_code/turn_runner.py)。
+实现见 [`execution/runtime.py`](../../lancher_code/execution/runtime.py)、[`sessions/codec.py`](../../lancher_code/sessions/codec.py) 与 [`agent/runner.py`](../../lancher_code/agent/runner.py)。
 
 ## 存储失败时，哪些事必须坚持，哪些事必须停止
 
@@ -270,4 +270,4 @@ sequenceDiagram
 - 后台事件留在原会话，不自动请求模型；切换后继续管理，重启不重跑命令。
 - TUI 的宽窄窗口、操作按钮、命令补全、草稿保留和停止范围符合实际行为。
 
-测试分布在 `tests/execution/`、`tests/tools/`、`tests/test_task_interaction.py`、`tests/test_task_safety_regressions.py` 和 `tests/test_tui_tasks.py`。`tests/test_tui_execution.py` 直接使用真实 `run_async`、默认审批与原生命令，覆盖后台服务和资源阻塞的完整路径；时间线文案覆盖 100、60、32 列。运行方法见 [开发指南](../development.md)。未来增加新工具或后端时，优先复用这些契约与边界，而不是为某个命令再写一套临时后台逻辑。
+测试分布在 `tests/execution/`、`tests/tools/`、`tests/agent/test_task_interaction.py`、`tests/agent/test_task_safety_regressions.py` 和 `tests/tui/test_tui_tasks.py`。`tests/tui/test_tui_execution.py` 直接使用真实 `run_async`、默认审批与原生命令，覆盖后台服务和资源阻塞的完整路径；时间线文案覆盖 100、60、32 列。运行方法见 [开发指南](../development.md)。未来增加新工具或后端时，优先复用这些契约与边界，而不是为某个命令再写一套临时后台逻辑。

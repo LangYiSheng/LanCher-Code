@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from lancher_code.tools.core.registry import ToolRegistry
-from lancher_code.models import ToolPermissionMetadata
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lancher_code.tools.core.registry import ToolRegistry
+from lancher_code.contracts.tools import ToolPermissionMetadata
 
 _BUILTIN_LABELS = {
     "read_file": "ReadFile", "write_file": "WriteFile", "edit_file": "EditFile",
@@ -13,6 +16,7 @@ _BUILTIN_LABELS = {
 
 
 def create_default_tool_registry() -> ToolRegistry:
+    from lancher_code.tools.core.registry import ToolRegistry
     from lancher_code.tools.builtin import (
         RunCommandTool,
         create_process_tools,
@@ -45,4 +49,4 @@ def create_default_tool_registry() -> ToolRegistry:
     return registry
 
 
-__all__ = ["ToolRegistry", "create_default_tool_registry"]
+__all__ = ["create_default_tool_registry"]

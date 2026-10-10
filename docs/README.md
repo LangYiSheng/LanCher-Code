@@ -28,7 +28,7 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 | 模型与设置 | 供应商下管理模型，本次使用与新对话默认分别选择；单条保存，支持深浅主题和忙时 Enter 偏好 |
 | 上下文治理 | 最近可信输入 usage 校准、分类保守估算、动态预算、大工具结果落盘及验证后压缩 |
 | 请求用量账本 | 按实际请求记录对话、压缩、重试及中断消耗；会话与本次启动使用相同口径，未知不冒充零 |
-| 会话持久化 | 首条消息自动创建 UUID，按项目保存 `.lancher/sessions/<UUID>/events.jsonl` 新事件格式 v1，独立 workspace，支持恢复、改标题、归档和删除；旧命名格式不读取、不迁移 |
+| 会话持久化 | 首条消息自动创建 UUID，按项目保存 `.lancher/sessions/<UUID>/events.jsonl` 事件格式 2，独立 workspace，支持恢复、改标题、归档和删除；旧格式保留原文件，列表单独报告并提示新建会话 |
 | 退出小结 | 工作中先停止本轮，空闲 3 秒内双按 Ctrl+C 退出；告别显示完整恢复命令及本次启动的输入、输出、缓存和缓存比 |
 | MCP 扩展 | 支持 stdio / Streamable HTTP 两种 MCP Server，工具延迟加载 |
 
@@ -51,9 +51,9 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 ```text
 用户
  ↓
-Textual TUI（lancher_code/tui_views）
+Textual TUI（lancher_code/tui）
  ↓ 提交输入
-TurnRunner（lancher_code/turn_runner.py）── 工具循环
+TurnRunner（lancher_code/agent/runner.py）── 工具循环
  ├── SessionController（会话状态 / 提示词组装）
  ├── Provider（openai / claude 流式请求）
  ├── ToolExecutor + ToolRegistry（内置工具 + MCP 工具）
@@ -69,16 +69,16 @@ TurnRunner（lancher_code/turn_runner.py）── 工具循环
 | 模块 | 位置 | 职责 |
 |---|---|---|
 | 应用装配 | `lancher_code/app.py` | 启动流程：加载配置、创建 Provider、会话、工具、MCP、TUI |
-| 会话层 | `lancher_code/session.py` | `SessionController`：消息、transcript、阶段/权限、计划与队列状态 |
-| 工具循环 | `lancher_code/turn_runner.py` | `TurnRunner`：ReAct 循环、事件流、输入投递、取消、自动压缩 |
-| 上下文管理 | `lancher_code/context_tokens.py`、`context_budget.py`、`context_management.py` | 输入校准、分类估算、动态预算、结果卸载及摘要验证 |
-| 用量与显示 | `lancher_code/run_usage.py`、`usage_display.py` | 请求账本及统一的未知、部分上报、缓存子项显示 |
-| 权限引擎 | `lancher_code/permission_engine.py` | 阶段边界、权限判定、精确/通配规则存储 |
-| 提示词构建 | `lancher_code/prompting.py` | system prompt、阶段/权限提示、动态提醒 |
+| 会话层 | `lancher_code/sessions/controller.py` | `SessionController`：消息、transcript、阶段/权限、计划与队列状态 |
+| 工具循环 | `lancher_code/agent/runner.py` | `TurnRunner`：ReAct 循环、事件流、输入投递、取消、自动压缩 |
+| 上下文管理 | `lancher_code/context/` | 输入校准、分类估算、动态预算、结果卸载及摘要验证 |
+| 用量与显示 | `lancher_code/usage/ledger.py`、`tui/usage.py` | 请求账本及统一的未知、部分上报、缓存子项显示 |
+| 权限引擎 | `lancher_code/permissions/` | 阶段边界、权限判定、精确/通配规则存储 |
+| 提示词构建 | `lancher_code/context/prompts.py` | system prompt、阶段/权限提示、动态提醒 |
 | 工具系统 | `lancher_code/tools/` | 工具注册表、资源执行器、14 个内置工具 |
 | 模型供应商 | `lancher_code/providers/` | OpenAI / Claude 流式适配 |
 | MCP | `lancher_code/mcp/` | MCP Server 配置、连接、工具适配 |
-| TUI | `lancher_code/tui_views/` | 聊天、设置、权限面板、引导界面 |
+| TUI | `lancher_code/tui/` | 聊天、设置、权限面板、引导界面 |
 
 ## 快速开始
 
@@ -111,7 +111,7 @@ python main.py
 8. [结束工作与恢复对话 workflows/app-exit.md](workflows/app-exit.md) — 确认退出、先收尾再告别，以及本次启动的用量账本
 9. [Token 与上下文 workflows/token-accounting.md](workflows/token-accounting.md) — 用数字例子理解请求记账、usage 校准、动态预算与压缩验证
 10. [上下文压缩活动 workflows/context-compaction.md](workflows/context-compaction.md) — 折叠交互、前后估算、压缩率、失败与 Session 恢复
-11. [思考协议与工具恢复 workflows/thinking-and-tool-recovery.md](workflows/thinking-and-tool-recovery.md) — 完整回传、截断反馈及缺失协议的历史恢复
+11. [思考协议与工具恢复 workflows/thinking-and-tool-recovery.md](workflows/thinking-and-tool-recovery.md) — 完整回传、截断反馈及跨来源历史投影
 12. [运行流程 workflows/](workflows/) — 启动、一轮对话、会话生命周期等流程
 13. [开发指南 development.md](development.md) — 如何继续开发
 14. [故障排查 troubleshooting.md](troubleshooting.md) — 常见问题
@@ -126,4 +126,4 @@ python main.py
 | `pyproject.toml` | 项目元数据、依赖、命令入口、pytest 配置 |
 | `lancher.spec` | PyInstaller 打包配置 |
 | `lancher.example.yaml` | 配置文件结构示例（无真实密钥） |
-| `lancher.yaml` | 仓库根目录的本地运行配置（已被 `.gitignore` 忽略，含真实密钥，不要提交） |
+| `~/.lancher/lancher.yaml` | 全局主配置，应用不读取仓库根同名文件 |

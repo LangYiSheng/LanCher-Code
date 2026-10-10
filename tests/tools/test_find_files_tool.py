@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from lancher_code.tools.core.file_state_cache import FileStateCache
+
 from pathlib import Path
 
-from lancher_code.models import ToolContext
+from lancher_code.tools.context import ToolContext
 from lancher_code.tools.builtin.glob import GlobTool
 
 
@@ -14,11 +16,11 @@ def test_find_files_tool_returns_matching_files(tmp_path: Path) -> None:
     tool = GlobTool()
 
     result = __import__("asyncio").run(
-        tool.execute({"pattern": "**/*.py"}, ToolContext(cwd=tmp_path, timeout_seconds=1))
+        tool.execute({"pattern": "**/*.py"}, ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1))
     )
 
-    assert result.ok is True
-    assert len(result.payload["paths"]) == 2
+    assert (not result.is_error) is True
+    assert len(result.metadata["paths"]) == 2
     assert "a.py" in result.content
     assert "nested\\c.py" in result.content or "nested/c.py" in result.content
 
@@ -29,10 +31,10 @@ def test_find_files_tool_truncates_large_result_set_for_ui(tmp_path: Path) -> No
     tool = GlobTool()
 
     result = __import__("asyncio").run(
-        tool.execute({"pattern": "*.py"}, ToolContext(cwd=tmp_path, timeout_seconds=1))
+        tool.execute({"pattern": "*.py"}, ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1))
     )
 
-    assert result.ok is True
-    assert result.payload["truncated"] is True
-    assert len(result.payload["paths"]) == 200
-    assert result.payload["total_matches"] == 205
+    assert (not result.is_error) is True
+    assert result.metadata["truncated"] is True
+    assert len(result.metadata["paths"]) == 200
+    assert result.metadata["total_matches"] == 205

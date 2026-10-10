@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from lancher_code.tools.core.file_state_cache import FileStateCache
+
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from lancher_code.models import ToolCall, ToolContext, ToolDefinition, ToolPermissionMetadata
-from lancher_code.permission_engine import PermissionEngine, PermissionStorage
+from lancher_code.contracts.tools import ToolCall, ToolDefinition, ToolPermissionMetadata
+from lancher_code.tools.context import ToolContext
+from lancher_code.permissions.engine import PermissionEngine, PermissionStorage
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.builtin.command import RunCommandTool
 from lancher_code.tools.builtin.edit_file import EditFileTool
@@ -23,7 +26,7 @@ def _context(project: Path, *, phase: str = "execute", policy: str = "default", 
     root = project / ".lancher" / "sessions" / identity
     workspace = root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    return ToolContext(
+    return ToolContext(file_state_cache=FileStateCache(),
         cwd=project, project_root=project, timeout_seconds=1,
         work_phase=phase, permission_policy=policy,
         session_id=identity, session_root=root, session_workspace=workspace,
@@ -60,8 +63,8 @@ def test_plan_writer_is_bound_to_the_current_workspace(tmp_path):
 def test_explicit_denial_beats_workspace_grant_and_higher_scope_allow(tmp_path):
     context = _context(tmp_path)
     storage = PermissionStorage(project_rules_path=tmp_path / ".lancher" / "permissions.yaml")
-    storage.add_project_rule("WriteFile(*)", "deny")
-    storage.add_session_rule("WriteFile(*)", "allow")
+    storage.add_project_rule("WriteFile(*)", "deny", match_kind="glob")
+    storage.add_session_rule("WriteFile(*)", "allow", match_kind="glob")
     check = PermissionEngine(storage).evaluate(
         call=_call("write_file", {"path": str(context.session_workspace / "note.md")}),
         tool=WriteFileTool().definition, context=context,
@@ -76,7 +79,7 @@ def test_project_and_other_workspace_writes_stay_readonly_during_investigation(t
     context = _context(tmp_path, phase=phase, policy=policy)
     other = _context(tmp_path, identity="b" * 32)
     storage = PermissionStorage()
-    storage.add_session_rule("WriteFile(*)", "allow")
+    storage.add_session_rule("WriteFile(*)", "allow", match_kind="glob")
     for path in (tmp_path / "code.py", other.session_workspace / "note.md"):
         check = PermissionEngine(storage).evaluate(call=_call("write_file", {"path": str(path)}), tool=WriteFileTool().definition, context=context)
         assert check.decision == "deny"

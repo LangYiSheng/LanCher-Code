@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import PathWriteDeniedError, atomic_write_text, relative_display_path, resolve_writable_path
+from lancher_code.filesystem.access import PathWriteDeniedError, relative_display_path, resolve_writable_path
+from lancher_code.tools.core.common import atomic_write_text
 
 WRITE_FILE_DESCRIPTION = (
     "写入完整文本文件。适合创建新文件，或在已经完整阅读过旧文件且确认没有外部变更后整体重写文件。"
@@ -19,7 +21,7 @@ class WriteFileTool:
         return ToolDefinition(
             name="write_file",
             description=WRITE_FILE_DESCRIPTION,
-            params_model={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
@@ -35,7 +37,7 @@ class WriteFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
+            allowed_phases=("discuss", "plan", "execute"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 
 from lancher_code.execution.contracts import ResourceClaim
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
-from lancher_code.sessions.repository import SessionRepositoryError
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
+from lancher_code.sessions.storage import SessionRepositoryError
 from lancher_code.tools.builtin.command import _integer
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
 
@@ -42,11 +43,11 @@ class ProcessTool:
             required.append("text")
         read_only = self.name in {"process_list", "process_read", "process_wait"}
         return ToolDefinition(name=self.name, description=_DESCRIPTIONS[self.name],
-            params_model={"type": "object", "properties": properties,
+            input_schema={"type": "object", "properties": properties,
                           "required": required, "additionalProperties": False},
             category="read" if read_only else "command", is_system_tool=True,
-            allowed_modes=("default", "plan", "acceptEdits", "bypass") if read_only
-                          else ("default", "acceptEdits", "bypass"))
+            allowed_phases=("discuss", "plan", "execute") if self.name in {"process_list", "process_read", "process_wait", "process_stop"}
+                          else ("execute",))
 
     def resource_claims(self, arguments: dict, context: ToolContext) -> tuple[ResourceClaim, ...]:
         if self.name in {"process_write", "process_background"}:

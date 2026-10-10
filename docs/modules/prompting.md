@@ -10,7 +10,7 @@
 - MCP 延迟工具索引
 - 用户消息的组装
 
-实现位置：`lancher_code/prompting.py`。
+实现位置：`lancher_code/context/prompts.py`。
 
 ## 核心函数
 
@@ -21,7 +21,7 @@
 | `build_prompt_context(...)` | 组装 `PromptContext`（含 `os_label`、`plan_exists` 等） |
 | `build_chat_request_payload(...)` | 最终拼装：`system = [系统提示, 环境提示, 动态提醒?, 延迟工具索引?]` + `messages` + `tools` |
 | `build_user_message(text, dynamic_context)` | 用户消息 = `<system-reminder>` 块 + 文本块 |
-| `build_dynamic_context_prompt(context)` | 聚合所有动态提醒（Plan / MCP / Skill / AGENTS 注入） |
+| `build_dynamic_context_prompt(context)` | 根据工作阶段生成讨论、计划与退出计划提醒 |
 | `build_deferred_tools_prompt(groups)` | `<deferred_tools>` 索引（Server 名 + 工具名，HTML 转义） |
 
 ## Plan Mode 动态提醒
@@ -47,23 +47,12 @@ SessionController.create_user_message()
   → build_dynamic_context_prompt(...) 生成 <system-reminder> 文本
   → 作为用户消息第一个 block 存入 transcript
 
-SessionController._request_transcript()（发送前）
+context.request.build_request()（发送前）
   → 移除旧 reminder 块
   → 把最新的动态提醒插到最近一条用户消息头部
 ```
 
 这样保证：**发送给模型的提醒永远是当前状态的最新版本**，而历史 transcript 中保留的是注入时刻的版本（用于展示）。
-
-## 预留的注入点
-
-`build_dynamic_context_prompt()` 目前串联了四个 builder：
-
-- `build_plan_mode_prompt` — 已实现
-- `build_mcp_server_prompt` — 当前返回 `None`（占位）
-- `build_skill_update_prompt` — 当前返回 `None`（占位）
-- `build_agents_injection_prompt` — 当前返回 `None`（占位）
-
-`build_chat_request_payload()` 中也有两处注释标记的预留位置（AGENTS.md 注入、自动记忆注入）。这些是**未实现的设计占位**，新增能力时可在此扩展。
 
 ## 输出示例（payload 结构）
 
@@ -82,9 +71,9 @@ PromptPayload(
 
 ## 与其他模块的关系
 
-- ← `session.py`：组装请求、注入动态提醒
-- ← `context_management.py`：压缩摘要有独立系统提示（`SUMMARY_SYSTEM_PROMPT`，不在本模块）
-- → `models.py`：产出 `PromptContext` / `PromptPayload`
+- ← `sessions/controller.py`：组装请求、注入动态提醒
+- ← `context/summary.py`：压缩摘要有独立系统提示（`SUMMARY_SYSTEM_PROMPT`，不在本模块）
+- → `context/prompt_models.py`：产出 `PromptContext` / `PromptPayload`
 
 ## 注意事项
 

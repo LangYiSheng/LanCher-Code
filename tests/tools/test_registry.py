@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from lancher_code.errors import ToolNotFoundError
-from lancher_code.models import ToolDefinition
+from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.tools.builtin.read_file import ReadFileTool
 from lancher_code.tools.core.registry import ToolRegistry
 
@@ -34,13 +34,13 @@ def test_registry_raises_for_missing_tool() -> None:
 
 
 class DeferredTool:
-    def __init__(self, name: str, description: str, *, allowed_modes=("default", "plan", "acceptEdits", "bypass")) -> None:
+    def __init__(self, name: str, description: str, *, allowed_phases=("discuss", "plan", "execute")) -> None:
         self._definition = ToolDefinition(
             name=name,
             description=description,
             input_schema={"type": "object"},
             should_defer=True,
-            allowed_modes=allowed_modes,
+            allowed_phases=allowed_phases,
         )
 
     @property
@@ -81,10 +81,10 @@ def test_registry_searches_deferred_tools_by_keyword_and_exact_name() -> None:
 def test_registry_excludes_mode_disallowed_deferred_tools() -> None:
     registry = ToolRegistry()
     registry.register(
-        DeferredTool("mcp__demo__write", "远程写入", allowed_modes=("default",))
+        DeferredTool("mcp__demo__write", "远程写入", allowed_phases=("execute",))
     )
 
-    assert registry.search_deferred("write", mode="plan") == []
+    assert registry.search_deferred("write", work_phase="plan") == []
 
 
 def test_registry_groups_deferred_tools_without_parsing_visible_names() -> None:
@@ -99,11 +99,11 @@ def test_registry_groups_deferred_tools_without_parsing_visible_names() -> None:
         deferred_server_name="grafana_prod",
     )
     registry.register(
-        DeferredTool("mcp__grafana_prod__write", "写入指标", allowed_modes=("default",)),
+        DeferredTool("mcp__grafana_prod__write", "写入指标", allowed_phases=("execute",)),
         deferred_server_name="grafana_prod",
     )
 
-    groups = registry.list_deferred_index(mode="plan")
+    groups = registry.list_deferred_index(work_phase="plan")
 
     assert len(groups) == 1
     assert groups[0].server_name == "grafana_prod"

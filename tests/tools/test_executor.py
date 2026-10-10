@@ -5,21 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from lancher_code.models import (
-    PermissionRequest,
-    PermissionResolution,
-    ToolCall,
-    ToolContext,
-    ToolDefinition,
-    ToolExecutionResult,
-    ToolPermissionMetadata,
-)
-from lancher_code.permission_engine import PermissionEngine, PermissionStorage
+from lancher_code.permissions.models import PermissionRequest, PermissionResolution
+from lancher_code.contracts.tools import ToolCall, ToolDefinition, ToolExecutionResult, ToolPermissionMetadata
+from lancher_code.tools.context import ToolContext
+from lancher_code.permissions.engine import PermissionEngine
+from lancher_code.permissions.storage import PermissionStorage
 from lancher_code.execution.contracts import ResourceClaim, ResourceOwner
 from lancher_code.execution.contracts import ExecutionConfig, ExecutionLimits
 from lancher_code.execution.runtime import ExecutionRuntime
 from lancher_code.execution.scheduler import get_project_scheduler, path_claim, project_claim
-from lancher_code.models import CancellationToken
+from lancher_code.contracts.control import CancellationToken
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 
@@ -36,8 +31,8 @@ class SuccessTool:
         return ToolExecutionResult(
             call_id="",
             tool_name=self.definition.name,
-            ok=True,
-            payload={"content": f"{arguments['value']}@{context.cwd.name}"},
+            is_error=False,
+            content=f"{arguments['value']}@{context.cwd.name}", metadata={},
             summary="ok",
         )
 
@@ -58,7 +53,7 @@ class SlowTool:
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:
         await asyncio.sleep(context.timeout_seconds + 0.1)
-        return ToolExecutionResult(call_id="", tool_name=self.definition.name, ok=True, payload={}, summary="late")
+        return ToolExecutionResult(call_id="", tool_name=self.definition.name, is_error=False, metadata={}, summary="late")
 
 
 def _call(name: str, arguments: dict[str, object], *, index: int = 0) -> ToolCall:
@@ -79,9 +74,9 @@ async def test_executor_returns_success_result(tmp_path: Path) -> None:
 
     results = await executor.execute_calls([_call("success_tool", {"value": "hello"})])
 
-    assert results[0].ok is True
+    assert (not results[0].is_error) is True
     assert results[0].call_id == "call-0"
-    assert results[0].payload["content"] == f"hello@{tmp_path.name}"
+    assert results[0].content == f"hello@{tmp_path.name}"
 
 
 @pytest.mark.asyncio
@@ -90,7 +85,7 @@ async def test_executor_wraps_missing_tool(tmp_path: Path) -> None:
 
     results = await executor.execute_calls([_call("missing_tool", {})])
 
-    assert results[0].ok is False
+    assert (not results[0].is_error) is False
     assert results[0].error_code == "tool_not_found"
 
 
@@ -107,7 +102,7 @@ async def test_executor_wraps_tool_exception(tmp_path: Path) -> None:
 
     results = await executor.execute_calls([_call("failing_tool", {})], on_result=on_result)
 
-    assert results[0].ok is False
+    assert (not results[0].is_error) is False
     assert results[0].error_code == "tool_exception"
     assert results[0].error_message == "boom"
     assert reported == results
@@ -126,7 +121,7 @@ async def test_executor_wraps_timeout(tmp_path: Path) -> None:
 
     results = await executor.execute_calls([_call("slow_tool", {})], on_result=on_result)
 
-    assert results[0].ok is False
+    assert (not results[0].is_error) is False
     assert results[0].error_code == "tool_timeout"
     assert reported == results
 
@@ -145,7 +140,7 @@ async def test_executor_continues_after_failure(tmp_path: Path) -> None:
         ]
     )
 
-    assert [result.ok for result in results] == [False, True]
+    assert [(not result.is_error) for result in results] == [False, True]
     assert results[1].call_id == "call-1"
 
 
@@ -450,10 +445,10 @@ async def test_default_background_command_releases_fallback_after_returning_hand
     executor = ToolExecutor(registry, cwd=tmp_path)
     result, = await executor.execute_calls([_call("run_command", {"command": "python server.py",
         "description": "启动服务", "lifetime": "session"})], permission_policy="bypass")
-    assert result.ok and command.lease.transferred
+    assert (not result.is_error) and command.lease.transferred
     try:
-        assert (await asyncio.wait_for(executor.execute_calls([
-            _call("write_file", {"path": "client.py", "content": "请求服务"})], permission_policy="bypass"), 1))[0].ok
+        assert (not (await asyncio.wait_for(executor.execute_calls([
+            _call("write_file", {"path": "client.py", "content": "请求服务"})], permission_policy="bypass"), 1))[0].is_error)
         assert command.lease.released
     finally:
         await command.lease.release()
@@ -490,7 +485,7 @@ async def test_approved_call_reports_real_waiting_resource_and_clears_it_at_star
         assert update["waiting"]["blockers"][0]["process_id"] == "server"
         assert not tool.entered.is_set()
         await owner.release()
-        assert (await asyncio.wait_for(task, 1))[0].ok
+        assert (not (await asyncio.wait_for(task, 1))[0].is_error)
         remaining = []
         while not updates.empty():
             remaining.append(updates.get_nowait())
@@ -526,7 +521,7 @@ async def test_same_batch_predecessor_is_queued_before_permission_or_resource_wa
         assert second[0]["waiting"]["reason"] == "predecessors"
         assert second[0]["waiting"]["blockers"][0]["invocation_id"]
         tool.release.set()
-        assert all(result.ok for result in await asyncio.wait_for(task, 1))
+        assert all((not result.is_error) for result in await asyncio.wait_for(task, 1))
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -598,7 +593,7 @@ async def test_completed_predecessor_disappears_while_other_predecessor_still_ru
         releases[names[1 - completed_index]].set()
         await asyncio.wait_for(entered["third"].wait(), 1)
         releases["third"].set()
-        assert all(result.ok for result in await asyncio.wait_for(task, 1))
+        assert all((not result.is_error) for result in await asyncio.wait_for(task, 1))
     finally:
         for event in releases.values():
             event.set()
@@ -646,10 +641,10 @@ async def test_waiting_permission_does_not_hold_resources(tmp_path: Path) -> Non
     try:
         await asyncio.wait_for(awaiting_approval.wait(), 1)
         result = await asyncio.wait_for(ToolExecutor(second, cwd=tmp_path).execute_calls([_call("read_file", {"path": "a"})]), 1)
-        assert result[0].ok and not write.entered.is_set()
+        assert (not result[0].is_error) and not write.entered.is_set()
         approve.set()
         write.release.set()
-        assert (await task)[0].ok
+        assert (not (await task)[0].is_error)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -744,7 +739,7 @@ async def test_completed_write_result_survives_simultaneous_token_stop(tmp_path:
     registry.register(CommittingTool())
     result = await ToolExecutor(registry, cwd=tmp_path).execute_calls(
         [_call("success_tool", {"value": "ok"})], cancellation_token=CancellationToken())
-    assert result[0].ok and result[0].content == "committed"
+    assert (not result[0].is_error) and result[0].content == "committed"
 
 
 @pytest.mark.asyncio
@@ -775,7 +770,7 @@ async def test_stop_process_enters_when_ordinary_capacity_is_full(tmp_path: Path
     try:
         await asyncio.wait_for(stop_entered.wait(), 1)
         results = await asyncio.wait_for(task, 1)
-        assert all(result.ok for result in results)
+        assert all((not result.is_error) for result in results)
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

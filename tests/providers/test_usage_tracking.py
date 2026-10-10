@@ -6,11 +6,12 @@ import json
 import httpx
 import pytest
 
-from lancher_code.context_management import _collect_summary
+from lancher_code.context.compaction import _collect_summary
 from lancher_code.errors import ProviderRequestError, ProviderResponseError
-from lancher_code.models import ChatRequest, ThinkingConfig
+from lancher_code.contracts.messages import ChatRequest
+from lancher_code.providers.models import ThinkingConfig
 from lancher_code.providers.factory import create_provider
-from lancher_code.run_usage import RunUsageTracker
+from lancher_code.usage.ledger import RunUsageTracker
 
 
 def _sse(value: dict) -> bytes:
@@ -274,10 +275,9 @@ async def test_prepared_attempt_identity_is_consumed_once(openai_provider_config
     tracker = RunUsageTracker()
     provider = _provider(openai_provider_config, tracker, _openai_usage() + b"data: [DONE]\n\n")
     model_request = ChatRequest(model="first", request_id="prepared")
-    model_request._prepared_usage_attempt_id = "prepared"
+    model_request.prepare_usage_attempt()
     _ = [event async for event in provider.stream_chat(model_request)]
     assert model_request.request_id == "prepared"
-    assert model_request._prepared_usage_attempt_id is None
     _ = [event async for event in provider.stream_chat(model_request)]
     assert model_request.request_id != "prepared"
     assert {record.request_id for record in tracker.records} == {"prepared", model_request.request_id}

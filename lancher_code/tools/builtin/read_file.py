@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import relative_display_path, resolve_path_in_root
+from lancher_code.filesystem.access import relative_display_path, resolve_path_in_root
 
 DEFAULT_MAX_INLINE_LINES = 400
 MAX_CHUNK_LINES = 400
@@ -20,7 +21,7 @@ class ReadFileTool:
         return ToolDefinition(
             name="read_file",
             description=READ_FILE_DESCRIPTION,
-            params_model={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
@@ -43,7 +44,7 @@ class ReadFileTool:
                 "additionalProperties": False,
             },
             category="read",
-            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
+            allowed_phases=("discuss", "plan", "execute"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

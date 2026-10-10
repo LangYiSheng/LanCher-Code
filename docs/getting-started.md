@@ -56,7 +56,7 @@ python main.py          # 仓库根入口（依赖 main.py）
 
 ## 3. 第一次运行：配置引导
 
-首次启动时，如果 `~/.lancher/lancher.yaml` 不存在，程序会进入 **Textual 引导界面**（`ConfigBootstrapTUI`，见 `lancher_code/tui_views/bootstrap.py`）。
+首次启动时，如果 `~/.lancher/lancher.yaml` 不存在，程序会进入 **Textual 引导界面**（`ConfigBootstrapTUI`，见 `lancher_code/tui/bootstrap.py`）。
 
 需要填写：
 
@@ -106,7 +106,7 @@ runtime:
   permission_policy: default
 ```
 
-完整配置项说明见 [configuration.md](configuration.md)。用 `/settings open` 增加供应商及模型，用 `/model` 在命令菜单中切换本次模型；`/settings` 可直接修改界面偏好及新对话默认模型。旧单 `provider` 配置无需手动迁移，首次保存会备份后升级。
+完整配置项说明见 [configuration.md](configuration.md)。用 `/settings open` 增加供应商及模型，用 `/model` 在命令菜单中切换本次模型；`/settings` 可直接修改界面偏好及新对话默认模型。旧单 `provider` 或 `runtime.permission_mode` 配置会提示重新配置，原文件保留，不自动升级；请参照当前示例重新填写。
 
 > 仓库根目录的 `lancher.yaml` 是本地运行配置（已被 `.gitignore` 忽略），里面可能包含真实 API Key，**不要**把它当作示例或提交到版本库。
 

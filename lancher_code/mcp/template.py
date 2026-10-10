@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lancher_code.config_system.paths import get_global_mcp_config_path
+from lancher_code.config.paths import get_global_mcp_config_path
 
 MCP_CONFIG_TEMPLATE = '''# LanCher Code MCP Server 配置
 # 未启用 MCP 时保持空对象即可。

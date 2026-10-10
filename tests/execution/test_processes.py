@@ -13,7 +13,7 @@ import pytest
 
 from lancher_code.execution.contracts import ExecutionLimits, ProcessSpec, ReadinessProbe
 from lancher_code.execution.processes import ProcessSupervisor
-from lancher_code.models import CancellationToken
+from lancher_code.contracts.control import CancellationToken
 
 
 def command(script: str) -> str:

@@ -4,7 +4,8 @@ import copy
 from uuid import uuid4
 
 from lancher_code.sessions.codec import SessionCodec
-from lancher_code.sessions.repository import ProjectSessionRepository, SessionRepositoryError
+from lancher_code.sessions.repository import ProjectSessionRepository
+from lancher_code.sessions.storage import SessionRepositoryError
 
 
 class SessionService:
@@ -63,15 +64,15 @@ class SessionService:
         previous = self._saved
         # 请求账本只写单条增量。恢复中把 running 改为 incomplete 时，也
         # 必须经过同一个事件出口；正常回调已同步 _saved，不会重复追加。
-        previous_requests = previous['state'].setdefault('request_usage', {})
-        current_requests = snapshot['state'].get('request_usage', {})
+        previous_requests = previous['state']['request_usage']
+        current_requests = snapshot['state']['request_usage']
         if previous_requests.keys() - current_requests.keys():
             raise SessionRepositoryError('请求账本不能删除已保存的历史记录。')
         for request_id, record in current_requests.items():
             if previous_requests.get(request_id) != record:
                 self.record_usage(record, turn_id=record.get('turn_id'))
-        previous_activities = previous['state'].setdefault('compaction_activities', {})
-        current_activities = snapshot['state'].get('compaction_activities', {})
+        previous_activities = previous['state']['compaction_activities']
+        current_activities = snapshot['state']['compaction_activities']
         if previous_activities.keys() - current_activities.keys():
             raise SessionRepositoryError('压缩活动不能删除已保存的历史记录。')
         completed_activity = None
@@ -149,6 +150,10 @@ class SessionService:
                 self.writer.append('transcript.appended', {'messages': after[len(before):]})
                 before.extend(copy.deepcopy(after[len(before):]))
 
+    def compaction_committed(self, activity_id: str) -> bool:
+        saved = self._saved
+        return bool(saved is not None and saved["state"]["compaction_activities"].get(activity_id, {}).get("status") == "completed")
+
     def record(self, kind, data=None, *, turn_id=None):
         if self.writer is None:
             raise SessionRepositoryError('尚未创建会话。')
@@ -163,16 +168,16 @@ class SessionService:
         """用量帧单独追加，checkpoint 与事件重放得到同一请求快照。"""
         if self.writer is None:
             return
-        if self._saved['state'].get('request_usage', {}).get(data['request_id']) == data:
+        if self._saved['state']['request_usage'].get(data['request_id']) == data:
             return
         self.record('usage.request_updated', data, turn_id=turn_id)
-        self._saved['state'].setdefault('request_usage', {})[data['request_id']] = copy.deepcopy(data)
+        self._saved['state']['request_usage'][data['request_id']] = copy.deepcopy(data)
 
     def record_compaction(self, data):
         """压缩活动只追加变化的单条快照，避免每次状态变化重写整个活动表。"""
         if self.writer is None:
             return
-        saved = self._saved['state'].setdefault('compaction_activities', {})
+        saved = self._saved['state']['compaction_activities']
         if saved.get(data['id']) == data:
             return
         self.record('compaction.updated', data, turn_id=data.get('turn_id'))

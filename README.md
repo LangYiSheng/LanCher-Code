@@ -33,6 +33,7 @@
 ```bash
 uv sync
 uv run lancher-code
+# 同一入口也可使用 uv run lancher
 ```
 
 也可以直接运行：
@@ -43,7 +44,7 @@ python -m lancher_code
 
 ## 配置文件
 
-程序优先读取全局配置：
+程序读取全局配置：
 
 ```text
 ~/.lancher/lancher.yaml
@@ -64,7 +65,7 @@ lancher.example.yaml
 
 之后用 `/settings` 管理供应商及模型，选择新会话的默认主模型。模型默认继承供应商的协议、Base URL、API Key、超时，也可以逐项覆盖。显示名称不影响 API 调用；未填写时显示 `model_name (供应商名称)`。
 
-配置采用 `providers` 目录和 `default_model: 供应商ID/模型ID`，详见 [配置说明](docs/configuration.md)。原有单 `provider` 配置仍能读取；第一次保存新格式前自动备份为 `lancher.yaml.bak`。环境变量引用和继承关系会保留。
+配置采用 `providers` 目录和 `default_model: 供应商ID/模型ID`，详见 [配置说明](docs/configuration.md)。开发版只接受当前格式；旧单 `provider` 和 `runtime.permission_mode` 会明确提示重新配置，原文件保留，不自动迁移或生成备份。当前格式的环境变量引用和继承关系会保留。
 
 ### 运行时配置
 
@@ -79,7 +80,7 @@ lancher.example.yaml
 - `bypass`
   跳过常规询问，但阶段限制、显式 `deny` 规则与危险命令黑名单仍然生效。
 
-`ui.theme` 默认为 `dark`，可设为 `light`。`ui.busy_enter_action` 默认为 `follow_up`（下一轮），也可设为 `steer`（补充当前任务）或 `draft`（保留草稿）。旧 `permission_mode=plan` 会迁移为计划＋标准权限，其余旧值迁移为执行＋原策略；完整新字段优先。
+`ui.theme` 默认为 `dark`，可设为 `light`。`ui.busy_enter_action` 默认为 `follow_up`（下一轮），也可设为 `steer`（补充当前任务）或 `draft`（保留草稿）。阶段与权限策略分别配置，不接受旧 `permission_mode` 字段。
 
 ### 权限规则文件
 
@@ -103,6 +104,7 @@ rules:
     match_kind: glob
     result: allow
   - match: "WriteFile(.env)"
+    match_kind: exact
     result: deny
 ```
 
@@ -112,7 +114,7 @@ rules:
 - `ReadFile/WriteFile/EditFile(...)` 匹配项目相对路径。
 - `Glob(...)` 匹配 glob 模式本身。
 - `Grep(...)` 匹配搜索范围路径。
-- 新增命令授权默认使用 `match_kind: exact` 精确匹配整条命令；旧规则保持原有通配语义，可在设置中区分。
+- 新增命令授权默认使用 `match_kind: exact` 精确匹配整条命令；需要通配时显式使用 `glob`。规则必须填写 `match_kind`，仅接受这两个值。
 
 ## 交互命令
 
@@ -157,7 +159,7 @@ rules:
 - 会话工作目录：`./.lancher/sessions/<UUID>/workspace/`（含 `plan.md`、`tmp/`、`artifacts/`）
 - 进程记录与输出：`./.lancher/sessions/<UUID>/processes/<进程UUID>/`（应用管理区）
 
-Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入完整 ID；命令不解析短 ID。事件格式版本为 `1`，不兼容旧命名会话 v1–v4；旧 `.lancher/session/` 原样保留，不读取、不迁移。启动和查询列表不会创建会话，模型调用失败的对话也会保留。压缩活动在聊天中可展开查看前后估算和压缩率，恢复会话后保留结果，未结束活动显示为已中断。详见 [Session 生命周期](docs/workflows/session-lifecycle.md) 与 [上下文压缩活动](docs/workflows/context-compaction.md)。
+Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入完整 ID；命令不解析短 ID。事件、列表缓存与 checkpoint 的格式版本为 `2`，只读取当前格式。旧版本与旧 `.lancher/session/` 原样保留，不迁移、不自动删除；列表单独报告不支持或损坏的会话，其他会话仍可使用。启动和查询列表不会创建会话，模型调用失败的对话也会保留。压缩活动在聊天中可展开查看前后估算和压缩率，恢复会话后保留结果，未结束活动显示为已中断。详见 [Session 生命周期](docs/workflows/session-lifecycle.md) 与 [上下文压缩活动](docs/workflows/context-compaction.md)。
 
 后台进程可跨轮次和对话切换，应用退出时统一清理；重启恢复记录与日志，不自动重跑旧命令。未知命令只在本次启动调用期间保守独占项目，返回后台任务后可继续请求服务器或修改文件；这不表示后台命令没有真实文件副作用。`execution.limits` 配置额度，`execution.command_profiles` 为已知命令明确声明持续资源与本机 TCP 就绪检查；资源默认保留到进程退出，也可明确设为仅调用期间。界面区分待批准与等待资源，说明实际阻塞任务。完整设计、取消竞态、Windows Job Object、ConPTY、中文输出分页与存储失败处理的解释见 [工具执行](docs/workflows/tool-execution.md)。
 
@@ -165,4 +167,4 @@ Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入�
 
 - Provider、会话层、工具系统、TurnRunner、TUI 已全部打通。
 - 五层权限系统已落地，并覆盖命令执行与文件操作。
-- 全量测试当前通过。
+- 核心代码按 `agent/`、`context/`、`sessions/`、`config/` 等领域组织；目录职责见 [项目结构](docs/project-structure.md)，验证方式见 [开发说明](docs/development.md)。

@@ -15,13 +15,18 @@ from lancher_code.errors import (
     ProviderResponseError,
     StreamProtocolError,
 )
-from lancher_code.models import ChatRequest, ContentBlock, ConversationMessage, MessageUsage, ProviderConfig, StreamEvent, merge_usage
-from lancher_code.run_usage import RequestUsageRecord, RequestUsageStatus, UsageField, UsageObserver
+from lancher_code.contracts.messages import ChatRequest, StreamEvent
+from lancher_code.usage.models import MessageUsage, merge_usage
+from lancher_code.providers.models import ProviderConfig
+from lancher_code.usage.ledger import RequestUsageRecord, RequestUsageStatus, UsageField, UsageObserver
 
 
 class ChatProvider(Protocol):
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
-        """以统一流事件输出模型回复。"""
+        """完整终帧必须同时提供 response_complete=True 和 assistant_blocks。
+
+        中断流使用 response_complete=False，不能把累计增量冒充完整协议响应。
+        """
 
 
 class BaseChatProvider:
@@ -40,8 +45,7 @@ class BaseChatProvider:
 
     def _prepare_usage_attempt(self, request: ChatRequest) -> ChatRequest:
         """每次执行使用独立副本；只消费上层为本次尝试准备的一次性 ID。"""
-        prepared = request._prepared_usage_attempt_id
-        request._prepared_usage_attempt_id = None
+        prepared = request.take_prepared_usage_attempt()
         identity = prepared if prepared is not None and prepared == request.request_id else uuid4().hex
         run_id = getattr(self._usage_observer, "run_id", None) or request.run_id or self._usage_run_id
         attempt = replace(request, request_id=identity, run_id=run_id)
@@ -112,13 +116,6 @@ class BaseChatProvider:
             if BaseChatProvider._read_optional_usage_value(raw_usage, keys) is not None:
                 fields.add(field_name)
         return frozenset(fields)
-
-    @staticmethod
-    def merge_reported_usage(
-        current: MessageUsage, incoming: MessageUsage, fields: frozenset[UsageField]
-    ) -> MessageUsage:
-        # 缺字段不会抹掉之前的快照；服务端明确上报的零仍然覆盖旧值。
-        return merge_usage(current, incoming)
 
     def _default_client_factory(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self.config.timeout_seconds)
@@ -266,27 +263,6 @@ class BaseChatProvider:
                 "exceeds the context window",
             )
         )
-
-    @staticmethod
-    def text_from_blocks(blocks: list[ContentBlock]) -> str:
-        return "".join(block.text for block in blocks if block.kind == "text")
-
-    @staticmethod
-    def split_system_and_chat_messages(
-        messages: list[ConversationMessage],
-    ) -> tuple[list[ConversationMessage], list[ConversationMessage]]:
-        system_messages: list[ConversationMessage] = []
-        chat_messages: list[ConversationMessage] = []
-        for message in messages:
-            if message.role == "system":
-                system_messages.append(message)
-            else:
-                chat_messages.append(message)
-        return system_messages, chat_messages
-
-    @staticmethod
-    def _read_usage_value(raw_usage: dict[str, object], keys: tuple[str, ...]) -> int:
-        return BaseChatProvider._read_optional_usage_value(raw_usage, keys) or 0
 
     @staticmethod
     def _read_optional_usage_value(raw_usage: dict[str, object], keys: tuple[str, ...]) -> int | None:

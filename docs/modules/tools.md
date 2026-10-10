@@ -15,6 +15,8 @@
   → 结构化 ToolExecutionResult
 ```
 
+工具契约定义在 `contracts/tools.py`：`ToolDefinition` 使用 `input_schema` 与 `allowed_phases`（默认仅 execute），`ToolExecutionResult` 使用 `content`、`is_error`、`metadata`，不提供旧 `ok` / `payload` 别名。执行所需的阶段、权限和会话路径由 `tools/context.py` 的 `ToolContext` 提供。
+
 实际完成事件立即更新 TUI；一批结果按请求顺序交给模型。资源相互冲突的同批调用先排序，独立调用可以并行。`is_concurrency_safe` 已移除，未知工具默认在本次调用期间项目独占，不用类别猜副作用；未知Shell返回后台任务后释放该调用期锁。
 
 工具可以实现 `resource_claims(arguments, context)`，返回可信的 `ResourceClaim` 列表；模型参数不能覆盖这个声明。每项资源可设置 `lifetime=invocation/process`：调用期资源随工具返回释放，持续资源由真实进程保留到退出；没有长进程的工具在调用结束释放全部资源。命令profile的资源默认process，未知命令的默认项目锁则明确invocation，允许服务器返回后台身份后继续执行请求和文件工具，不证明后台没有文件副作用。没有声明的 MCP，即使提供 `readOnlyHint`，也在本次调用期间保守使用项目独占；该提示影响工作阶段可见性，不足以证明并发独立。

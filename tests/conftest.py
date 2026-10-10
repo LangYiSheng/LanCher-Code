@@ -6,7 +6,8 @@ import httpx
 import pytest
 from rich.console import Console
 
-from lancher_code.models import ProviderConfig, ThinkingConfig, UIConfig
+from lancher_code.providers.models import ProviderConfig, ThinkingConfig
+from lancher_code.config.models import UIConfig
 
 
 @pytest.fixture
@@ -52,3 +53,15 @@ def mock_client_factory(handler: httpx.MockTransport) -> httpx.AsyncClient:
 def isolated_project_directory(tmp_path, monkeypatch):
     """每个测试使用自己的项目，防止自动会话落盘污染真实工作目录。"""
     monkeypatch.chdir(tmp_path)
+
+
+def app_config_for(provider: ProviderConfig, **overrides):
+    """业务测试显式构造当前供应商目录，不使用生产兼容入口。"""
+    from lancher_code.config.models import AppConfig
+    from lancher_code.providers.models import ProviderDefinition, ModelDefinition
+    return AppConfig(providers={"test": ProviderDefinition(
+        name="测试", protocol=provider.protocol, base_url=provider.base_url,
+        api_key=provider.api_key, timeout_seconds=provider.timeout_seconds,
+        models={"default": ModelDefinition(model_name=provider.model,
+            context_window=provider.context_window, thinking=provider.thinking)},
+    )}, default_model="test/default", **overrides)

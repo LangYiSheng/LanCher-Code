@@ -18,7 +18,7 @@
 | 错误信息特征 | 原因 |
 |---|---|
 | `provider 配置缺失或格式不正确` | `provider` 节缺失或不是对象 |
-| `xxx 是必填字符串` | `protocol / model / base_url / api_key` 缺一不可（见 `config_system/loader.py`） |
+| `xxx 是必填字符串` | `protocol / model / base_url / api_key` 缺一不可（见 `config/loader.py`） |
 | `protocol 必须是以下值之一: openai, claude` | 协议名拼写错误 |
 | `配置文件不是合法的 YAML` | YAML 语法错误（缩进/引号），检查 `~/.lancher/lancher.yaml` |
 | `runtime.tool_loop_limit 必须是正整数` | 配置了 0 或负数 |
@@ -83,7 +83,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 | `stale_file_state` / `incomplete_file_read` / `file_changed_since_read` | 防盲写守卫：先 `read_file`（完整读取），文件被外部改过就重读 |
 | `large_file_requires_paging` | read_file 大文件需要 `offset` + `limit` |
 | `match_not_found` / `match_not_unique` | edit_file 的 `old_text` 找不到或匹配多次，提供更精确原文 |
-| `permission_user_denied` / `permission_blacklist_denied` / `permission_mode_denied` | 权限拒绝。调整模式、加规则或换命令 |
+| `permission_user_denied` / `permission_blacklist_denied` / `phase_disallowed` | 权限拒绝。检查审批决议或工作阶段；黑名单与阶段限制不能靠允许规则绕过 |
 | `runtime_limit` | 进程达到本次设置的 `max_runtime_ms`，已执行停止；增大运行期限前先确认是否卡住 |
 | `output_limit` | 输出达到磁盘额度，已停止进程，已保存日志保留；检查是否无限打印 |
 | `process_error` | 启动或控制失败，检查所属 Session、工作目录、系统后端与错误正文 |
@@ -135,4 +135,4 @@ Windows 后端从系统目录使用 PowerShell，通过 Job Object 托管；ConP
 - **`lancher.yaml` 与 `lancher.example.yaml` 的区别**：前者是本地真实配置（含密钥，被 gitignore），后者是示例（无密钥）。
 - **`docs/` 被 gitignore**：仓库当前约定不把 `docs/` 纳入版本控制（见 `.gitignore`）。
 - **CLI 没有参数**：`--help` 只有程序名与描述；任何参数都会被解析但无效果。
-- **旧配置路径未启用**：`cwd/lancher.yaml`（legacy path）在 `ConfigBootstrapState` 中被记录，但当前加载流程只读全局配置。
+- **旧格式需要重新配置**：主配置只读 `~/.lancher/lancher.yaml`。旧 `provider` / `permission_mode` 字段、缺少 `match_kind` 的权限规则均明确报错并保留原文件，不自动迁移。会话格式只接受版本 2；列表会单独报告旧格式或损坏文件，使用 `/session new` 建立新会话。

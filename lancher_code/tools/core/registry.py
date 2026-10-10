@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from lancher_code.errors import ToolNotFoundError
-from lancher_code.models import DeferredToolGroup, RuntimeMode, ToolDefinition, WorkPhase, resolve_runtime_axes, tool_available_in_phase
+from lancher_code.contracts.tools import DeferredToolGroup, ToolDefinition, tool_available_in_phase
+from lancher_code.contracts.control import WorkPhase
 from lancher_code.tools.core.base import Tool
 
 
@@ -39,7 +40,6 @@ class ToolRegistry:
         *,
         include_deferred: bool = False,
         discovered_names: set[str] | None = None,
-        mode: RuntimeMode | None = None,
         work_phase: WorkPhase | None = None,
     ) -> list[ToolDefinition]:
         discovered = discovered_names or set()
@@ -51,16 +51,15 @@ class ToolRegistry:
                 and tool.definition.name not in discovered
             ):
                 continue
-            if mode is not None or work_phase is not None:
-                phase, _policy = resolve_runtime_axes(mode, work_phase)
-                if not tool_available_in_phase(tool.definition, phase):
+            if work_phase is not None:
+                if not tool_available_in_phase(tool.definition, work_phase):
                     continue
             definitions.append(tool.definition)
         return definitions
 
-    def list_deferred_index(self, *, mode: RuntimeMode | None = None, work_phase: WorkPhase | None = None) -> list[DeferredToolGroup]:
+    def list_deferred_index(self, *, work_phase: WorkPhase | None = None) -> list[DeferredToolGroup]:
         grouped_names: dict[str, list[str]] = {}
-        for definition in self.list_definitions(include_deferred=True, mode=mode, work_phase=work_phase):
+        for definition in self.list_definitions(include_deferred=True, work_phase=work_phase):
             if not definition.should_defer:
                 continue
             server_name = self._deferred_tool_servers.get(definition.name)
@@ -82,14 +81,13 @@ class ToolRegistry:
         self,
         query: str,
         *,
-        mode: RuntimeMode | None = None,
         work_phase: WorkPhase | None = None,
         limit: int = 8,
     ) -> list[ToolDefinition]:
         normalized = query.strip()
         deferred = [
             definition
-            for definition in self.list_definitions(include_deferred=True, mode=mode, work_phase=work_phase)
+            for definition in self.list_definitions(include_deferred=True, work_phase=work_phase)
             if definition.should_defer
         ]
         if normalized.casefold().startswith("select:"):

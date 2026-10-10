@@ -1,8 +1,11 @@
 from pathlib import Path
 
 import yaml
+import pytest
 
-from lancher_code.mcp.config import load_mcp_config
+from lancher_code.mcp.config import load_mcp_config, validate_server_config
+from lancher_code.config.settings import SettingsError, SettingsService
+from lancher_code.permissions.storage import PermissionStorage
 from lancher_code.mcp.template import MCP_CONFIG_TEMPLATE, ensure_user_mcp_config
 
 
@@ -56,3 +59,35 @@ def test_template_is_valid_and_existing_file_is_not_overwritten(tmp_path: Path) 
     path.write_text("mcp_servers: {custom: {enabled: false, type: stdio}}\n", encoding="utf-8")
     ensure_user_mcp_config(home_dir=tmp_path)
     assert "custom" in path.read_text(encoding="utf-8")
+
+
+def _settings(tmp_path: Path) -> SettingsService:
+    return SettingsService(
+        config_path=tmp_path / "lancher.yaml",
+        global_mcp_path=tmp_path / "mcp.yaml",
+        project_mcp_path=tmp_path / "project-mcp.yaml",
+        permission_storage=PermissionStorage(),
+    )
+
+
+@pytest.mark.parametrize("server", [
+    {"type": "http", "url": "not-a-url"},
+    {"type": "stdio", "command": "python", "args": [1]},
+    {"type": "stdio", "enabled": False, "env": {"TOKEN": 1}},
+])
+def test_settings_and_runtime_share_server_validation(tmp_path: Path, server) -> None:
+    with pytest.raises(ValueError):
+        validate_server_config("demo", server)
+    service = _settings(tmp_path)
+    with pytest.raises(SettingsError):
+        service.save_mcp("global", {"demo": server})
+    assert not service.global_mcp_path.exists()
+
+
+def test_settings_preserves_unresolved_credentials_until_connect(tmp_path: Path) -> None:
+    service = _settings(tmp_path)
+    server = {"type": "http", "url": "https://example.test/mcp",
+              "headers": {"Authorization": "Bearer ${MCP_TEST_TOKEN}"}}
+    service.save_mcp("global", {"demo": server})
+    assert yaml.safe_load(service.global_mcp_path.read_text(encoding="utf-8")) == {"mcp_servers": {"demo": server}}
+    assert validate_server_config("demo", server).headers["Authorization"] == "Bearer ${MCP_TEST_TOKEN}"

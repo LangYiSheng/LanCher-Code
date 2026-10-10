@@ -4,14 +4,26 @@ import copy
 from dataclasses import asdict
 from datetime import datetime
 
-from lancher_code.models import (
-    SessionState, SessionMessage, ConversationMessage, ContentBlock, MessageUsage,
-    ThinkingTrace, TraceEntry, PlanSnapshot, PendingInput, PermissionRule,
-    ContextManagementState, ContextUsageAnchor, ContextFileSnapshot,
-    ToolResultReplacement, CompactionActivity, resolve_runtime_axes,
+from lancher_code.context.models import (
+    CompactionActivity,
+    ContextFileSnapshot,
+    ContextManagementState,
+    ContextUsageAnchor,
 )
-from lancher_code.sessions.repository import SessionRepositoryError
-from lancher_code.run_usage import RequestUsageRecord
+from lancher_code.contracts.messages import ContentBlock, ConversationMessage
+from lancher_code.permissions.models import PermissionRule
+from lancher_code.sessions.models import (
+    PendingInput,
+    PlanSnapshot,
+    SessionMessage,
+    SessionState,
+    ThinkingTrace,
+    TraceEntry,
+)
+from lancher_code.sessions.projection import project_events
+from lancher_code.sessions.storage import SessionRepositoryError
+from lancher_code.usage.ledger import RequestUsageRecord
+from lancher_code.usage.models import MessageUsage
 
 
 class SessionCodec:
@@ -21,7 +33,6 @@ class SessionCodec:
     def encode(cls, state, transcript, rules, model_ref):
         state_data = {
             'work_phase': state.work_phase, 'permission_policy': state.permission_policy,
-            'previous_runtime_mode': state.previous_runtime_mode,
             'plan_mode_turn_count': state.plan_mode_turn_count,
             'pending_plan_exit_notice': state.pending_plan_exit_notice,
             'pending_plan_entry_kind': state.pending_plan_entry_kind,
@@ -49,9 +60,9 @@ class SessionCodec:
             raw = data['state']
             if 'request_usage' not in raw:
                 raise ValueError('会话缺少请求用量账本，旧计量格式不兼容，请创建新会话。')
-            phase, policy = resolve_runtime_axes(work_phase=raw['work_phase'], permission_policy=raw['permission_policy'])
-            if raw['previous_runtime_mode'] not in {None, 'default', 'plan', 'acceptEdits', 'bypass'}:
-                raise ValueError('上一阶段状态无效。')
+            phase, policy = raw["work_phase"], raw["permission_policy"]
+            if phase not in {"discuss", "plan", "execute"} or policy not in {"default", "acceptEdits", "bypass"}:
+                raise ValueError("工作阶段或权限策略无效。")
             if raw['pending_plan_entry_kind'] not in {None, 'initial', 'reentry'}:
                 raise ValueError('计划提示状态无效。')
             if type(raw['plan_mode_turn_count']) is not int or raw['plan_mode_turn_count'] < 0 or type(raw['pending_plan_exit_notice']) is not bool:
@@ -59,16 +70,15 @@ class SessionCodec:
             state = SessionState(
                 session_id=session_id, work_phase=phase, permission_policy=policy,
                 messages=[cls._decode_message(item) for item in data['messages']],
-                plan_snapshot=cls._decode_plan_snapshot(raw['plan_snapshot']),
-                pending_inputs=cls._decode_pending_inputs(raw['pending_inputs'], restore=False),
-                previous_runtime_mode=raw['previous_runtime_mode'],
+                plan_snapshot=cls.decode_plan_snapshot(raw['plan_snapshot']),
+                pending_inputs=cls.decode_pending_inputs(raw['pending_inputs']),
                 plan_mode_turn_count=raw['plan_mode_turn_count'],
                 pending_plan_exit_notice=raw['pending_plan_exit_notice'],
                 pending_plan_entry_kind=raw['pending_plan_entry_kind'],
                 context_management=cls._decode_context_management(raw['context_management']),
-                execution=cls._decode_execution(raw.get('execution', {'processes': {}, 'invocations': {}, 'inbox': []})),
+                execution=cls._decode_execution(raw['execution']),
                 request_usage=cls._decode_request_usage(raw['request_usage'], session_id),
-                compaction_activities=cls._decode_compactions(raw.get('compaction_activities', {})),
+                compaction_activities=cls._decode_compactions(raw['compaction_activities']),
             )
             if len({item.id for item in state.messages}) != len(state.messages):
                 raise ValueError("消息 id 重复。")
@@ -86,7 +96,7 @@ class SessionCodec:
                         activity = state.compaction_activities.get(entry.metadata.get('activity_id'))
                         if activity is None or activity.message_id != message.id:
                             raise ValueError('压缩活动轨迹关联无效。')
-            transcript = [cls._decode_transcript(item) for item in data['transcript']]
+            transcript = [cls.decode_transcript(item) for item in data['transcript']]
             rules = cls._decode_permission_rules({'rules': data['rules']})
             model_ref = data['model_ref']
             if model_ref is not None and (not isinstance(model_ref, str) or not model_ref.strip()):
@@ -98,87 +108,10 @@ class SessionCodec:
     @classmethod
     def project(cls, events):
         try:
-            return cls._project(events)
+            return project_events(events, decode_compaction=cls._decode_compaction,
+                                  apply_execution_event=cls.apply_execution_event)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise SessionRepositoryError(f'会话事件内容无效：{exc}') from exc
-
-    @staticmethod
-    def _project(events):
-        if not events or events[0]['type'] != 'session.created':
-            raise SessionRepositoryError('会话缺少创建记录。')
-        result = copy.deepcopy(events[0]['data']['initial_data'])
-        messages = {item['id']: item for item in result['messages']}
-        for event in events[1:]:
-            kind, data = event['type'], event['data']
-            if kind == 'message.created':
-                if data['id'] in messages:
-                    raise SessionRepositoryError('消息 id 重复。')
-                item = copy.deepcopy(data)
-                result['messages'].append(item)
-                messages[item['id']] = item
-            elif kind == 'message.updated':
-                item = messages[data['id']]
-                item.update(copy.deepcopy(data.get('fields', {})))
-                if 'content_delta' in data:
-                    item['content'] += data['content_delta']
-                if 'content' in data:
-                    item['content'] = data['content']
-            elif kind == 'transcript.appended':
-                result['transcript'].extend(copy.deepcopy(data['messages']))
-            elif kind == 'transcript.updated':
-                result['transcript'][data['index']] = copy.deepcopy(data['message'])
-            elif kind in {'context.compacted', 'context.replaced'}:
-                result['transcript'] = copy.deepcopy(data['messages'])
-                if kind == 'context.compacted' and ('activity_id' in data or 'compaction' in data):
-                    activity = SessionCodec._decode_compaction(data['compaction'])
-                    if activity.id != data['activity_id'] or activity.status != 'completed':
-                        raise ValueError('上下文压缩提交必须关联同一活动的完成快照。')
-                    result['state'].setdefault('compaction_activities', {})[activity.id] = copy.deepcopy(data['compaction'])
-                    result['state']['context_management'] = copy.deepcopy(data['context_management'])
-            elif kind == 'state.changed':
-                # 其它状态变更不会携带累计账本，账本仅由请求增量事件更新。
-                if 'request_usage' not in result['state']:
-                    raise SessionRepositoryError('会话缺少请求用量账本，不能恢复未知的历史消耗。')
-                request_usage = result['state']['request_usage']
-                activities = result['state'].get('compaction_activities', {})
-                result['state'] = copy.deepcopy(data)
-                result['state']['request_usage'] = request_usage
-                result['state']['compaction_activities'] = activities
-            elif kind == 'permissions.changed':
-                result['rules'] = copy.deepcopy(data['rules'])
-            elif kind == 'model.changed':
-                result['model_ref'] = data['model_ref']
-            elif kind.startswith('process.') or kind.startswith('invocation.') or kind == 'execution.inbox_acknowledged':
-                execution = result['state'].setdefault('execution', {'processes': {}, 'invocations': {}, 'inbox': []})
-                SessionCodec.apply_execution_event(execution, kind, data)
-            elif kind == 'usage.request_updated':
-                if 'request_usage' not in result['state']:
-                    raise SessionRepositoryError('会话缺少请求用量账本，不能恢复未知的历史消耗。')
-                result['state']['request_usage'][data['request_id']] = copy.deepcopy(data)
-            elif kind == 'compaction.updated':
-                activity = SessionCodec._decode_compaction(data)
-                result['state'].setdefault('compaction_activities', {})[activity.id] = copy.deepcopy(data)
-                if activity.message_id is not None:
-                    owner = messages.get(activity.message_id)
-                    if owner is None or owner['role'] != 'assistant':
-                        raise ValueError('压缩活动关联的助手消息无效。')
-                    entries = owner['trace']['entries']
-                    if not any(entry['kind'] == 'compaction' and entry['metadata'].get('activity_id') == activity.id
-                               for entry in entries):
-                        # 开始事件本身就固定活动位置；随后 message.updated
-                        # 尚未落盘也能恢复卡片，终态事件则不会重复追加。
-                        if entries:
-                            last = entries[-1]
-                            if last['kind'] in {'text', 'thinking'} and last['metadata'].get('state') == 'streaming':
-                                last['metadata']['state'] = 'complete'
-                        elif owner['status'] == 'streaming':
-                            owner['trace']['collapsed'] = False
-                        entries.append(asdict(TraceEntry(kind='compaction', metadata={'activity_id': activity.id})))
-            elif kind in {'session.renamed', 'session.archived', 'turn.started', 'turn.completed', 'turn.failed', 'turn.interrupted', 'tool.started', 'tool.finished'}:
-                pass
-            else:
-                raise SessionRepositoryError(f'未知的会话事件：{kind}')
-        return result
 
     @staticmethod
     def _encode_compaction(activity):
@@ -291,7 +224,7 @@ class SessionCodec:
             raise ValueError(f'未知执行事件：{kind}')
 
     @staticmethod
-    def _decode_plan_snapshot(value: object) -> PlanSnapshot | None:
+    def decode_plan_snapshot(value: object) -> PlanSnapshot | None:
         if value is None:
             return None
         if not isinstance(value, dict):
@@ -308,7 +241,7 @@ class SessionCodec:
         return snapshot
 
     @staticmethod
-    def _decode_pending_inputs(value: object, *, restore: bool) -> list[PendingInput]:
+    def decode_pending_inputs(value: object) -> list[PendingInput]:
         if not isinstance(value, list):
             raise ValueError("待处理输入必须为数组。")
         items: list[PendingInput] = []
@@ -328,7 +261,7 @@ class SessionCodec:
             if target is not None and (not isinstance(target, str) or not target.strip()):
                 raise ValueError("待处理输入的目标任务无效。")
             seen.add(item_id)
-            items.append(PendingInput(item_id, text, delivery, target, "paused" if restore else state))
+            items.append(PendingInput(item_id, text, delivery, target, state))
         return items
 
     @staticmethod
@@ -337,8 +270,7 @@ class SessionCodec:
             "version": 2,
             "context_id": context.context_id,
             "usage_anchor": asdict(context.usage_anchor) if context.usage_anchor else None,
-            "seen_call_ids": sorted(context.seen_call_ids),
-            "replacements": {key: asdict(value) for key, value in context.replacements.items()},
+            "replacements": dict(context.replacements),
             "recent_files": [asdict(value) for value in context.recent_files],
             "automatic_failure_count": context.automatic_failure_count,
             "automatic_compaction_disabled": context.automatic_compaction_disabled,
@@ -348,16 +280,16 @@ class SessionCodec:
     def _decode_context_management(value: object) -> ContextManagementState:
         if not isinstance(value, dict) or type(value.get("version")) is not int or value.get("version") != 2:
             raise ValueError("上下文计量格式无效或不兼容，请创建新会话。")
-        context_id = value.get("context_id")
+        context_id = value["context_id"]
         if not isinstance(context_id, str) or not context_id.strip():
             raise ValueError("context_id 无效。")
-        anchor_data = value.get("usage_anchor")
+        anchor_data = value["usage_anchor"]
         anchor = None
         if anchor_data is not None:
             if not isinstance(anchor_data, dict):
                 raise TypeError("usage_anchor")
             anchor = ContextUsageAnchor(**anchor_data)
-            for name in ("token_count", "request_estimated_tokens", "message_count"):
+            for name in ("token_count", "message_count"):
                 count = getattr(anchor, name)
                 # bool 是 int 的子类，但 true 不能充当服务端输入计数。
                 if type(count) is not int or count < 0:
@@ -367,30 +299,26 @@ class SessionCodec:
                 if (not isinstance(digest, str) or len(digest) != 64
                         or any(character not in "0123456789abcdef" for character in digest)):
                     raise ValueError(f"usage_anchor.{name} 必须为 SHA-256 摘要。")
-        failure_count = value.get("automatic_failure_count", 0)
-        disabled = value.get("automatic_compaction_disabled", False)
+        failure_count = value["automatic_failure_count"]
+        disabled = value["automatic_compaction_disabled"]
         if type(failure_count) is not int or failure_count < 0:
             raise ValueError("automatic_failure_count 必须为非负整数。")
         if type(disabled) is not bool:
             raise ValueError("automatic_compaction_disabled 必须为布尔值。")
-        raw_seen = value.get("seen_call_ids", [])
-        raw_replacements = value.get("replacements", {})
-        raw_files = value.get("recent_files", [])
-        if not isinstance(raw_seen, list) or not all(isinstance(item, str) for item in raw_seen):
-            raise TypeError("seen_call_ids")
+        raw_replacements = value["replacements"]
+        raw_files = value["recent_files"]
         if not isinstance(raw_replacements, dict) or not isinstance(raw_files, list):
             raise TypeError("context management collections")
-        replacements: dict[str, ToolResultReplacement] = {}
-        for key, item in raw_replacements.items():
-            if not isinstance(key, str) or not isinstance(item, dict):
-                raise TypeError("tool result replacement")
-            replacements[key] = ToolResultReplacement(**item)
-        files = [ContextFileSnapshot(**item) for item in raw_files if isinstance(item, dict)]
+        if any(not isinstance(key, str) or not key or not isinstance(path, str) or not path
+               for key, path in raw_replacements.items()):
+            raise ValueError("工具结果引用必须包含调用标识和相对路径。")
+        if any(not isinstance(item, dict) for item in raw_files):
+            raise TypeError("context file snapshot")
+        files = [ContextFileSnapshot(**item) for item in raw_files]
         return ContextManagementState(
             context_id=context_id,
             usage_anchor=anchor,
-            seen_call_ids=set(raw_seen),
-            replacements=replacements,
+            replacements=dict(raw_replacements),
             recent_files=files,
             automatic_failure_count=failure_count,
             automatic_compaction_disabled=disabled,
@@ -411,7 +339,7 @@ class SessionCodec:
             if result not in {"allow", "deny"}:
                 raise ValueError("权限规则 result 无效。")
             match_kind = item["match_kind"]
-            if match_kind not in {"exact", "glob", "legacy"}:
+            if match_kind not in {"exact", "glob"}:
                 raise ValueError("权限规则 match_kind 无效。")
             rules.append(
                 PermissionRule(match=match.strip(), result=result, scope="session", match_kind=match_kind)
@@ -435,7 +363,7 @@ class SessionCodec:
         if not isinstance(usage, dict) or not isinstance(trace, dict) or not isinstance(trace['entries'], list):
             raise ValueError('消息用量或轨迹无效。')
         decoded_usage = MessageUsage.from_dict(usage)
-        if type(trace['collapsed']) is not bool or type(value['timeline_version']) is not int:
+        if type(trace['collapsed']) is not bool:
             raise ValueError('消息轨迹状态无效。')
         entries = []
         for entry in trace['entries']:
@@ -448,11 +376,10 @@ class SessionCodec:
             entries.append(TraceEntry(**entry))
         return SessionMessage(id=value['id'], role=value['role'], content=value['content'],
                               status=value['status'], timestamp=timestamp, usage=decoded_usage,
-                              timeline_version=value['timeline_version'],
                               trace=ThinkingTrace(entries=entries, collapsed=trace['collapsed']))
 
     @staticmethod
-    def _decode_transcript(value: object) -> ConversationMessage:
+    def decode_transcript(value: object) -> ConversationMessage:
         if not isinstance(value, dict) or not isinstance(value.get('blocks'), list):
             raise ValueError('模型上下文消息必须包含 blocks 数组。')
         if value['role'] not in {'system', 'user', 'assistant', 'tool'}:
@@ -466,6 +393,11 @@ class SessionCodec:
             raise ValueError('助手响应来源模型无效。')
         if value['role'] != 'assistant' and (response_protocol is not None or response_model is not None):
             raise ValueError('响应来源只能属于助手消息。')
+        if value['role'] == 'assistant' and any(
+            isinstance(block, dict) and block.get('kind') in {'thinking', 'redacted_thinking', 'tool_use'}
+            for block in value['blocks']
+        ) and (response_protocol is None or response_model is None):
+            raise ValueError('助手协议响应缺少完整来源，请创建新会话。')
         blocks = []
         for raw in value['blocks']:
             if not isinstance(raw, dict) or raw.get('kind') not in {'text', 'thinking', 'redacted_thinking', 'tool_use', 'tool_result'}:

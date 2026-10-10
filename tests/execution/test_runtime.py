@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from provider_helpers import complete_test_response
+
 import asyncio
 import json
 import os
@@ -14,12 +16,14 @@ from lancher_code.execution.contracts import CommandProfile, ExecutionConfig, Ex
 from lancher_code.execution.runtime import ExecutionRuntime
 from lancher_code.execution.scheduler import get_project_scheduler
 from lancher_code.errors import ConfigError
-from lancher_code.models import PermissionResolution, StreamEvent, ToolCall, ToolCallChunk, ToolDefinition, ToolPermissionMetadata
-from lancher_code.session import SessionController
+from lancher_code.permissions.models import PermissionResolution
+from lancher_code.contracts.messages import StreamEvent
+from lancher_code.contracts.tools import ToolCall, ToolCallChunk, ToolDefinition, ToolPermissionMetadata
+from lancher_code.sessions.controller import SessionController
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.core.executor import ToolExecutor
-from lancher_code.turn_runner import TurnRunner
-from lancher_code.sessions.repository import SessionRepositoryError
+from lancher_code.agent.runner import TurnRunner
+from lancher_code.sessions.storage import SessionRepositoryError
 
 
 def python_command(script: str) -> str:
@@ -30,9 +34,10 @@ def python_command(script: str) -> str:
 
 
 class IdleProvider:
+    @complete_test_response
     async def stream_chat(self, request):
         yield StreamEvent(kind='text_delta', text='完成')
-        yield StreamEvent(kind='message_end')
+        yield StreamEvent(response_complete=True, kind='message_end')
 
 
 def setup_runtime(tmp_path, provider_config, provider=None, *, execution_config=None):
@@ -50,7 +55,7 @@ async def launch(executor, session, script, *, lifetime='session', turn_id='orig
     results = await executor.execute_calls([ToolCall(0, 'provider-call', 'run_command', arguments, json.dumps(arguments))],
         session_id=session.session_id, session_workspace=session.paths.workspace,
         session_root=session.paths.root, permission_policy='bypass', turn_id=turn_id)
-    assert results[0].ok, results[0].error_message
+    assert (not results[0].is_error), results[0].error_message
     return results[0].metadata['process_id']
 
 
@@ -63,6 +68,7 @@ async def test_successive_turns_own_distinct_scopes_before_execution(
     class Provider:
         requests = 0
 
+        @complete_test_response
         async def stream_chat(self, request):
             self.requests += 1
             if self.requests == 2:
@@ -73,7 +79,7 @@ async def test_successive_turns_own_distinct_scopes_before_execution(
                     arguments_delta=json.dumps(arguments)))
             else:
                 yield StreamEvent(kind='text_delta', text='完成')
-            yield StreamEvent(kind='message_end')
+            yield StreamEvent(response_complete=True, kind='message_end')
 
     loop = asyncio.get_running_loop()
     previous_factory = loop.get_task_factory()
@@ -84,7 +90,7 @@ async def test_successive_turns_own_distinct_scopes_before_execution(
         first = [event async for event in runner.run_user_turn('先聊天')]
         second = [event async for event in runner.run_user_turn('再检查 Python')]
         result, = [event.tool_result for event in second if event.kind == 'tool_result_received']
-        assert result.ok, result.error_message
+        assert (not result.is_error), result.error_message
         assert 'scope-ok' in result.content
         first_id, = [event.task_id for event in first if event.kind == 'turn_completed']
         second_id, = [event.task_id for event in second if event.kind == 'turn_completed']
@@ -137,6 +143,7 @@ async def test_stop_during_completed_turn_cleanup_keeps_terminal_journal(tmp_pat
     class Provider:
         requests = 0
 
+        @complete_test_response
         async def stream_chat(self, request):
             self.requests += 1
             if self.requests == 1:
@@ -147,7 +154,7 @@ async def test_stop_during_completed_turn_cleanup_keeps_terminal_journal(tmp_pat
                     arguments_delta=json.dumps(arguments)))
             else:
                 yield StreamEvent(kind='text_delta', text='完成')
-            yield StreamEvent(kind='message_end')
+            yield StreamEvent(response_complete=True, kind='message_end')
 
     runtime, session, _, runner = setup_runtime(tmp_path, openai_provider_config, Provider())
     completed_id = None
@@ -212,6 +219,7 @@ class CommandsThenWait:
         self.requests = 0
         self.waiting = asyncio.Event()
 
+    @complete_test_response
     async def stream_chat(self, request):
         self.requests += 1
         if self.requests == 1:
@@ -221,11 +229,11 @@ class CommandsThenWait:
                 yield StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
                     call_index=index, provider_call_id=f'call-{index}', name_delta='run_command',
                     arguments_delta=json.dumps(arguments)))
-            yield StreamEvent(kind='message_end')
+            yield StreamEvent(response_complete=True, kind='message_end')
         else:
             self.waiting.set()
             await asyncio.Event().wait()
-            yield StreamEvent(kind='message_end')
+            yield StreamEvent(response_complete=True, kind='message_end')
 
 
 @pytest.mark.asyncio
@@ -309,7 +317,7 @@ async def test_unknown_background_http_server_allows_approved_clients_and_file_t
             session_root=session.paths.root, turn_id='http-check', permission_policy='default',
             permission_resolver=approve,
         )
-        assert result.ok, result.error_message
+        assert (not result.is_error), result.error_message
         return result
 
     process_id = None
@@ -383,7 +391,7 @@ async def test_explicit_process_profile_blocks_until_real_exit_and_reports_proce
             session_root=session.paths.root, turn_id='profile-turn', permission_policy='bypass',
             on_call_started=on_started,
         )
-        assert result.ok, result.error_message
+        assert (not result.is_error), result.error_message
         return result
 
     async def after_real_cleanup(call):
@@ -447,7 +455,7 @@ async def test_archive_requires_stopping_inactive_session_processes(tmp_path, op
             session.archive_session(owner)
         await runner.stop_session(owner)
         session.archive_session(owner)
-        assert next(item for item in session.list_sessions() if item.session_id == owner).archived
+        assert next(item for item in session.list_sessions().items if item.session_id == owner).archived
     finally:
         await runner.shutdown()
         session.close()
@@ -462,7 +470,7 @@ async def test_failed_retained_resume_keeps_current_session_and_provider(tmp_pat
         await launch(executor, session, 'import time; time.sleep(30)')
         runner.new_session()
         session.create_user_message('当前会话')
-        current, writer, provider = session.session_id, session._sessions.writer, runner._provider
+        current, writer, provider = session.session_id, session._sessions.writer, runner._models.provider
         binding = runtime.sessions.get(original)
 
         def fail(*args, **kwargs):
@@ -473,7 +481,7 @@ async def test_failed_retained_resume_keeps_current_session_and_provider(tmp_pat
             runner.resume_session(original)
         assert session.session_id == current
         assert session._sessions.writer is writer
-        assert runner._provider is provider
+        assert runner._models.provider is provider
         session.create_user_message('失败后仍可正常保存')
         assert any(event['type'] == 'message.created' and event['data']['content'] == '失败后仍可正常保存'
                    for event in session._sessions.repository.read(current))
@@ -581,14 +589,15 @@ async def test_cancelled_remote_side_effect_is_unknown_and_not_replayed(tmp_path
     class Provider:
         requests = 0
 
+        @complete_test_response
         async def stream_chat(self, request):
             self.requests += 1
             yield StreamEvent(kind='tool_call_delta', tool_call_chunk=ToolCallChunk(
                 call_index=0, provider_call_id='remote-call', name_delta='mcp__demo__submit', arguments_delta='{}'))
-            yield StreamEvent(kind='message_end')
+            yield StreamEvent(response_complete=True, kind='message_end')
 
     provider = Provider()
-    runner._provider = provider
+    runner._models.provider = provider
 
     async def consume():
         return [event async for event in runner.run_user_turn('提交远端任务')]

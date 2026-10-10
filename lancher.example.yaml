@@ -1,3 +1,5 @@
+# 当前开发版只接受 providers/default_model 与独立的工作阶段、权限策略。
+# 旧 provider、permission_mode 不自动迁移；请按此结构重新配置。
 # 供应商和模型的 ID 创建后保持稳定，显示名称可以随时修改。
 providers:
   deepseek:

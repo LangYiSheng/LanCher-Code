@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import (
-    MODEL_PATH_LIMIT,
-    MODEL_TEXT_CHAR_LIMIT,
-    UI_PATH_LIMIT,
-    is_skipped_path,
-    relative_display_path,
-    resolve_path_in_root,
-)
+from lancher_code.tools.core.common import MODEL_PATH_LIMIT, MODEL_TEXT_CHAR_LIMIT, UI_PATH_LIMIT, is_skipped_path
+from lancher_code.filesystem.access import relative_display_path, resolve_path_in_root
 
 GLOB_DESCRIPTION = (
     "按 glob 模式查找文件，支持 ** 递归匹配。"
@@ -24,7 +19,7 @@ class GlobTool:
         return ToolDefinition(
             name="glob",
             description=GLOB_DESCRIPTION,
-            params_model={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "pattern": {
@@ -40,7 +35,7 @@ class GlobTool:
                 "additionalProperties": False,
             },
             category="read",
-            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
+            allowed_phases=("discuss", "plan", "execute"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

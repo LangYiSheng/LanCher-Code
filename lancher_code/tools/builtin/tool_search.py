@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
 from lancher_code.tools.core.registry import ToolRegistry
 
@@ -20,7 +21,7 @@ class ToolSearchTool:
                 "已知完整工具名时使用 select:<完整工具名> 精确加载；"
                 "否则输入工具名、MCP Server 名或用途关键词。"
             ),
-            params_model={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "query": {
@@ -33,6 +34,7 @@ class ToolSearchTool:
             },
             category="read",
             is_system_tool=True,
+            allowed_phases=("discuss", "plan", "execute"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

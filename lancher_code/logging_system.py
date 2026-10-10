@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Iterable
 
-from lancher_code.config_system.paths import get_error_log_path
+from lancher_code.config.paths import get_error_log_path
 
 LOGGER_NAME = "lancher_code"
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024

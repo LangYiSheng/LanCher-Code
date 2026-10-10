@@ -4,29 +4,27 @@ from pathlib import Path
 
 from rich.console import Console
 
-from lancher_code.config import (
-    get_global_permissions_path,
-    get_project_permissions_path,
-    load_config,
-    resolve_config_bootstrap_state,
-)
+from lancher_code.config.paths import get_global_permissions_path, get_project_permissions_path
+from lancher_code.config.loader import load_config
+from lancher_code.config.bootstrap import resolve_config_bootstrap_state
 from lancher_code.errors import ConfigError
 from lancher_code.execution.runtime import ExecutionRuntime
-from lancher_code.model_catalog import resolve_model
-from lancher_code.config_system.paths import get_global_mcp_config_path, get_project_mcp_config_path
+from lancher_code.providers.catalog import resolve_model
+from lancher_code.config.paths import get_global_mcp_config_path, get_project_mcp_config_path
 from lancher_code.mcp import MCPClientManager, load_mcp_config
 from lancher_code.logging_system import get_logger, register_sensitive_values
-from lancher_code.permission_engine import PermissionEngine, PermissionStorage
+from lancher_code.permissions.engine import PermissionEngine
+from lancher_code.permissions.storage import PermissionStorage, PermissionRuleFileError
 from lancher_code.providers.factory import create_provider
-from lancher_code.run_usage import RunUsageTracker
-from lancher_code.run_summary import print_exit_summary, select_resume_target
-from lancher_code.session import SessionController
-from lancher_code.settings_service import SettingsService
+from lancher_code.usage.ledger import RunUsageTracker
+from lancher_code.tui.exit_summary import print_exit_summary, select_resume_target
+from lancher_code.sessions.controller import SessionController
+from lancher_code.config.settings import SettingsService
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.core.executor import ToolExecutor
-from lancher_code.tui_views.bootstrap import ConfigBootstrapTUI
-from lancher_code.tui_views.chat import ChatTUI
-from lancher_code.turn_runner import TurnRunner
+from lancher_code.tui.bootstrap import ConfigBootstrapTUI
+from lancher_code.tui.app import ChatTUI
+from lancher_code.agent.runner import TurnRunner
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10.0
 logger = get_logger("app")
@@ -47,7 +45,7 @@ async def run_app() -> int:
         console.print(f"[错误] {exc.user_message}", style="bold red")
         return 1
 
-    active_config = resolve_model(config)
+    active_config = resolve_model(config.providers, config.default_model)
     usage_tracker = RunUsageTracker()
 
     def provider_factory(provider_config):
@@ -57,10 +55,14 @@ async def run_app() -> int:
     provider = provider_factory(active_config)
     register_sensitive_values([active_config.api_key])
     cwd = Path.cwd()
-    permission_storage = PermissionStorage(
-        project_rules_path=get_project_permissions_path(cwd),
-        user_rules_path=get_global_permissions_path(),
-    )
+    try:
+        permission_storage = PermissionStorage(
+            project_rules_path=get_project_permissions_path(cwd),
+            user_rules_path=get_global_permissions_path(),
+        )
+    except PermissionRuleFileError as exc:
+        console.print(f"[错误] {exc.user_message}", markup=False, style="bold red")
+        return 1
     session_controller = SessionController(
         active_config,
         cwd=cwd,
@@ -109,11 +111,10 @@ async def run_app() -> int:
         provider_config=active_config,
         session_controller=session_controller,
         ui_config=config.ui,
+        settings_service=settings_service,
+        mcp_manager=mcp_manager,
+        tool_registry=tool_registry,
     )
-    if hasattr(tui, "configure_settings"):
-        tui.configure_settings(settings_service)
-    if hasattr(tui, "configure_mcp"):
-        tui.configure_mcp(mcp_manager, tool_registry)
     normal_return = False
     cleanup_errors: list[str] = []
     stopped_processes = 0

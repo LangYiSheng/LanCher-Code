@@ -43,7 +43,7 @@
 
 首条消息自动创建 Session，`/session new` 刷新旧对话并打开新草稿；下一条消息才创建新 UUID。`resume <UUID>` 按完整 32 位 UUID hex 恢复，`rename <UUID> <标题>` 修改标题，标题允许空格和重复。列表显示短 ID，命令不接受短 ID。旧 `save` 与 `--force` 已移除。归档、删除先显示标题和完整 UUID 并确认；取消保留草稿，确认前当前 Session 发生变化则拒绝旧操作。当前会话请先 `new` 再归档或删除。
 
-项目会话位于 `./.lancher/sessions/<UUID>/`，保存阶段、权限、本次模型、计划和待处理输入。待处理消息恢复为暂停，不自动执行，未完成的工具操作也不重放。新事件格式版本为 `1`；旧 `.lancher/session/` 文件不读取、不迁移。完整说明见 [Session 生命周期](workflows/session-lifecycle.md)。
+项目会话位于 `./.lancher/sessions/<UUID>/`，保存阶段、权限、本次模型、计划和待处理输入。待处理消息恢复为暂停，不自动执行，未完成的工具操作也不重放。事件、列表缓存与 checkpoint 格式版本为 `2`；旧格式和旧 `.lancher/session/` 文件原样保留、不迁移。列表单独报告不支持或损坏的会话，恢复旧格式时提示新建会话。完整说明见 [Session 生命周期](workflows/session-lifecycle.md)。
 
 ## 安静对话与 HUD
 

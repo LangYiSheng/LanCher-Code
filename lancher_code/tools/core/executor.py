@@ -10,13 +10,14 @@ from lancher_code.errors import ToolNotFoundError
 from lancher_code.execution.contracts import InvocationInfo, ResourceClaim, ResourceOwner
 from lancher_code.execution.scheduler import ResourceScheduler, claims_conflict, get_project_scheduler, normalize_claim, path_claim, project_claim
 from lancher_code.logging_system import get_logger
-from lancher_code.models import (
-    CancellationToken, PermissionRequest, PermissionResolution, RuntimeMode,
-    WorkPhase, PermissionPolicy, ToolCall, ToolContext, ToolExecutionResult, tool_available_in_phase,
-)
-from lancher_code.permission_engine import PermissionCheck, PermissionEngine
-from lancher_code.sessions.repository import SessionRepositoryError
-from lancher_code.tools.core.common import resolve_path_in_root
+from lancher_code.contracts.control import CancellationToken, WorkPhase, PermissionPolicy
+from lancher_code.permissions.models import PermissionRequest, PermissionResolution
+from lancher_code.contracts.tools import ToolCall, ToolExecutionResult, tool_available_in_phase
+from lancher_code.tools.context import ToolContext
+from lancher_code.permissions.models import PermissionCheck
+from lancher_code.permissions.engine import PermissionEngine
+from lancher_code.sessions.storage import SessionRepositoryError
+from lancher_code.filesystem.access import resolve_path_in_root
 from lancher_code.tools.core.file_state_cache import FileStateCache
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.tools.core.validation import validate_tool_arguments
@@ -47,8 +48,8 @@ class ToolExecutor:
         self.execution_runtime = execution_runtime or ExecutionRuntime(self._cwd)
 
     async def execute_calls(
-        self, calls: list[ToolCall], *, mode: RuntimeMode = "default",
-        work_phase: WorkPhase | None = None, permission_policy: PermissionPolicy | None = None,
+        self, calls: list[ToolCall], *,
+        work_phase: WorkPhase = "execute", permission_policy: PermissionPolicy = "default",
         plan_file_path: Path | None = None, session_id: str | None = None,
         session_workspace: Path | None = None, session_root: Path | None = None,
         turn_id: str | None = None, generation: int | None = None,
@@ -60,7 +61,7 @@ class ToolExecutor:
         on_invocation_state: InvocationStateCallback | None = None,
     ) -> list[ToolExecutionResult]:
         context = ToolContext(
-            cwd=self._cwd, timeout_seconds=self._timeout_seconds, mode=mode,
+            cwd=self._cwd, timeout_seconds=self._timeout_seconds,
             work_phase=work_phase, permission_policy=permission_policy,
             project_root=self._cwd, plan_file_path=plan_file_path, session_id=session_id,
             session_workspace=session_workspace, session_root=session_root,

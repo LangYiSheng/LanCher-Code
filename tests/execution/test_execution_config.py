@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from lancher_code.config import load_config_data, serialize_config
+from lancher_code.config.loader import load_config_data
+from lancher_code.config.writer import serialize_config
 from lancher_code.errors import ConfigError
 from lancher_code.execution.runtime import ExecutionRuntime
 
 
 def config_data(execution):
-    return {'provider': {'protocol': 'openai', 'model': 'test',
-                         'base_url': 'https://example.test/v1', 'api_key': 'test'},
-            'execution': execution}
+    return {'providers': {'main': {'name': '测试', 'protocol': 'openai',
+                         'base_url': 'https://example.test/v1', 'api_key': 'test',
+                         'models': {'default': {'model_name': 'test'}}}},
+            'default_model': 'main/default', 'execution': execution}
 
 
 def test_execution_config_round_trip_and_resource_normalization(tmp_path):

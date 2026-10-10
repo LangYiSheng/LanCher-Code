@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from copy import deepcopy
 
 import httpx
 
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
-from lancher_code.models import ChatRequest, ContentBlock, MessageUsage, StreamEvent, ToolCallChunk
+from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent
+from lancher_code.usage.models import MessageUsage
+from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
-from lancher_code.run_usage import RequestUsageStatus, UsageField, UsageObserver
+from lancher_code.usage.ledger import RequestUsageStatus, UsageField
 
 logger = get_logger("providers.claude")
 
@@ -19,15 +21,6 @@ DEFAULT_MAX_TOKENS = 4096
 
 
 class ClaudeProvider(BaseChatProvider):
-    def __init__(
-        self,
-        config,
-        client_factory: Callable[[], httpx.AsyncClient] | None = None,
-        *,
-        usage_observer: UsageObserver | None = None,
-    ) -> None:
-        super().__init__(config=config, client_factory=client_factory, usage_observer=usage_observer)
-
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
         request = self._prepare_usage_attempt(request)
         url = f"{self.config.base_url.rstrip('/')}/messages"
@@ -38,7 +31,6 @@ class ClaudeProvider(BaseChatProvider):
         }
         payload = self._build_payload(request)
 
-        saw_end = False
         usage = MessageUsage(is_final=False)
         usage_parts: dict[str, int] = {}
         saw_output_delta = False
@@ -167,7 +159,6 @@ class ClaudeProvider(BaseChatProvider):
                             continue
 
                         if event_type == "message_stop":
-                            saw_end = True
                             usage_status = "completed"
                             usage.is_final = saw_output_delta
                             self._report_usage(usage_request_id, usage, usage.known_fields)
@@ -191,10 +182,9 @@ class ClaudeProvider(BaseChatProvider):
                                     raise ProviderPromptTooLongError(message)
                             raise ProviderResponseError(message)
 
-                    if not saw_end:
-                        usage_status = "incomplete"
-                        yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason,
-                                          response_complete=False)
+                    usage_status = "incomplete"
+                    yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason,
+                                      response_complete=False)
         except (asyncio.CancelledError, GeneratorExit):
             if usage_status not in {"completed", "incomplete"}:
                 usage_status = "cancelled"

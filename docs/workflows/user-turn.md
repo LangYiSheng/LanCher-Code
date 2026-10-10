@@ -54,7 +54,7 @@ sequenceDiagram
 
 ### 1. 提交与事件流
 
-- 输入经 `ComposerSubmitted` 进入 `ChatTUI.handle_input_submitted`；先解析斜杠命令，非命令才走 `process_prompt(text)`。
+- 输入经 `ComposerSubmitted` 进入 `LanCherTextualApp.handle_input_submitted`；先解析斜杠命令，非命令才走 `process_prompt(text)`。
 - `TurnRunner.run_user_turn()` 是异步生成器；TUI 用 `@work` 后台任务逐个 `await` 事件，事件驱动界面刷新。
 
 ### 2. 请求组装（`SessionController.build_request`）
@@ -63,7 +63,7 @@ sequenceDiagram
 - system = 系统提示 + 环境提示 + 动态提醒 + 延迟工具索引
 - messages = 协议无关 transcript（剥离旧 reminder、注入新 reminder）
 
-### 3. 流式消费（`TurnRunner._stream_request`）
+### 3. 流式消费（`agent.streaming.collect_response`）
 
 - `text_delta` → 追加消息内容与有序正文段，TUI 在当前位置逐步显示正文
 - `thinking_delta` → 追加有序思考段，TUI 以灰色展开内容，不增加“思考”标题
@@ -84,11 +84,11 @@ sequenceDiagram
 
 ### 有序记录与折叠
 
-新消息使用 `timeline_version=1`，`trace.entries` 按实际输出顺序保存思考段、正文段与工具调用。每次调用保存 `call_id` 与 `group_id`，结果按 `call_id` 回到原调用位置显示，即使并发完成顺序不同，也不打乱工具列表。正文段与思考段保存输出状态；工具保存排队、执行、等待批准及终止状态，结果保留完整内容及错误码供详情查看。
+消息的 `trace.entries` 按实际输出顺序保存思考段、正文段与工具调用。每次调用保存 `call_id` 与 `group_id`，结果按 `call_id` 回到原调用位置显示，即使并发完成顺序不同，也不打乱工具列表。正文段与思考段保存输出状态；工具保存排队、执行、等待批准及终止状态，结果保留完整内容及错误码供详情查看。
 
 执行时展开工具组及所有调用行，每条调用的参数和结果可独立展开；正常完成的多工具组默认收成一行数量摘要，单工具直接保留调用行，不嵌套两层折叠。思考在输出期间展开，结束后默认显示灰色首行摘要。手动展开／收起状态优先于后续流式刷新；失败和待批准操作直接可见。
 
-旧消息未保存完整交替顺序时，按已有轨迹顺序呈现，并在末尾保留原正文。不能从旧数据中推断或补造已丢失的流式顺序。
+当前会话只使用完整轨迹顺序，不再保留旧 timeline 标志或缺失轨迹时的正文拼接分支；旧事件格式在读取边界拒绝。
 
 ### 5. 循环终止条件
 

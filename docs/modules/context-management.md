@@ -6,11 +6,17 @@
 
 | 模块 | 职责 |
 |---|---|
-| `context_tokens.py` | 将请求投影成模型可见内容，保守粗估，使用最近可靠输入 usage 做增量校准 |
-| `context_budget.py` | 根据模型窗口、输出上限和安全余量分配输入、近期历史与工具结果额度 |
-| `context_management.py` | 工具原文落盘、摘要生成与验证、完整轮次组选择、恢复提示 |
-| `run_usage.py` | 记录每次实际请求的已上报消耗，包含压缩、取消、失败和重试 |
-| `session.py` | 保存上下文投影及校准状态；只在候选验证成功后替换投影 |
+| `context/tokens.py` | 将请求投影成模型可见内容，保守粗估，使用最近可靠输入 usage 做增量校准 |
+| `context/budget.py` | 根据模型窗口、输出上限和安全余量分配输入、近期历史与工具结果额度 |
+| `context/offload.py` | 工具原文落盘、引用维护与请求副本卸载 |
+| `context/compaction.py` | 完整轮次组选择、摘要请求与候选验证 |
+| `context/summary.py` | 摘要提示、结构解析与格式验证 |
+| `context/recovery.py` | 压缩后的恢复提示 |
+| `context/request.py`、`projection.py` | 请求组装、跨来源协议历史的发送副本 |
+| `context/prompts.py`、`prompt_models.py` | 提示词及其输入输出类型 |
+| `context/models.py` | 校准锚点、治理状态与压缩结果类型 |
+| `usage/ledger.py` | 记录每次实际请求的已上报消耗，包含压缩、取消、失败和重试 |
+| `sessions/controller.py` | 保存上下文投影及校准状态；只在候选验证成功后替换投影 |
 
 ## 估算与输入快照
 

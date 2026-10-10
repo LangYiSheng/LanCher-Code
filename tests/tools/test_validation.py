@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from lancher_code.models import ToolCall, ToolDefinition, ToolExecutionResult
+from lancher_code.contracts.tools import ToolCall, ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.tools.core.validation import validate_tool_arguments
@@ -124,4 +124,4 @@ async def test_invalid_schema_does_not_stop_independent_valid_tools(tmp_path) ->
     registry.register(GoodTool())
     results = await ToolExecutor(registry, cwd=tmp_path).execute_calls([
         ToolCall(0, "bad-id", "bad", {}, "{}"), ToolCall(1, "good-id", "good", {}, "{}")])
-    assert results[0].error_code == "invalid_schema" and results[1].ok
+    assert results[0].error_code == "invalid_schema" and (not results[1].is_error)

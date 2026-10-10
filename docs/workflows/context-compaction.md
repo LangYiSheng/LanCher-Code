@@ -85,4 +85,4 @@ LanCher
 
 停止可能发生在 worker 尚未开始，甚至控件仍在挂载时。界面先登记工作状态，再挂载活动；准备期间的停止会终结同一 ID，随后不再启动摘要请求。保存异常也会停下图标、恢复输入，并明确提示写入失败；下次恢复仍以实际写入的日志为准。
 
-实现入口为 [活动控件](../../lancher_code/tui_views/compaction.py)、[消息时间线](../../lancher_code/tui_views/timeline.py)、[主界面事件消费](../../lancher_code/tui_views/chat.py) 和 [Session 压缩与持久化](../../lancher_code/session.py)。控件测试既检查状态与时间线，也从实际终端渲染验证窄屏文字、详情滚动和输入区仍可使用。
+实现入口为 [活动控件](../../lancher_code/tui/compaction.py)、[消息时间线](../../lancher_code/tui/timeline.py)、[主界面事件消费](../../lancher_code/tui/app.py) 和 [Session 压缩与持久化](../../lancher_code/sessions/controller.py)。控件测试既检查状态与时间线，也从实际终端渲染验证窄屏文字、详情滚动和输入区仍可使用。

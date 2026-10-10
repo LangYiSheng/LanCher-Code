@@ -59,7 +59,7 @@ flowchart TD
 | `glob` / `grep` | 分别为搜索模式、搜索范围 |
 | MCP 工具 | 完整可见名，例如 `mcp__github__get_issue`；授权该工具，不绑定某组参数 |
 
-新确认保存 `match_kind: exact`，字符 `*`、`?`、`[` 不会被当作授权通配符。不会把 `git status` 自动扩成 `RunCommand(git *)`。人工维护的 `match_kind: glob` 支持通配符；未带 `match_kind` 的旧规则作为 `legacy` 保留原匹配行为。
+新确认保存 `match_kind: exact`，字符 `*`、`?`、`[` 不会被当作授权通配符。不会把 `git status` 自动扩成 `RunCommand(git *)`。人工维护的 `match_kind: glob` 支持通配符；未带 `match_kind` 或使用 `legacy` 的规则被拒绝，并提示重新配置，原文件不改写。
 
 ## 确认与关闭
 
@@ -91,5 +91,5 @@ ToolExecutor → PermissionEngine.evaluate → ask
 
 - 取消任务会取消挂起的审批并暂停待处理队列；没有权限处理器时返回 `permission_confirmation_unavailable`。
 - 尚未启动的取消明确记录未执行；已开始的本地操作说明可能部分执行；已开始的远端写操作记录结果未知，先检查实际状态，不自动重试。
-- 新 Session 事件格式 v1 恢复时，所有待处理输入均为 `paused`。尚在生成的消息收拢为已取消；缺少结果的工具调用按批次补齐未知错误结果，不自动重放工具。
+- 当前 Session 事件格式 2 恢复时，所有待处理输入均为 `paused`。尚在生成的消息收拢为已取消；缺少结果的工具调用按批次补齐未知错误结果，不自动重放工具。
 - 恢复会话不会读取项目旧 `plan.md` 并把它当成已确认计划。执行计划使用当前会话的快照正文与摘要，阶段切换不附带权限升级。

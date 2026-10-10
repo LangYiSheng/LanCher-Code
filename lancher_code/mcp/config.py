@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from lancher_code.config_system.paths import get_global_mcp_config_path, get_project_mcp_config_path
+from lancher_code.config.paths import get_global_mcp_config_path, get_project_mcp_config_path
 from lancher_code.logging_system import get_logger
 
 logger = get_logger("mcp.config")
@@ -23,6 +23,12 @@ class MCPConfigIssue:
     source: str
     message: str
     server_name: str | None = None
+
+
+class MCPConfigValidationError(ValueError):
+    def __init__(self, message: str, *, field: str) -> None:
+        super().__init__(message)
+        self.field = field
 
 
 @dataclass(slots=True)
@@ -50,7 +56,10 @@ def load_mcp_config(project_root: Path, *, home_dir: Path | None = None, environ
     env_source = os.environ if environ is None else environ
     for name, raw in merged.items():
         try:
-            config = _parse_server(name, raw, env_source)
+            config = validate_server_config(name, raw)
+            if config.enabled:
+                config.env = _expand_map(config.env, env_source, config.name, "env")
+                config.headers = _expand_map(config.headers, env_source, config.name, "headers")
         except ValueError as exc:
             issue = MCPConfigIssue("config", str(exc), str(name))
             issues.append(issue)
@@ -90,42 +99,45 @@ def _read_layer(path: Path, issues: list[MCPConfigIssue]) -> dict[str, object]:
     return dict(servers)
 
 
-def _parse_server(name: object, raw: object, environ: dict[str, str]) -> MCPServerConfig:
+def validate_server_config(name: object, raw: object) -> MCPServerConfig:
+    """共享配置校验；保留凭据占位符，连接时再展开环境变量。"""
     if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
-        raise ValueError(f"MCP Server 名称不合法: {name!s}")
+        raise MCPConfigValidationError(f"MCP Server 名称不合法: {name!s}", field="name")
     if not isinstance(raw, dict):
-        raise ValueError(f"Server {name} 配置必须是对象")
+        raise MCPConfigValidationError(f"Server {name} 配置必须是对象", field="type")
     server_type = raw.get("type")
     if server_type not in {"stdio", "http"}:
-        raise ValueError(f"Server {name}.type 只能是 stdio 或 http")
+        raise MCPConfigValidationError(f"Server {name}.type 只能是 stdio 或 http", field="type")
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
-        raise ValueError(f"Server {name}.enabled 必须是布尔值")
-    if not enabled:
-        return MCPServerConfig(name=name, type=server_type, enabled=False)
+        raise MCPConfigValidationError(f"Server {name}.enabled 必须是布尔值", field="enabled")
     if server_type == "stdio":
         command = raw.get("command")
-        if not isinstance(command, str) or not command.strip():
-            raise ValueError(f"Server {name}.command 必须是非空字符串")
-        return MCPServerConfig(name=name, type="stdio", command=command, args=_string_list(raw.get("args", []), f"Server {name}.args"), env=_expand_map(_string_map(raw.get("env", {}), f"Server {name}.env"), environ, name, "env"))
+        if enabled and (not isinstance(command, str) or not command.strip()):
+            raise MCPConfigValidationError(f"Server {name}.command 必须是非空字符串", field="command")
+        return MCPServerConfig(name=name, type="stdio", enabled=enabled, command=command,
+                               args=_string_list(raw.get("args", []), f"Server {name}.args"),
+                               env=_string_map(raw.get("env", {}), f"Server {name}.env"))
     url = raw.get("url")
-    if not isinstance(url, str) or not url.strip():
-        raise ValueError(f"Server {name}.url 必须是非空字符串")
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(f"Server {name}.url 必须是合法的 HTTP(S) URL")
-    return MCPServerConfig(name=name, type="http", url=url, headers=_expand_map(_string_map(raw.get("headers", {}), f"Server {name}.headers"), environ, name, "headers"))
+    if enabled:
+        if not isinstance(url, str) or not url.strip():
+            raise MCPConfigValidationError(f"Server {name}.url 必须是非空字符串", field="url")
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise MCPConfigValidationError(f"Server {name}.url 必须是合法的 HTTP(S) URL", field="url")
+    return MCPServerConfig(name=name, type="http", enabled=enabled, url=url,
+                           headers=_string_map(raw.get("headers", {}), f"Server {name}.headers"))
 
 
 def _string_list(raw: object, path: str) -> list[str]:
     if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-        raise ValueError(f"{path} 必须是字符串数组")
+        raise MCPConfigValidationError(f"{path} 必须是字符串数组", field="args")
     return list(raw)
 
 
 def _string_map(raw: object, path: str) -> dict[str, str]:
     if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
-        raise ValueError(f"{path} 必须是字符串到字符串的映射")
+        raise MCPConfigValidationError(f"{path} 必须是字符串到字符串的映射", field=path.rsplit(".", 1)[-1])
     return dict(raw)
 
 

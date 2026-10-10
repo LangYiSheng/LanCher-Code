@@ -2,7 +2,7 @@
 
 权限引擎决定工具调用是允许、拒绝还是需要确认。它将工作阶段硬限制、路径边界、危险命令黑名单、分层规则和权限策略组合成一条判定链。
 
-实现位置：`lancher_code/permission_engine.py`；阶段能力公共判定在 `models.py` 的 `tool_available_in_phase()`，由工具注册表、执行器及权限引擎共同使用。
+判定入口在 `lancher_code/permissions/engine.py`，规则存储、匹配与差异预览分别位于 `storage.py`、`rules.py`、`preview.py`；路径检查复用 `filesystem/access.py`。阶段能力公共判定在 `contracts/tools.py` 的 `tool_available_in_phase()`，由工具注册表、执行器及权限引擎共同使用。
 
 ## 公共类型
 
@@ -10,12 +10,12 @@
 |---|---|
 | `WorkPhase` | `discuss`、`plan`、`execute` |
 | `PermissionPolicy` | `default`、`acceptEdits`、`bypass` |
-| `PermissionMatchKind` | `exact`、`glob`、`legacy` |
+| `PermissionMatchKind` | `exact`、`glob` |
 | `PermissionCheck` | `decision: allow / deny / ask`、原因和可选确认请求 |
 
-`ToolContext` 携带 `work_phase`、`permission_policy`、`cwd`、`project_root`、当前 `session_workspace` 和 `plan_file_path`。旧 `mode` / `RuntimeMode` 只用于调用边界兼容；新逻辑使用独立两轴。
+`ToolContext` 携带 `work_phase`、`permission_policy`、`cwd`、`project_root`、当前 `session_workspace` 和 `plan_file_path`。所有调用都必须使用独立两轴，不接受 `mode` / `RuntimeMode`。
 
-新会话默认 `execute + default`。Session 使用新的 UUID 事件格式 v1；旧命名会话 v1–v4 不读取、不迁移。
+新会话默认 `execute + default`。Session 使用 UUID 事件格式 2；旧格式保留原文件，拒绝恢复并提示新建。
 
 ## 核心类
 
@@ -34,7 +34,7 @@
 ## 判定顺序
 
 1. **工作阶段硬限制。** 讨论和计划允许原生只读调查工具、已配置且显式声明 `readOnlyHint=true` 的 MCP；当前 Session 的 `workspace/` 在所有阶段允许文件读写，计划额外允许专用 `write_plan_file`。两阶段均禁止通用 Shell 和普通源码写入。未声明只读的 MCP 也禁止。违规返回 `phase_disallowed`，任何允许规则及 `bypass` 均不能放行。
-2. **匹配目标与路径边界。** 路径解析后必须位于项目根内，否则返回 `path_outside_project`。Shell 同时保留旧匹配所需的规范化文本和新精确规则所需的原始完整命令。
+2. **匹配目标与路径边界。** 路径解析后必须位于项目根内，否则返回 `path_outside_project`。Shell 精确匹配保留完整命令，显式 `glob` 规则使用通配匹配。
 3. **危险命令黑名单。** Shell 命中 `COMMAND_BLACKLIST_PATTERNS` 时返回 `permission_blacklist_denied`，规则和 `bypass` 无法覆盖。
 4. **分层规则。** 按 session → project → user 顺序，采用第一个存在命中规则的作用域；同一作用域最后一条命中规则生效，结果为 allow 或 deny。
 5. **权限策略。** `bypass` 允许；读工具允许；非只读外部工具需要确认；`acceptEdits` 允许原生写工具；其他调用需要确认。
@@ -44,7 +44,7 @@
 
 路径批准属于内置工具的应用层校验，**不是操作系统沙箱**。MCP 只读能力依赖服务端 `readOnlyHint` 声明，Shell 与外部 MCP 不会因 Session 目录存在而得到系统级隔离。
 
-`validate_plan_command()` 仅保留兼容入口，始终拒绝通用 Shell。不存在计划阶段的 Shell 前缀白名单放行路径。
+讨论与计划阶段始终拒绝通用 Shell，不提供 Shell 前缀白名单入口。
 
 ## 规则格式与精确授权
 
@@ -69,7 +69,7 @@ rules:
 
 新权限确认默认 `exact`：Shell 授权完整命令，保留命令内部空白及大小写；文件授权精确路径，仍使用现有的正斜杠、小写路径规范化。`*`、`?`、`[` 在精确规则中按普通字符匹配。MCP 精确规则匹配整个可见工具名，仍允许该工具的不同参数组合。
 
-`glob` 只用于明确配置的通配匹配。缺失 `match_kind` 的旧规则按 `legacy` 读取，保留原行为；修改或保存旧规则时不能意外丢失已有的 `exact` 字段。不会从 `git status` 自动生成 `RunCommand(git *)` 一类宽授权。
+`glob` 只用于明确配置的通配匹配。缺失 `match_kind` 或填写 `legacy` 的规则会被拒绝，提示重新配置；读取失败不改写原文件。不会从 `git status` 自动生成 `RunCommand(git *)` 一类宽授权。
 
 标签映射为 `RunCommand`、`ReadFile`、`WriteFile`、`EditFile`、`Glob`、`Grep`、`WritePlanFile`。MCP 使用 `mcp__<server>__<tool>` 可见名。
 
@@ -97,8 +97,8 @@ JSON Schema 校验在权限询问和资源申请之前。审批不占资源锁�
 - `tools/core/registry.py`：按阶段过滤普通工具与延迟发现索引。
 - `tools/core/executor.py`：每个调用前判定，处理确认、补充撤销和结果配对。
 - `app.py`：构造项目和用户权限存储。
-- `tui_views/chat.py`、`permission.py`：内联权限面板与决议回调。
+- `tui/app.py`、`permission.py`：内联权限面板与决议回调。
 - `tools/core/common.py`：路径解析与项目根边界。
 - `SessionController`：保存会话规则、阶段、策略和暂停队列；恢复中断任务时补未知工具结果，不自动重执行。
 
-相关测试：`tests/test_permission_engine.py`、`tests/test_work_phase_core.py`、`tests/test_task_interaction.py`、`tests/test_task_safety_regressions.py`、`tests/mcp/test_permission.py`。
+相关测试：`tests/permissions/test_permission_engine.py`、`tests/agent/test_work_phase_core.py`、`tests/agent/test_task_interaction.py`、`tests/agent/test_task_safety_regressions.py`、`tests/mcp/test_permission.py`。

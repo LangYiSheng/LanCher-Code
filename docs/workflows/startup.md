@@ -11,7 +11,7 @@ sequenceDiagram
     participant LOG as logging_system
     participant APP as app.run_app
     participant BS as ConfigBootstrapTUI
-    participant CFG as config_system
+    participant CFG as config
     participant PF as create_provider
     participant USAGE as RunUsageTracker
     participant SS as SessionController
@@ -38,7 +38,7 @@ sequenceDiagram
     APP->>MCP: load_mcp_config(cwd) + MCPClientManager（并注册 env/headers 敏感值）
     APP->>SS: PermissionEngine / SettingsService / ToolExecutor
     APP->>SS: TurnRunner(provider, session, registry, executor, 循环上限...)
-    APP->>TUI: ChatTUI(turn_runner, ...) + configure_settings + configure_mcp
+    APP->>TUI: ChatTUI(turn_runner, settings_service, mcp_manager, tool_registry, ...)
     TUI-->>APP: tui.run() 进入事件循环
     APP->>SS: finally: turn_runner.shutdown() 与 session.close()
     APP->>MCP: finally: mcp_manager.close()
@@ -56,17 +56,17 @@ sequenceDiagram
 |---|---|---|
 | 1. 参数解析 | `cli.py build_arg_parser()` | 当前无任何参数 |
 | 2. 日志初始化 | `cli.py configure_logging()` | ERROR 级、滚动文件（5MB × 5）、敏感值脱敏；目录不可写回退 stderr |
-| 3. 引导判定 | `config_system/bootstrap.py` | `needs_setup = ~/.lancher/lancher.yaml 不存在` |
-| 4. 首次引导 | `tui_views/bootstrap.py` | 填写协议/模型/Base URL/API Key/超时/thinking；保存并创建 MCP 模板 |
-| 5. 加载配置 | `config_system/loader.py load_config()` | YAML 解析 + 完整校验；失败打印 `[错误]` 并退出码 1 |
+| 3. 引导判定 | `config/bootstrap.py` | `needs_setup = ~/.lancher/lancher.yaml 不存在` |
+| 4. 首次引导 | `tui/bootstrap.py` | 填写协议/模型/Base URL/API Key/超时/thinking；保存并创建 MCP 模板 |
+| 5. 加载配置 | `config/loader.py load_config()` | YAML 解析 + 完整校验；失败打印 `[错误]` 并退出码 1 |
 | 6. 创建 Provider | `providers/factory.py` | 按 `protocol` 返回 OpenAI/Claude 实现 |
 | 7. 敏感值注册 | `logging_system.register_sensitive_values()` | api_key 与 MCP env/headers 值，日志脱敏 |
-| 8. 创建会话控制器 | `session.py SessionController` | 绑定 cwd、初始阶段与策略、权限存储；首条用户消息才创建 UUID Session 与独立 workspace |
+| 8. 创建会话控制器 | `sessions/controller.py SessionController` | 绑定 cwd、初始阶段与策略、权限存储；首条用户消息才创建 UUID Session 与独立 workspace |
 | 9. 创建工具集 | `tools/__init__.py` | 注册 文件工具、run_command、process_list/read/wait/write/stop/background、glob/grep、计划与发现工具 |
 | 10. 创建 MCP | `mcp/manager.py` | 加载全局+项目配置；TUI 挂载后异步初始化 |
-| 11. 创建执行链 | `tools/core/executor.py` + `permission_engine.py` | ToolExecutor 持有注册表与权限引擎 |
-| 12. 创建 TurnRunner | `turn_runner.py` | 注入全部依赖，配置循环上限与未知工具熔断 |
-| 13. 启动 TUI | `tui_views/chat.py` | 进入 Textual 事件循环；MCP 初始化完成后启用输入 |
+| 11. 创建执行链 | `tools/core/executor.py` + `permissions/engine.py` | ToolExecutor 持有注册表与权限引擎 |
+| 12. 创建 TurnRunner | `agent/runner.py` | 注入全部依赖，配置循环上限与未知工具熔断 |
+| 13. 启动 TUI | `tui/app.py` | 进入 Textual 事件循环；MCP 初始化完成后启用输入 |
 | 14. 退出清理与小结 | `app.py finally` | 等待 Runner、Session 写入者和 MCP 连接收尾；正常返回后打印恢复命令与本次启动用量，清理失败明确报告并返回 1 |
 
 本次启动账本在应用装配时创建。Provider 工厂和切换模型后的新 Provider 都使用同一个 observer，Session 恢复不导入历史消耗。退出确认与统计口径详见 [结束工作与恢复对话](app-exit.md)。

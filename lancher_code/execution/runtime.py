@@ -17,7 +17,10 @@ from lancher_code.execution.processes import ProcessSupervisor, TERMINAL_STATUSE
 logger = get_logger('execution.runtime')
 
 if TYPE_CHECKING:
-    from lancher_code.models import SessionState, ConversationMessage, PermissionRule, ProviderConfig
+    from lancher_code.sessions.models import SessionState
+    from lancher_code.contracts.messages import ConversationMessage
+    from lancher_code.permissions.models import PermissionRule
+    from lancher_code.providers.models import ProviderConfig
     from lancher_code.sessions.service import SessionService
 
 

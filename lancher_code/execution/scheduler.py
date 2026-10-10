@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from lancher_code.models import CancellationToken
+from lancher_code.contracts.control import CancellationToken
 
 
 from lancher_code.execution.contracts import ResourceClaim, ResourceLifetime, ResourceOwner

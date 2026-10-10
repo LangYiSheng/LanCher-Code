@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import (
-    PathWriteDeniedError, atomic_write_text, ensure_writable_path, is_session_workspace_path, relative_display_path,
-)
+from lancher_code.filesystem.access import PathWriteDeniedError, ensure_writable_path, is_session_workspace_path, relative_display_path
+from lancher_code.tools.core.common import atomic_write_text
 
 WRITE_PLAN_FILE_DESCRIPTION = (
     "覆盖写入计划文件。"
@@ -19,7 +19,7 @@ class WritePlanFileTool:
         return ToolDefinition(
             name="write_plan_file",
             description=WRITE_PLAN_FILE_DESCRIPTION,
-            params_model={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "content": {
@@ -32,7 +32,7 @@ class WritePlanFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            allowed_modes=("plan",),
+            allowed_phases=("plan",),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

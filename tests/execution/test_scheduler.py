@@ -7,7 +7,7 @@ import pytest
 
 from lancher_code.execution.contracts import ResourceClaim, ResourceOwner
 from lancher_code.execution.scheduler import ResourceScheduler, get_project_scheduler, path_claim, project_claim
-from lancher_code.models import CancellationToken
+from lancher_code.contracts.control import CancellationToken
 
 
 @pytest.mark.asyncio

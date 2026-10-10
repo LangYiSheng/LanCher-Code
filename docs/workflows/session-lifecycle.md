@@ -24,11 +24,11 @@ Session 表示同一项目中的一段独立对话，身份是稳定 UUID，标�
 
 UUID 使用 `uuid4().hex` 的 32 位小写形式。文件路径由 UUID 构造，标题不参与路径拼接，也无需唯一。所有会话控制路径均拒绝符号链接和 Windows junction 重定向，现有普通控制文件也拒绝多个硬链接。`plan.md`、`tmp/` 和 `artifacts/` 是工作文件约定，使用时按需生成。
 
-`events.jsonl` 是持久化事实来源，每行一条事件，格式版本为 `1`，包含 `version`、连续递增的 `seq`、带时区的 `timestamp`、`type`、可空的 `turn_id` 与对象 `data`。事件保存创建、消息增量、工具记录、实际模型请求及用量快照、阶段和权限变更、模型选择、上下文压缩、计划、队列、运行结束及归档。`meta.json` 是列表摘要缓存；`checkpoint.json` 保存投影快照；两者不替代事件日志。`blobs/` 放置较大的工具结果等内部内容。
+`events.jsonl` 是持久化事实来源，每行一条事件，格式版本为 `2`，包含 `version`、连续递增的 `seq`、带时区的 `timestamp`、`type`、可空的 `turn_id` 与对象 `data`。事件保存创建、消息增量、工具记录、实际模型请求及用量快照、阶段和权限变更、模型选择、上下文压缩、计划、队列、运行结束及归档。`meta.json` 是列表摘要缓存；`checkpoint.json` 保存投影快照；两者版本同为 `2`，不替代事件日志。上下文子格式继续使用版本 `2`。`blobs/` 放置较大的工具结果等内部内容。
 
 每个请求记录独立 UUID 和用途，摘要或取消请求也保留已上报用量。恢复事件可重建会话累计；本次启动统计只接收这次真实请求，不把历史消耗导入。相关口径与未知字段见 [Token 与上下文](token-accounting.md)。
 
-这是新的事件格式，**不兼容旧 v1–v4 命名会话文件**。旧 `.lancher/session/` 保留原样，不读取、不迁移，也不自动删除；旧共享 `.lancher/plan.md` 不会导入当前会话。
+读取边界只接受事件格式 `2`；旧 UUID 事件格式和旧命名会话文件均不迁移、不自动删除，原文件保留。`SessionListing.items` 返回可用会话，`issues` 单独报告 `unsupported_format` 或 `invalid_data`，因此一份旧文件不会阻断其他会话列表。恢复旧格式时明确提示使用 `/session new`；旧共享 `.lancher/plan.md` 不会导入当前会话。
 
 ## 命令与状态切换
 
@@ -70,4 +70,4 @@ UUID 使用 `uuid4().hex` 的 32 位小写形式。文件路径由 UUID 构造�
 - `sessions.service`：身份、写入者和增量状态的业务协调。
 - `SessionController`：对话状态与模型上下文。
 - `TurnRunner`：轮次运行、模型切换与 Session 切换。
-- `tui_views/chat.py`：命令补全、确认、列表和界面重建。
+- `tui/app.py`：命令补全、确认、列表和界面重建。

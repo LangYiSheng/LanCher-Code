@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from urllib.parse import urlsplit
 
@@ -10,23 +10,16 @@ import httpx
 
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
-from lancher_code.models import ChatRequest, ContentBlock, MessageUsage, StreamEvent, ToolCallChunk
+from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent
+from lancher_code.usage.models import MessageUsage, merge_usage
+from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
-from lancher_code.run_usage import RequestUsageStatus, UsageObserver
+from lancher_code.usage.ledger import RequestUsageStatus
 
 logger = get_logger("providers.openai")
 
 
 class OpenAIProvider(BaseChatProvider):
-    def __init__(
-        self,
-        config,
-        client_factory: Callable[[], httpx.AsyncClient] | None = None,
-        *,
-        usage_observer: UsageObserver | None = None,
-    ) -> None:
-        super().__init__(config=config, client_factory=client_factory, usage_observer=usage_observer)
-
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
         request = self._prepare_usage_attempt(request)
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -85,7 +78,7 @@ class OpenAIProvider(BaseChatProvider):
                                 chunk["usage"],
                                 **usage_keys,
                             )
-                            usage = self.merge_reported_usage(usage, incoming, fields)
+                            usage = merge_usage(usage, incoming)
                             self._report_usage(usage_request_id, usage, fields)
 
                         for choice in chunk.get("choices", []):

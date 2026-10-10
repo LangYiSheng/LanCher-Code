@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 
 
 class Tool(Protocol):

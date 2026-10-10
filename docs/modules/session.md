@@ -24,7 +24,7 @@
 | `usage_summary(message_id=None)` / `total_usage()` | 从持久化请求账本汇总单条消息或整段会话的已上报用量 |
 | `offload_large_tool_results()` / `compact_context()` | 工具结果卸载与上下文压缩 |
 | `begin_compaction()` / `finish_compaction()` | 维护压缩活动身份、状态和聊天位置；保存供恢复使用的指标快照 |
-| `list_sessions()` | 只读列出项目会话，返回 `SessionInfo` |
+| `list_sessions()` | 返回 `SessionListing`：`items` 为可用会话，`issues` 单独报告旧格式或损坏文件 |
 | `new_session()` | 刷新旧会话并重置草稿；有后台资源时保留原Runtime及写入者 |
 | `resume_session(session_id, resolved_model=...)` | 恢复指定 UUID，返回恢复的会话权限条数 |
 | `rename_session(session_id, title)` | 只修改标题 |
@@ -32,22 +32,26 @@
 | `read_session_model_ref(session_id)` | 只读取得目标会话模型引用 |
 | `flush()` / `close()` | 刷新事件；退出时写快照并释放锁 |
 
-旧 `active_session_name`、`save_session`、`auto_save`、`list_saved_sessions` 和切换 `force` 接口已移除。
-
 ## 存储分层
 
 | 模块 | 职责 |
 |---|---|
 | `sessions/paths.py` | 规范 UUID hex、独立目录、符号链接与 junction 校验 |
-| `sessions/repository.py` | `ProjectSessionRepository`、JSONL 事件、摘要与快照、文件锁、归档与删除 |
-| `sessions/codec.py` | 将日志投影为会话状态，编解码消息、上下文与权限规则 |
+| `sessions/repository.py` | `ProjectSessionRepository`：创建、列表、读取、归档与删除 |
+| `sessions/event_log.py` | JSONL 读取、版本校验、事件追加与写入者生命周期 |
+| `sessions/locking.py` | Windows / POSIX 独占文件锁 |
+| `sessions/cache.py` | 列表摘要的读取、校验与重建 |
+| `sessions/storage.py` | 存储结果类型、错误、格式版本与 JSON 边界校验 |
+| `sessions/codec.py` | 当前格式的消息、上下文与权限状态编解码 |
+| `sessions/projection.py` | 重放事件，恢复状态投影 |
+| `sessions/messages.py`、`compaction.py`、`recovery.py` | 消息与轨迹更新、压缩状态协调、中断恢复 |
 | `sessions/service.py` | 协调会话创建、恢复、增量持久化与写入者切换 |
 
-`events.jsonl` 使用新事件版本 `1`，是持久化事实来源；`meta.json` 和 `checkpoint.json` 是可重建摘要及状态快照。旧 `.lancher/session/*.jsonl` v1–v4 文件不读取、不迁移。具体布局和生命周期见 [session-lifecycle.md](../workflows/session-lifecycle.md)。
+`events.jsonl` 使用事件版本 `2`，是持久化事实来源；`meta.json` 和 `checkpoint.json` 也使用版本 `2`，属于可重建摘要及状态快照。上下文子格式沿用版本 `2`。旧事件版本与旧 `.lancher/session/*.jsonl` 保留原文件，不迁移、不自动删除；列表以 `issues` 报告问题，其他有效会话仍可使用，恢复旧格式时明确提示新建。具体布局和生命周期见 [session-lifecycle.md](../workflows/session-lifecycle.md)。
 
 请求账本通过单条 `usage.request_updated` 增量写入，普通 `state.changed` 只保存其余状态，投影时保留已经重建的账本。这样阶段或锚点变化不会反复复制累计请求。`persist()` 也检查账本差异，负责把恢复中的 `running → incomplete` 修复写回事实日志；常规回调已经同步保存快照，后续刷新不会重复写。已保存记录不能被删除，取消和异常只更新状态并保留已上报数字。
 
-助手协议响应带来源协议及模型，保存前校验思考块。旧缺思考元数据和跨来源工具交换仅在请求副本中转换为注明原因的文字历史，存储原文不变；普通请求与摘要请求采用同一投影。详见 [思考协议与工具恢复](../workflows/thinking-and-tool-recovery.md)。
+含思考或工具调用的助手协议响应必须带来源协议及模型，保存和恢复时校验当前格式。完整的跨来源工具交换仅在请求副本中转换为注明原因的文字历史，存储原文不变；普通请求与摘要请求采用同一投影，不再补救缺少来源的旧格式。详见 [思考协议与工具恢复](../workflows/thinking-and-tool-recovery.md)。
 
 Checkpoint 仍保存完整账本，恢复时读取快照并重放尾部；缺少快照时重放全部事件，得到同一份会话状态。完整快照会随会话增长，但它只在明确的快照时机写入，不随每次流式更新复制全部历史。
 

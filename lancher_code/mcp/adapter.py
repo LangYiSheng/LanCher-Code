@@ -3,7 +3,8 @@ from __future__ import annotations
 from mcp import types as mcp_types
 
 from lancher_code.mcp.connection import MCPServerConnection
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult, ToolPermissionMetadata
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult, ToolPermissionMetadata
 from lancher_code.logging_system import get_logger
 
 logger = get_logger("mcp.adapter")
@@ -21,8 +22,9 @@ class MCPToolAdapter:
         self._definition = ToolDefinition(
             name=visible_name,
             description=remote.description or f"来自 MCP Server {server_name} 的工具 {remote.name}",
-            params_model=dict(schema or {"type": "object", "properties": {}}),
+            input_schema=dict(schema or {"type": "object", "properties": {}}),
             category="read" if read_only else "command",
+            allowed_phases=("discuss", "plan", "execute") if read_only else ("execute",),
             is_system_tool=False,
             should_defer=True,
             permission=ToolPermissionMetadata(

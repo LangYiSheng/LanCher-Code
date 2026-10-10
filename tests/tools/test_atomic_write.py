@@ -1,20 +1,23 @@
 from __future__ import annotations
 
+from lancher_code.tools.core.file_state_cache import FileStateCache
+
 import asyncio
 import os
 from pathlib import Path
 
 import pytest
 
-from lancher_code.models import CancellationToken, ToolContext
+from lancher_code.contracts.control import CancellationToken
+from lancher_code.tools.context import ToolContext
 from lancher_code.tools.builtin.read_file import ReadFileTool
 from lancher_code.tools.builtin.write_file import WriteFileTool
 from lancher_code.tools.core import common
 
 
 async def _context_after_read(path: Path) -> ToolContext:
-    context = ToolContext(cwd=path.parent, timeout_seconds=1, cancellation_token=CancellationToken())
-    assert (await ReadFileTool().execute({"path": path.name}, context)).ok
+    context = ToolContext(file_state_cache=FileStateCache(), cwd=path.parent, timeout_seconds=1, cancellation_token=CancellationToken())
+    assert (not (await ReadFileTool().execute({"path": path.name}, context)).is_error)
     return context
 
 
@@ -75,7 +78,7 @@ async def test_external_change_during_staging_is_not_overwritten(tmp_path: Path,
 @pytest.mark.asyncio
 async def test_concurrent_creation_is_not_overwritten(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "new.txt"
-    context = ToolContext(cwd=tmp_path, timeout_seconds=1)
+    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1)
     real_fsync = os.fsync
 
     def create_after_staging(fd):

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import PathWriteDeniedError, atomic_write_text, relative_display_path, resolve_writable_path
+from lancher_code.filesystem.access import PathWriteDeniedError, relative_display_path, resolve_writable_path
+from lancher_code.tools.core.common import atomic_write_text
 
 EDIT_FILE_DESCRIPTION = (
     "在文件中按原文做唯一匹配替换，适合局部修改代码或配置。"
@@ -20,7 +22,7 @@ class EditFileTool:
         return ToolDefinition(
             name="edit_file",
             description=EDIT_FILE_DESCRIPTION,
-            params_model={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
@@ -40,7 +42,7 @@ class EditFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
+            allowed_phases=("discuss", "plan", "execute"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

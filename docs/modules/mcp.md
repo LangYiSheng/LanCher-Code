@@ -25,6 +25,7 @@ mcp/
   - `stdio`：`command` + `args` + `env`（用本机进程启动，如 `npx -y @modelcontextprotocol/server-filesystem`）
   - `http`：`url` + `headers`（Streamable HTTP）
 - `env` / `headers` 值支持 `${VAR}` 环境变量展开，缺失环境变量会使该 Server 校验失败（只跳过该 Server）
+- 启动和设置共用 `validate_server_config()` 校验原始配置；设置保存保留 `${VAR}`，启用连接加载时再展开。非法项目覆盖被单独报告，不回退同名全局项。
 - 格式与校验见 [configuration.md](../configuration.md) 的"MCP 配置"一节
 
 ## 初始化流程（`MCPClientManager.initialize`）
@@ -56,7 +57,8 @@ load_mcp_config(cwd) 合并全局+项目配置
 | 属性 | 值 |
 |---|---|
 | 可见名 | `mcp__<server>__<tool>` |
-| 分类 | 远程标注 `readOnlyHint` → read，否则 command |
+| 分类与阶段 | 明确 `readOnlyHint=true` → read 且允许 discuss/plan/execute，否则 command 且仅 execute |
+| 参数 | `ToolDefinition.input_schema` 直接保存远端 JSON Schema，由统一工具入口校验 |
 | 资源调度 | 未知 MCP 副作用保守项目独占；readOnlyHint 影响阶段可见性，不作为并发安全证明 |
 | 权限 | `source="external"`，规则键为可见名；讨论／计划仅接纳服务器明确声明 `readOnlyHint=true` 的工具，再按独立审批策略处理。声明不等于系统隔离保证；规则与 bypass 不能越过阶段限制 |
 
@@ -72,11 +74,11 @@ load_mcp_config(cwd) 合并全局+项目配置
 
 ## 与其他模块的关系
 
-- ← `app.py`：`load_mcp_config(cwd)` + 构造 manager；`tui.configure_mcp(manager, registry)`
+- ← `app.py`：`load_mcp_config(cwd)` 后构造 manager，在 `ChatTUI` 构造函数中注入 `mcp_manager` 与 `tool_registry`
 - → `tools/core/registry.py`：注册延迟工具与 Server 元数据
-- → `tui_views/message.py`（横幅 MCP 状态）、`tui_views/chat.py`（初始化门控）
-- → `permission_engine.py`：外部工具权限判定（`source="external"`）
-- → `settings_service.py` / `tui_views/settings.py`：MCP 配置编辑
+- → `tui/message.py`（横幅 MCP 状态）、`tui/app.py`（初始化门控）
+- → `permissions/engine.py`：外部工具权限判定（`source="external"`）
+- → `config/settings.py` / `tui/settings/screen.py`：MCP 配置编辑
 
 ## 注意事项
 

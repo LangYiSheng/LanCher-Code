@@ -3,16 +3,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from lancher_code.models import ToolContext, ToolDefinition, ToolExecutionResult
+from lancher_code.tools.context import ToolContext
+from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.tools.core.common import (
-    MODEL_MATCH_LIMIT,
-    MODEL_TEXT_CHAR_LIMIT,
-    UI_PATH_LIMIT,
-    iter_files,
-    relative_display_path,
-    resolve_path_in_root,
-)
+from lancher_code.tools.core.common import MODEL_MATCH_LIMIT, MODEL_TEXT_CHAR_LIMIT, UI_PATH_LIMIT, iter_files
+from lancher_code.filesystem.access import relative_display_path, resolve_path_in_root
 
 MAX_LINE_CHARS = 300
 
@@ -29,7 +24,7 @@ class GrepTool:
         return ToolDefinition(
             name="grep",
             description=GREP_DESCRIPTION,
-            params_model={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "pattern": {
@@ -49,7 +44,7 @@ class GrepTool:
                 "additionalProperties": False,
             },
             category="read",
-            allowed_modes=("default", "plan", "acceptEdits", "bypass"),
+            allowed_phases=("discuss", "plan", "execute"),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from lancher_code.tools.core.file_state_cache import FileStateCache
+
 import asyncio
 from pathlib import Path
 
 import pytest
 
-from lancher_code.models import ToolContext
+from lancher_code.tools.context import ToolContext
 from lancher_code.tools.builtin.glob import GlobTool
 from lancher_code.tools.builtin.grep import GrepTool
 from lancher_code.tools.builtin.read_file import ReadFileTool
@@ -17,10 +19,10 @@ def test_read_file_rejects_path_outside_project(tmp_path: Path) -> None:
     tool = ReadFileTool()
 
     result = asyncio.run(
-        tool.execute({"path": str(outside)}, ToolContext(cwd=tmp_path, project_root=tmp_path, timeout_seconds=1))
+        tool.execute({"path": str(outside)}, ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, project_root=tmp_path, timeout_seconds=1))
     )
 
-    assert result.ok is False
+    assert (not result.is_error) is False
     assert result.error_code == "path_outside_project"
 
 
@@ -30,11 +32,11 @@ def test_glob_rejects_search_root_outside_project(tmp_path: Path) -> None:
     result = asyncio.run(
         tool.execute(
             {"pattern": "*.txt", "path": str(tmp_path.parent)},
-            ToolContext(cwd=tmp_path, project_root=tmp_path, timeout_seconds=1),
+            ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, project_root=tmp_path, timeout_seconds=1),
         )
     )
 
-    assert result.ok is False
+    assert (not result.is_error) is False
     assert result.error_code == "path_outside_project"
 
 
@@ -44,11 +46,11 @@ def test_grep_rejects_search_root_outside_project(tmp_path: Path) -> None:
     result = asyncio.run(
         tool.execute(
             {"pattern": "hello", "path": str(tmp_path.parent)},
-            ToolContext(cwd=tmp_path, project_root=tmp_path, timeout_seconds=1),
+            ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, project_root=tmp_path, timeout_seconds=1),
         )
     )
 
-    assert result.ok is False
+    assert (not result.is_error) is False
     assert result.error_code == "path_outside_project"
 
 
@@ -64,8 +66,8 @@ def test_read_file_rejects_symlink_escape(tmp_path: Path) -> None:
 
     tool = ReadFileTool()
     result = asyncio.run(
-        tool.execute({"path": "link.txt"}, ToolContext(cwd=tmp_path, project_root=tmp_path, timeout_seconds=1))
+        tool.execute({"path": "link.txt"}, ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, project_root=tmp_path, timeout_seconds=1))
     )
 
-    assert result.ok is False
+    assert (not result.is_error) is False
     assert result.error_code == "path_outside_project"

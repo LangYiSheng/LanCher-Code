@@ -10,16 +10,16 @@
 - 支持取消、未知工具熔断、非阻塞审批，以及忙时补充与待发送队列
 - 以 **异步生成器 + 事件队列** 的方式把进度暴露给 TUI
 
-实现位置：`lancher_code/turn_runner.py`。
+公开入口在 `lancher_code/agent/runner.py`，模型选择由 `agent/selection.py` 管理，输入队列在 `inputs.py`，流式响应收集在 `streaming.py`，工具批次收尾在 `tool_batch.py`，界面事件类型在 `events.py`。
 
 ## 在系统中的位置
 
 ```text
-tui_views/chat.py  ──run_user_turn()──▶  TurnRunner
+tui/app.py  ──run_user_turn()──▶  TurnRunner
                                               │
             ┌───────────────┬────────────────┼────────────────┐
             ▼               ▼                ▼                ▼
-      SessionController  ChatProvider   ToolExecutor    context_management
+      SessionController  ChatProvider   ToolExecutor    context.compaction
 ```
 
 ## 核心类
@@ -35,7 +35,6 @@ tui_views/chat.py  ──run_user_turn()──▶  TurnRunner
 | `has_active_turn` | 是否有回合在跑 |
 | `compact_context()` | 手动压缩（`/compact`），模型响应中禁止 |
 | `set_phase(phase)` / `set_permission_policy(policy)` | 分别切换阶段和策略；运行、审批、压缩期间拒绝修改 |
-| `set_mode(mode)` | 旧入口：plan 切阶段，其他值只切策略 |
 | `enqueue_input(text, delivery)` | 接收下一轮或当前任务补充，返回 `PendingInput` 回执 |
 | `update_pending_input` / `remove_pending_input` / `convert_pending_input` | 编辑、移除、转换未消费消息；消费后不允许重复转换 |
 | `pause_queue()` / `resume_queue()` / `run_next_queued_turn()` | 暂停、明确继续，以及原子消费下一项 |
@@ -58,7 +57,7 @@ run_user_turn(text)
        a. 列出可见工具、卸载大结果、组装请求
        b. 估算 Token：
           · 达到自动压缩阈值 → 自动压缩 → 重新组装请求
-       c. _stream_request：消费 Provider 流事件
+       c. streaming.collect_response：消费 Provider 流事件
           · text_delta → 追加内容 + 事件 assistant_text_delta
           · thinking_delta → 思考轨迹 + progress
           · tool_call_delta → ToolCallAssembler.consume
@@ -89,7 +88,7 @@ run_user_turn(text)
 
 ## 事件流（TurnEvent）
 
-`TurnEvent`（定义在 `models.py`）是当前轮次的界面事件协议；任务窗口另通过 runner facade 查询并控制所属 Session 的进程，`kind` 包括：
+`TurnEvent`（定义在 `agent/events.py`）是当前轮次的界面事件协议；任务窗口另通过 runner facade 查询并控制所属 Session 的进程，`kind` 包括：
 
 主要包括 `user_message_created`、`assistant_message_started`、`assistant_text_delta`、`tool_call_started`、`tool_result_received`、`usage_updated`、`progress_updated`、`phase_changed`、`policy_changed`、`permission_request_created`、`permission_request_resolved`、`permission_request_closed`、`pending_input_changed`、`steering_applied`、`assistant_message_completed`、`turn_completed`、`turn_cancelled`、`turn_failed`。
 
@@ -112,7 +111,7 @@ run_user_turn(text)
 
 | 方向 | 说明 |
 |---|---|
-| 输入 | 用户文本；TUI 的权限决议、取消请求、模式切换 |
+| 输入 | 用户文本；TUI 的权限决议、取消请求、阶段与策略切换 |
 | 输出 | `TurnEvent` 异步流（TUI 消费）；副作用：会话状态变更、自动保存、MCP 工具发现 |
 
 ## 与其他模块的关系
@@ -122,8 +121,8 @@ run_user_turn(text)
 - → `ToolExecutor`：执行工具
 - → `ToolRegistry`：列出可见工具 / 延迟工具索引
 - → `ToolCallAssembler`：拼接工具调用
-- → `context_tokens` / `context_budget` / `context_management`：usage 校准、动态额度与压缩入口
-- ← `tui_views/chat.py`：唯一消费者
+- → `context.tokens` / `context.budget` / `context.compaction`：usage 校准、动态额度与压缩入口
+- ← `tui/app.py`：唯一消费者
 
 ## 注意事项
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from lancher_code.tools.core.file_state_cache import FileStateCache
+
 from pathlib import Path
 
-from lancher_code.models import ToolContext
+from lancher_code.tools.context import ToolContext
 from lancher_code.tools.builtin.edit_file import EditFileTool
 from lancher_code.tools.builtin.read_file import ReadFileTool
 
@@ -12,10 +14,10 @@ def test_replace_in_file_tool_replaces_unique_match(tmp_path: Path) -> None:
     path.write_text("hello world", encoding="utf-8")
     read_tool = ReadFileTool()
     tool = EditFileTool()
-    context = ToolContext(cwd=tmp_path, timeout_seconds=1)
+    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1)
 
     read_result = __import__("asyncio").run(read_tool.execute({"path": "demo.txt"}, context))
-    assert read_result.ok is True
+    assert (not read_result.is_error) is True
 
     result = __import__("asyncio").run(
         tool.execute(
@@ -24,7 +26,7 @@ def test_replace_in_file_tool_replaces_unique_match(tmp_path: Path) -> None:
         )
     )
 
-    assert result.ok is True
+    assert (not result.is_error) is True
     assert path.read_text(encoding="utf-8") == "hello LanCher"
     assert result.metadata["line_start"] == 1
     assert result.metadata["display_lines"][0]["text"].startswith("- 1\t")
@@ -36,7 +38,7 @@ def test_replace_in_file_tool_returns_error_for_zero_matches(tmp_path: Path) -> 
     path.write_text("hello world", encoding="utf-8")
     read_tool = ReadFileTool()
     tool = EditFileTool()
-    context = ToolContext(cwd=tmp_path, timeout_seconds=1)
+    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1)
     __import__("asyncio").run(read_tool.execute({"path": "demo.txt"}, context))
 
     result = __import__("asyncio").run(
@@ -46,7 +48,7 @@ def test_replace_in_file_tool_returns_error_for_zero_matches(tmp_path: Path) -> 
         )
     )
 
-    assert result.ok is False
+    assert (not result.is_error) is False
     assert result.error_code == "match_not_found"
     assert result.metadata["match_count"] == 0
 
@@ -56,7 +58,7 @@ def test_replace_in_file_tool_returns_error_for_multiple_matches(tmp_path: Path)
     path.write_text("hello\nhello", encoding="utf-8")
     read_tool = ReadFileTool()
     tool = EditFileTool()
-    context = ToolContext(cwd=tmp_path, timeout_seconds=1)
+    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1)
     __import__("asyncio").run(read_tool.execute({"path": "demo.txt"}, context))
 
     result = __import__("asyncio").run(
@@ -66,6 +68,6 @@ def test_replace_in_file_tool_returns_error_for_multiple_matches(tmp_path: Path)
         )
     )
 
-    assert result.ok is False
+    assert (not result.is_error) is False
     assert result.error_code == "match_not_unique"
     assert result.metadata["match_count"] == 2
