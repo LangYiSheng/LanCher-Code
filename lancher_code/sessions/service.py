@@ -57,7 +57,7 @@ class SessionService:
         self.writer, self.paths, self.title = writer, writer.paths, title
         self._saved = copy.deepcopy(snapshot)
 
-    def persist(self, snapshot, *, context_event='context.replaced'):
+    def persist(self, snapshot, *, context_event='context.replaced', context_activity_id=None):
         if self.writer is None:
             return
         previous = self._saved
@@ -70,6 +70,20 @@ class SessionService:
         for request_id, record in current_requests.items():
             if previous_requests.get(request_id) != record:
                 self.record_usage(record, turn_id=record.get('turn_id'))
+        previous_activities = previous['state'].setdefault('compaction_activities', {})
+        current_activities = snapshot['state'].get('compaction_activities', {})
+        if previous_activities.keys() - current_activities.keys():
+            raise SessionRepositoryError('压缩活动不能删除已保存的历史记录。')
+        completed_activity = None
+        if context_activity_id is not None:
+            completed_activity = current_activities.get(context_activity_id)
+            if (context_event != 'context.compacted' or completed_activity is None
+                    or completed_activity['status'] != 'completed'):
+                raise SessionRepositoryError('上下文压缩提交缺少对应活动的完成快照。')
+        for activity_id, activity in current_activities.items():
+            # 成功不能先写成一条孤立活动事件：必须和实际上下文同时提交。
+            if activity_id != context_activity_id and previous_activities.get(activity_id) != activity:
+                self.record_compaction(activity)
         known = {message['id']: message for message in previous['messages']}
         for message in snapshot['messages']:
             old = known.get(message['id'])
@@ -92,10 +106,40 @@ class SessionService:
             old.clear()
             old.update(copy.deepcopy(message))
 
+        # 普通状态先落盘，压缩提交作为最后一条事件。这样前面的写入失败
+        # 不会留下“上下文已压缩、控制器却回滚”的相反事实。
+        for key, kind in (('state', 'state.changed'), ('rules', 'permissions.changed'), ('model_ref', 'model.changed')):
+            if key == 'state':
+                before = {name: value for name, value in previous[key].items()
+                          if name not in {'request_usage', 'compaction_activities'}}
+                after = {name: value for name, value in snapshot[key].items()
+                         if name not in {'request_usage', 'compaction_activities'}}
+                if completed_activity is not None:
+                    after['context_management'] = before['context_management']
+            else:
+                before, after = previous[key], snapshot[key]
+            if before == after:
+                continue
+            data = after if key == 'state' else {key: snapshot[key]}
+            self.writer.append(kind, data)
+            if key == 'state':
+                preserved = {name: previous[key][name] for name in ('request_usage', 'compaction_activities')}
+                previous[key] = copy.deepcopy(after)
+                previous[key].update(preserved)
+            else:
+                previous[key] = copy.deepcopy(snapshot[key])
+
         before, after = previous['transcript'], snapshot['transcript']
         if len(after) < len(before) or context_event == 'context.compacted':
-            self.writer.append(context_event, {'messages': after})
+            data = {'messages': after}
+            if completed_activity is not None:
+                data.update(activity_id=context_activity_id, compaction=completed_activity,
+                            context_management=snapshot['state']['context_management'])
+            self.writer.append(context_event, data)
             previous['transcript'] = copy.deepcopy(after)
+            if completed_activity is not None:
+                previous['state']['compaction_activities'][context_activity_id] = copy.deepcopy(completed_activity)
+                previous['state']['context_management'] = copy.deepcopy(snapshot['state']['context_management'])
         else:
             for index, old in enumerate(before):
                 if old != after[index]:
@@ -104,18 +148,6 @@ class SessionService:
             if len(after) > len(before):
                 self.writer.append('transcript.appended', {'messages': after[len(before):]})
                 before.extend(copy.deepcopy(after[len(before):]))
-
-        for key, kind in (('state', 'state.changed'), ('rules', 'permissions.changed'), ('model_ref', 'model.changed')):
-            if key == 'state':
-                before = {name: value for name, value in previous[key].items() if name != 'request_usage'}
-                after = {name: value for name, value in snapshot[key].items() if name != 'request_usage'}
-            else:
-                before, after = previous[key], snapshot[key]
-            if before == after:
-                continue
-            data = after if key == 'state' else {key: snapshot[key]}
-            self.writer.append(kind, data)
-            previous[key] = copy.deepcopy(snapshot[key])
 
     def record(self, kind, data=None, *, turn_id=None):
         if self.writer is None:
@@ -135,6 +167,16 @@ class SessionService:
             return
         self.record('usage.request_updated', data, turn_id=turn_id)
         self._saved['state'].setdefault('request_usage', {})[data['request_id']] = copy.deepcopy(data)
+
+    def record_compaction(self, data):
+        """压缩活动只追加变化的单条快照，避免每次状态变化重写整个活动表。"""
+        if self.writer is None:
+            return
+        saved = self._saved['state'].setdefault('compaction_activities', {})
+        if saved.get(data['id']) == data:
+            return
+        self.record('compaction.updated', data, turn_id=data.get('turn_id'))
+        saved[data['id']] = copy.deepcopy(data)
 
     def rename(self, session_id, title):
         if self.paths is not None and self.paths.session_id == session_id and self.writer is not None:

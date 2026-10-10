@@ -17,6 +17,7 @@ from textual.widgets import Button, Static, TextArea
 from lancher_code.errors import LanCherError
 from lancher_code.model_catalog import iter_model_refs, model_display_name
 from lancher_code.models import (
+    CompactionActivity,
     PermissionRequest,
     ProviderConfig,
     RuntimeMode,
@@ -52,6 +53,7 @@ from lancher_code.tui_views.composer import (
     StopTurnRequested,
 )
 from lancher_code.tui_views.message import BannerWidget, MessageWidget
+from lancher_code.tui_views.compaction import CompactionActivityWidget
 from lancher_code.tui_views.permission import InlinePermissionPanel
 from lancher_code.tui_views.settings import SettingsResult, SettingsScreen
 from lancher_code.tui_views.model_picker import ModelPickerScreen
@@ -137,6 +139,7 @@ class LanCherTextualApp(App[int]):
     .message-timeline { height: auto; width: 1fr; }
     .timeline-text { height: auto; width: 1fr; margin: 0; }
     .trace-section { height: auto; width: 1fr; margin: 0; }
+    .standalone-compaction { margin-bottom: 1; }
     .timeline-separator { margin-top: 1; }
     .trace-header { height: 1; width: 1fr; color: $text-muted; }
     .trace-header:focus { text-style: bold underline; }
@@ -223,10 +226,12 @@ class LanCherTextualApp(App[int]):
         self._exit_flow = ExitFlow()
         self._exit_hint_timer: Timer | None = None
         self._compaction_worker: Worker | None = None
+        self._manual_compaction_id: str | None = None
         self._shutdown_process_count = 0
         self._status_refresh_timer: Timer | None = None
         self._chat_started = False
         self._message_widgets: dict[str, MessageWidget] = {}
+        self._compaction_widgets: dict[str, CompactionActivityWidget] = {}
         self._task_message_ids: set[str] = set()
         self._status_hint = "就绪"
         self._slash_menu_matches: list[SlashCompletionCandidate] = []
@@ -342,7 +347,7 @@ class LanCherTextualApp(App[int]):
             stopping=self._turn_runner.is_stopping,
         )
         if decision == "cancel_work":
-            if self._compaction_worker is not None:
+            if self._manual_compaction_id is not None or self._compaction_worker is not None:
                 self._stop_current_work()
             elif self._is_streaming or self._turn_runner.has_active_turn:
                 # 工作刚排入 worker 时也可能还没有 ActiveTurn，worker 会在入口检查停止标记。
@@ -414,12 +419,15 @@ class LanCherTextualApp(App[int]):
             self.exit(0)
 
     def _stop_current_work(self) -> None:
-        if self._compaction_worker is not None:
-            self._compaction_worker.cancel()
+        if self._manual_compaction_id is not None or self._compaction_worker is not None:
+            if self._compaction_worker is not None:
+                self._compaction_worker.cancel()
             self._status_hint = "正在停止上下文压缩"
             if not self._turn_runner.is_compacting:
                 # 取消发生在 worker 第一条指令之前，没有协程 finally 可替界面收尾。
+                self._finish_manual_activity_if_running("cancelled")
                 self._compaction_worker = None
+                self._manual_compaction_id = None
                 self._is_streaming = False
                 self._exit_flow.work_finished()
                 self._status_hint = "压缩已停止"
@@ -806,13 +814,48 @@ class LanCherTextualApp(App[int]):
 
     async def _mount_message_widget(self, message: SessionMessage) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)
-        widget = MessageWidget(message, show_thinking=self._ui_config.show_thinking_status)
+        widget = MessageWidget(message, show_thinking=self._ui_config.show_thinking_status,
+                               compaction_activities=self._session_controller.state.compaction_activities)
         self._message_widgets[message.id] = widget
         await chat_view.mount(widget)
 
-    async def _sync_message_widget(self, message_id: str) -> None:
+    async def _sync_message_widget(self, message_id: str, *, compaction: CompactionActivity | None = None) -> None:
         widget = self._message_widgets[message_id]
-        await widget.update_from_message(self._session_controller.get_message(message_id))
+        activities = self._session_controller.state.compaction_activities
+        if compaction is not None:
+            # 开始事件携带自己的快照；事件排队期间 Controller 可能已完成压缩。
+            activities = {**activities, compaction.id: compaction}
+        await widget.update_from_message(self._session_controller.get_message(message_id),
+                                        compaction_activities=activities)
+
+    async def _mount_compaction_widget(self, activity: CompactionActivity) -> None:
+        widget = CompactionActivityWidget(activity)
+        widget.add_class("standalone-compaction")
+        self._compaction_widgets[activity.id] = widget
+        await self.query_one("#chat-view", VerticalScroll).mount(widget)
+
+    def _finish_manual_activity_if_running(self, status: str, error_text: str | None = None) -> bool:
+        """worker 尚未开始也能收尾；与 Runner 的正常终结共用同一活动 ID。"""
+        activity = self._session_controller.state.compaction_activities.get(self._manual_compaction_id)
+        if activity is None:
+            return False
+        save_failed = False
+        try:
+            if activity.status == "running":
+                activity = self._session_controller.finish_compaction(activity.id, status=status, error_text=error_text)
+            else:
+                activity = self._session_controller.get_compaction(activity.id)
+        except (SessionRepositoryError, OSError) as exc:
+            # 内存已终结、日志写入失败时，仍要停图标和解锁输入区。
+            activity = self._session_controller.get_compaction(activity.id)
+            save_failed = True
+            logger.exception("event=compaction_status_save_failed activity_id=%s", activity.id)
+            if not self._ui_closing and self.is_running:
+                self.notify(str(exc), title="压缩状态保存失败", severity="error", timeout=10)
+        widget = self._compaction_widgets.get(activity.id)
+        if widget is not None:
+            widget.update_activity(activity)
+        return save_failed
 
     async def _consume_turn_event(self, event: TurnEvent) -> None:
         if event.kind == "user_message_created":
@@ -820,7 +863,17 @@ class LanCherTextualApp(App[int]):
         chat_view = self.query_one("#chat-view", VerticalScroll)
         follow_bottom = chat_view.is_vertical_scroll_end
         self._apply_turn_event(event)
-        if event.message is not None and event.kind in {"user_message_created", "assistant_message_started"}:
+        if event.kind == "compaction_updated" and event.compaction is not None:
+            activity = event.compaction
+            if activity.message_id is not None and activity.message_id in self._message_widgets:
+                await self._sync_message_widget(activity.message_id, compaction=activity)
+            elif activity.id in self._compaction_widgets:
+                self._compaction_widgets[activity.id].update_activity(activity)
+            else:
+                await self._mount_compaction_widget(activity)
+            if activity.status == "completed" and activity.trigger != "manual":
+                self._refresh_context_usage()
+        elif event.message is not None and event.kind in {"user_message_created", "assistant_message_started"}:
             await self._mount_message_widget(event.message)
             if event.kind == "assistant_message_started":
                 self._task_message_ids.add(event.message.id)
@@ -884,6 +937,10 @@ class LanCherTextualApp(App[int]):
             return
         if event.kind == "progress_updated":
             self._status_hint = event.progress_message or ("正在处理" if self._is_streaming else "就绪")
+            return
+        if event.kind == "compaction_updated" and event.compaction is not None:
+            activity = event.compaction
+            self._status_hint = "正在压缩上下文" if activity.status == "running" else "正在处理" if self._turn_runner.has_active_turn else "就绪"
             return
         if event.kind == "turn_cancelled":
             self._status_hint = event.progress_message or "已停止"
@@ -1361,14 +1418,38 @@ class LanCherTextualApp(App[int]):
             if arguments_text.strip():
                 self.notify("用法：/compact", title="上下文压缩", severity="warning")
                 return None
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            follow_bottom = chat_view.is_vertical_scroll_end
+            previous_ids = set(self._session_controller.state.compaction_activities)
+            try:
+                activity = self._session_controller.begin_compaction("manual")
+            except (SessionRepositoryError, OSError):
+                # 开始记录写盘失败也有可展开的失败行；不要再次尝试保存。
+                for activity_id in self._session_controller.state.compaction_activities.keys() - previous_ids:
+                    await self._mount_compaction_widget(self._session_controller.get_compaction(activity_id))
+                if follow_bottom:
+                    self.call_after_refresh(chat_view.scroll_end, animate=False)
+                raise
+            self._manual_compaction_id = activity.id
             self._is_streaming = True
             self._exit_flow.work_started()
             self._status_hint = "正在压缩上下文..."
             composer = self.query_one("#composer-input", ComposerTextArea)
             composer.disabled = True
             self._refresh_status_bar()
-            self.notify("正在压缩上下文...", title="上下文压缩")
-            self._compaction_worker = self._run_manual_compaction()
+            try:
+                await self._mount_compaction_widget(activity)
+            except BaseException as exc:
+                self._finish_manual_activity_if_running("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", str(exc))
+                self._stop_current_work()
+                raise
+            # 挂载控件也会让出事件循环；准备期间的停止不能再启动 worker。
+            if self._manual_compaction_id != activity.id:
+                self._compaction_widgets[activity.id].update_activity(self._session_controller.get_compaction(activity.id))
+                return None
+            if follow_bottom:
+                self.call_after_refresh(chat_view.scroll_end, animate=False)
+            self._compaction_worker = self._run_manual_compaction(activity.id)
             return None
 
         if command_name == "session":
@@ -1382,29 +1463,29 @@ class LanCherTextualApp(App[int]):
         return None
 
     @work(group="compaction", exclusive=True, exit_on_error=False)
-    async def _run_manual_compaction(self) -> None:
+    async def _run_manual_compaction(self, activity_id: str) -> None:
         # 压缩交给 worker，主界面的消息循环才能继续处理 Ctrl+C。
         status = "就绪"
         try:
-            result = await self._turn_runner.compact_context()
+            await self._turn_runner.compact_context(activity_id=activity_id, on_activity=self._consume_turn_event)
         except asyncio.CancelledError:
             status = "压缩已停止"
+            self._finish_manual_activity_if_running("cancelled")
             raise
         except Exception as exc:
             status = "压缩未完成"
             self._command_preserve_input = True
+            save_failed = self._finish_manual_activity_if_running("failed", str(exc))
             if not self._ui_closing and self.is_running:
-                self.notify(str(exc), title="上下文压缩失败", severity="error", timeout=10)
+                if isinstance(exc, SessionRepositoryError) and not save_failed:
+                    self.notify(str(exc), title="压缩状态保存失败", severity="error", timeout=10)
                 composer = self.query_one(ComposerTextArea)
                 if not composer.text:
                     composer.text = "/compact"
                     composer.cursor_location = composer.document.end
-        else:
-            if not self._ui_closing and self.is_running:
-                self.notify(f"已压缩，token 从 {result.before_tokens} 降至 {result.after_tokens}",
-                            title="上下文压缩", timeout=10)
         finally:
             self._compaction_worker = None
+            self._manual_compaction_id = None
             self._is_streaming = False
             self._exit_flow.work_finished()
             self._status_hint = status
@@ -1427,7 +1508,9 @@ class LanCherTextualApp(App[int]):
             self._compaction_worker = None
             return
         # worker 尚未进入协程就取消时，协程内的 finally 不会执行。
+        self._finish_manual_activity_if_running("cancelled" if event.state == WorkerState.CANCELLED else "failed")
         self._compaction_worker = None
+        self._manual_compaction_id = None
         self._is_streaming = False
         self._exit_flow.work_finished()
         self._status_hint = "压缩已停止" if event.state == WorkerState.CANCELLED else "压缩未完成"
@@ -1582,11 +1665,26 @@ class LanCherTextualApp(App[int]):
         for child in list(chat_view.children):
             await child.remove()
         self._message_widgets.clear()
+        self._compaction_widgets.clear()
         self._task_message_ids.clear()
-        for message in self._session_controller.state.messages:
+        messages = self._session_controller.state.messages
+        message_ids = {message.id for message in messages}
+        standalone: dict[str | None, list[CompactionActivity]] = {}
+        for activity in self._session_controller.state.compaction_activities.values():
+            if activity.message_id in message_ids:
+                continue
+            standalone.setdefault(activity.after_message_id, []).append(activity)
+        for activity in standalone.pop(None, []):
+            await self._mount_compaction_widget(activity)
+        for message in messages:
             await self._mount_message_widget(message)
+            for activity in standalone.pop(message.id, []):
+                await self._mount_compaction_widget(activity)
+        for activities in standalone.values():
+            for activity in activities:
+                await self._mount_compaction_widget(activity)
 
-        self._chat_started = bool(self._session_controller.state.messages)
+        self._chat_started = bool(messages or self._compaction_widgets)
         self.query_one(BannerWidget).set_compact(self._chat_started)
         chat_view.set_class(self._chat_started, "-banner-collapsed")
         self._refresh_mode_chrome()

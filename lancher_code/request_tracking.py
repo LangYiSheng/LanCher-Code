@@ -58,7 +58,12 @@ async def tracked_stream(
         status = "cancelled"
         raise
     except GeneratorExit:
-        status = "completed" if terminal_seen else "incomplete"
+        if terminal_seen:
+            status = "completed"
+        elif request.cancellation_token is not None and request.cancellation_token.is_cancelled:
+            status = "cancelled"
+        else:
+            status = "incomplete"
         raise
     except BaseException:
         status = "failed"

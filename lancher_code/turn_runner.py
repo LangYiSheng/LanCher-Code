@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -24,6 +24,8 @@ from lancher_code.models import (
     AppConfig,
     CancellationToken,
     ChatRequest,
+    CompactionActivity,
+    CompactionTrigger,
     ContextCompactionResult,
     MessageUsage,
     PendingInput,
@@ -497,31 +499,94 @@ class TurnRunner:
         """退出影响本应用托管的所有会话，不只统计当前画面。"""
         return self._execution_runtime.processes.active_count
 
-    async def compact_context(self) -> ContextCompactionResult:
-        if not self._execution_runtime.accepting(self._session.session_id):
-            raise ContextCompactionError("会话正在停止或执行运行时已关闭，暂时不能压缩上下文。")
-        if self.has_active_turn or self._manual_compaction:
-            raise ContextCompactionError("模型正在响应，暂时不能压缩上下文。")
-        self._manual_compaction = True
-        self._compaction_task = asyncio.current_task()
+    async def compact_context(
+        self, *, activity_id: str | None = None,
+        on_activity: Callable[[TurnEvent], Awaitable[None]] | None = None,
+    ) -> ContextCompactionResult:
+        return await self._compact_with_activity(
+            "manual", activity_id=activity_id, on_activity=on_activity,
+        )
+
+    async def _compact_with_activity(
+        self,
+        trigger: CompactionTrigger,
+        *,
+        activity_id: str | None = None,
+        message_id: str | None = None,
+        turn_id: str | None = None,
+        visible_tools=None,
+        deferred_tool_groups=None,
+        cancellation_token: CancellationToken | None = None,
+        queue: asyncio.Queue[TurnEvent | object] | None = None,
+        on_activity: Callable[[TurnEvent], Awaitable[None]] | None = None,
+        continued_on_failure: bool = False,
+    ) -> ContextCompactionResult:
+        """三个入口共享一次活动，摘要内部重试不会创建第二条界面记录。"""
+        activity = (self._session.get_compaction(activity_id) if activity_id is not None
+                    else self._session.begin_compaction(trigger, message_id=message_id, turn_id=turn_id))
+        manual_started = False
+
+        async def publish(snapshot: CompactionActivity) -> None:
+            message = self._session.get_message(snapshot.message_id) if snapshot.message_id else None
+            event = TurnEvent(kind="compaction_updated", compaction=deepcopy(snapshot), message=message)
+            if queue is not None:
+                await self._emit(queue, event)
+            if on_activity is not None:
+                await on_activity(event)
+
+        async def finish(status, **fields) -> None:
+            try:
+                snapshot = self._session.finish_compaction(activity.id, status=status, **fields)
+            except Exception:
+                # 终止事实可能已更新内存，但磁盘写入失败。界面仍结束等待，
+                # 保存错误继续向上传递，不能把失败伪装成压缩完成。
+                await publish(self._session.get_compaction(activity.id))
+                raise
+            await publish(snapshot)
+
         try:
-            visible_tools = self._tool_registry.list_definitions(
-                discovered_names=set(),
-                mode=self._session.runtime_mode,
-                work_phase=self._session.work_phase,
-            )
-            return await self._session.compact_context(
+            if trigger == "manual":
+                if not self._execution_runtime.accepting(self._session.session_id):
+                    raise ContextCompactionError("会话正在停止或执行运行时已关闭，暂时不能压缩上下文。")
+                if self.has_active_turn or self._manual_compaction:
+                    raise ContextCompactionError("模型正在响应，暂时不能压缩上下文。")
+                self._manual_compaction = True
+                self._compaction_task = asyncio.current_task()
+                manual_started = True
+            await publish(activity)
+            if trigger == "manual":
+                visible_tools = self._tool_registry.list_definitions(
+                    discovered_names=set(), mode=self._session.runtime_mode, work_phase=self._session.work_phase,
+                )
+                deferred_tool_groups = self._tool_registry.list_deferred_index(
+                    mode=self._session.runtime_mode, work_phase=self._session.work_phase,
+                )
+            result = await self._session.compact_context(
                 provider=self._provider,
                 visible_tools=visible_tools,
-                deferred_tool_groups=self._tool_registry.list_deferred_index(
-                    mode=self._session.runtime_mode,
-                    work_phase=self._session.work_phase,
-                ),
-                persist=True,
+                deferred_tool_groups=deferred_tool_groups,
+                persist=trigger == "manual",
+                cancellation_token=cancellation_token,
+                turn_id=turn_id,
+                activity_id=activity.id,
             )
+        except asyncio.CancelledError:
+            await finish("cancelled")
+            raise
+        except Exception as exc:
+            await finish(
+                "failed", error_text=str(exc),
+                continued=continued_on_failure and not isinstance(exc, SessionRepositoryError),
+            )
+            raise
+        else:
+            # Session 已把验证通过的上下文和完成活动一起持久化；这里只发布事实。
+            await publish(self._session.get_compaction(activity.id))
+            return result
         finally:
-            self._manual_compaction = False
-            self._compaction_task = None
+            if manual_started:
+                self._manual_compaction = False
+                self._compaction_task = None
 
     async def run_user_turn(self, text: str) -> AsyncIterator[TurnEvent]:
         self._ensure_model_idle()
@@ -648,21 +713,14 @@ class TurnRunner:
                     not context_state.automatic_compaction_disabled
                     and estimated_tokens >= budget.automatic_threshold
                 ):
-                    await self._emit(
-                        queue,
-                        TurnEvent(
-                            kind="progress_updated",
-                            message=self._session.get_message(assistant_message.id),
-                            progress_message="正在自动压缩上下文...",
-                        ),
-                    )
                     try:
-                        compaction_result = await self._session.compact_context(
-                            provider=self._provider,
+                        compaction_result = await self._compact_with_activity(
+                            "automatic", message_id=assistant_message.id, queue=queue,
                             visible_tools=visible_tools,
                             deferred_tool_groups=deferred_tool_groups,
                             cancellation_token=cancellation_token,
                             turn_id=turn_id,
+                            continued_on_failure=estimated_tokens <= budget.input_limit,
                         )
                     except SessionRepositoryError:
                         raise
@@ -680,14 +738,6 @@ class TurnRunner:
                         )
                         if estimated_tokens > budget.input_limit:
                             raise ContextCompactionError(f"自动压缩失败：{exc}") from exc
-                        await self._emit(
-                            queue,
-                            TurnEvent(
-                                kind="progress_updated",
-                                message=self._session.get_message(assistant_message.id),
-                                progress_message="自动压缩失败，本轮将继续处理",
-                            ),
-                        )
                     else:
                         context_state = self._session.context_state
                         context_state.automatic_failure_count = 0
@@ -697,18 +747,6 @@ class TurnRunner:
                             context_state.context_id,
                             compaction_result.before_tokens,
                             compaction_result.after_tokens,
-                        )
-                        await self._emit(
-                            queue,
-                            TurnEvent(
-                                kind="progress_updated",
-                                message=self._session.get_message(assistant_message.id),
-                                progress_message=(
-                                    "已自动压缩上下文，"
-                                    f"token 从 {compaction_result.before_tokens} "
-                                    f"降至 {compaction_result.after_tokens}"
-                                ),
-                            ),
                         )
                         request = self._session.build_request(
                             visible_tools,
@@ -751,18 +789,10 @@ class TurnRunner:
                         if emergency_attempted:
                             raise
                         emergency_attempted = True
-                        await self._emit(
-                            queue,
-                            TurnEvent(
-                                kind="progress_updated",
-                                message=self._session.get_message(assistant_message.id),
-                                progress_message="上下文撞墙，自动压缩中...",
-                            ),
-                        )
                         await self._session.offload_large_tool_results()
                         try:
-                            result = await self._session.compact_context(
-                                provider=self._provider,
+                            result = await self._compact_with_activity(
+                                "emergency", message_id=assistant_message.id, queue=queue,
                                 visible_tools=visible_tools,
                                 deferred_tool_groups=deferred_tool_groups,
                                 cancellation_token=cancellation_token,
@@ -778,17 +808,6 @@ class TurnRunner:
                             result.before_tokens,
                             result.after_tokens,
                             result.dropped_groups,
-                        )
-                        await self._emit(
-                            queue,
-                            TurnEvent(
-                                kind="progress_updated",
-                                message=self._session.get_message(assistant_message.id),
-                                progress_message=(
-                                    "紧急压缩完成，"
-                                    f"token 从 {result.before_tokens} 降至 {result.after_tokens}"
-                                ),
-                            ),
                         )
                         request = self._session.build_request(
                             visible_tools,

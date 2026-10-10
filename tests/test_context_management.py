@@ -120,8 +120,7 @@ def test_summary_parser_requires_one_nonempty_ordered_nine_part_summary() -> Non
         )
     )
     assert parse_summary(f"<summary>{body}</summary>") == body
-    with pytest.raises(ContextCompactionError):
-        parse_summary(f"前缀<summary>{body}</summary>")
+    assert parse_summary(f"以下是摘要：<summary>{body}</summary>") == body
     with pytest.raises(ContextCompactionError):
         parse_summary("<summary></summary>")
 

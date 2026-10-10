@@ -387,6 +387,12 @@ def timeline_blocks(message: SessionMessage) -> list[TimelineBlock]:
                 blocks.append(group)
             group.entries.append(entry)
             legacy_group = None
+        elif entry.kind == "compaction":
+            # 更新活动状态只改变同一记录，不重新挂载或丢掉展开选择。
+            activity_id = entry.metadata.get("activity_id")
+            key = f"compaction-{activity_id}" if isinstance(activity_id, str) and activity_id else f"entry-{index}"
+            blocks.append(TimelineBlock(key, "compaction", [entry]))
+            legacy_group = None
         else:
             blocks.append(TimelineBlock(f"entry-{index}", entry.kind, [entry]))
             legacy_group = None

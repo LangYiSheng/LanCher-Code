@@ -23,6 +23,7 @@
 | `context_estimate(...)` | 返回估算数字、校准来源和内容分类，不代表实际消耗 |
 | `usage_summary(message_id=None)` / `total_usage()` | 从持久化请求账本汇总单条消息或整段会话的已上报用量 |
 | `offload_large_tool_results()` / `compact_context()` | 工具结果卸载与上下文压缩 |
+| `begin_compaction()` / `finish_compaction()` | 维护压缩活动身份、状态和聊天位置；保存供恢复使用的指标快照 |
 | `list_sessions()` | 只读列出项目会话，返回 `SessionInfo` |
 | `new_session()` | 刷新旧会话并重置草稿；有后台资源时保留原Runtime及写入者 |
 | `resume_session(session_id, resolved_model=...)` | 恢复指定 UUID，返回恢复的会话权限条数 |
@@ -51,6 +52,8 @@ Checkpoint 仍保存完整账本，恢复时读取快照并重放尾部；缺少
 ## 模型上下文与恢复
 
 界面消息和模型 transcript 分开维护。失败、取消与中断可显示在界面，恢复时缺少工具结果的调用会补齐未知结果，工具不会自动重放。待处理输入恢复为暂停。上下文压缩记录新的上下文投影，同时保留原始事件历史。
+
+压缩活动保存在 `SessionState.compaction_activities`，并记录发生位置。手动活动位于当时最后一条消息之后，自动与紧急活动通过 assistant trace 中的活动 ID 定位；恢复时可重建相同顺序。活动只用于界面，模型 transcript 继续保存真正的对话与摘要。成功活动和新的上下文投影关联保存；恢复时遇到尚未结束的活动，会标为“压缩已中断”，并保留已经写入的上下文事实。详见 [聊天中的压缩记录](../workflows/context-compaction.md)。
 
 动态提醒在请求组装时使用当前阶段、权限、计划和 Session 工作目录，避免恢复后的旧提醒继续生效。计划确认绑定当前 Session ID 和计划摘要；恢复对话不会回滚源码文件。
 

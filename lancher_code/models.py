@@ -57,9 +57,13 @@ TurnEventKind = Literal[
     "steering_applied",
     "permission_request_closed",
     "turn_completed",
+    "compaction_updated",
 ]
 ContentBlockKind = Literal["text", "tool_use", "tool_result"]
-TraceEntryKind = Literal["thinking", "tool_call", "tool_result", "text", "notice"]
+TraceEntryKind = Literal["thinking", "tool_call", "tool_result", "text", "notice", "compaction"]
+CompactionTrigger = Literal["manual", "automatic", "emergency"]
+CompactionStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"]
+TokenEstimateSource = Literal["estimated", "usage_calibrated"]
 ToolCategory = Literal["read", "write", "command"]
 ToolSource = Literal["builtin", "external"]
 
@@ -350,6 +354,29 @@ class ContextCompactionResult:
     before_tokens: int
     after_tokens: int
     dropped_groups: int = 0
+    before_source: TokenEstimateSource = "estimated"
+    after_source: TokenEstimateSource = "estimated"
+
+
+@dataclass(slots=True)
+class CompactionActivity:
+    """一次完整压缩操作的展示事实，不进入模型上下文。"""
+
+    id: str
+    trigger: CompactionTrigger
+    status: CompactionStatus
+    started_at: datetime
+    finished_at: datetime | None = None
+    message_id: str | None = None
+    after_message_id: str | None = None
+    turn_id: str | None = None
+    before_tokens: int | None = None
+    after_tokens: int | None = None
+    before_source: TokenEstimateSource | None = None
+    after_source: TokenEstimateSource | None = None
+    dropped_groups: int = 0
+    error_text: str | None = None
+    continued: bool = False
 
 
 @dataclass(slots=True, init=False)
@@ -666,6 +693,7 @@ class SessionState:
     context_management: ContextManagementState = field(default_factory=ContextManagementState)
     # 用量属于实际请求尝试，不能从压缩后的对话内容反推。
     request_usage: dict[str, dict[str, object]] = field(default_factory=dict)
+    compaction_activities: dict[str, CompactionActivity] = field(default_factory=dict)
     execution: dict[str, object] = field(default_factory=lambda: {
         "processes": {}, "invocations": {}, "inbox": [],
     })
@@ -757,3 +785,4 @@ class TurnEvent:
     permission_policy: PermissionPolicy | None = None
     task_id: str | None = None
     pending_input_id: str | None = None
+    compaction: CompactionActivity | None = None

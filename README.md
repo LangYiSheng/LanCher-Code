@@ -157,7 +157,7 @@ rules:
 - 会话工作目录：`./.lancher/sessions/<UUID>/workspace/`（含 `plan.md`、`tmp/`、`artifacts/`）
 - 进程记录与输出：`./.lancher/sessions/<UUID>/processes/<进程UUID>/`（应用管理区）
 
-Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入完整 ID；命令不解析短 ID。新事件格式版本为 `1`，不兼容旧命名会话 v1–v4；旧 `.lancher/session/` 原样保留，不读取、不迁移。启动和查询列表不会创建会话，模型调用失败的对话也会保留。详见 [Session 生命周期](docs/workflows/session-lifecycle.md)。
+Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入完整 ID；命令不解析短 ID。事件格式版本为 `1`，不兼容旧命名会话 v1–v4；旧 `.lancher/session/` 原样保留，不读取、不迁移。启动和查询列表不会创建会话，模型调用失败的对话也会保留。压缩活动在聊天中可展开查看前后估算和压缩率，恢复会话后保留结果，未结束活动显示为已中断。详见 [Session 生命周期](docs/workflows/session-lifecycle.md) 与 [上下文压缩活动](docs/workflows/context-compaction.md)。
 
 后台进程可跨轮次和对话切换，应用退出时统一清理；重启恢复记录与日志，不自动重跑旧命令。未知命令只在本次启动调用期间保守独占项目，返回后台任务后可继续请求服务器或修改文件；这不表示后台命令没有真实文件副作用。`execution.limits` 配置额度，`execution.command_profiles` 为已知命令明确声明持续资源与本机 TCP 就绪检查；资源默认保留到进程退出，也可明确设为仅调用期间。界面区分待批准与等待资源，说明实际阻塞任务。完整设计、取消竞态、Windows Job Object、ConPTY、中文输出分页与存储失败处理的解释见 [工具执行](docs/workflows/tool-execution.md)。
 

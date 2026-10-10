@@ -13,6 +13,9 @@ from time import monotonic
 
 from lancher_code.models import (
     ChatRequest,
+    CompactionActivity,
+    CompactionStatus,
+    CompactionTrigger,
     ContentBlock,
     ContextCompactionResult,
     ContextManagementState,
@@ -668,8 +671,38 @@ class SessionController:
         persist: bool = False,
         cancellation_token: "CancellationToken | None" = None,
         turn_id: str | None = None,
+        activity_id: str | None = None,
+    ) -> ContextCompactionResult:
+        # Runner 负责已有活动的事件发布；直接调用 Controller 的入口也
+        # 必须完整收尾，不能在摘要报错或取消后遗留永久 running。
+        created_activity = activity_id is None
+        if activity_id is None:
+            activity_id = self.begin_compaction('manual', turn_id=turn_id).id
+        try:
+            return await self._compact_context_candidate(
+                provider=provider, visible_tools=visible_tools,
+                deferred_tool_groups=deferred_tool_groups, persist=persist,
+                cancellation_token=cancellation_token, turn_id=turn_id, activity_id=activity_id,
+            )
+        except asyncio.CancelledError:
+            if created_activity:
+                self.finish_compaction(activity_id, status='cancelled')
+            raise
+        except Exception as exc:
+            if created_activity:
+                self.finish_compaction(activity_id, status='failed', error_text=str(exc))
+            raise
+
+    async def _compact_context_candidate(
+        self, *, provider: ChatProvider, visible_tools: list[ToolDefinition],
+        deferred_tool_groups: list[DeferredToolGroup] | None,
+        persist: bool, cancellation_token: "CancellationToken | None", turn_id: str | None,
+        activity_id: str,
     ) -> ContextCompactionResult:
         async with self._context_lock:
+            activity = self._state.compaction_activities[activity_id]
+            if activity.status != 'running':
+                raise ValueError('该压缩活动已经结束，不能重新执行。')
             previous_transcript = copy.deepcopy(self._transcript)
             previous_context = copy.deepcopy(self.context_state)
             previous_dirty = self._dirty
@@ -678,7 +711,12 @@ class SessionController:
                 allow_tool_calls=True,
                 deferred_tool_groups=deferred_tool_groups,
             )
-            before_tokens = self.context_estimate(before_request).tokens
+            before_estimate = self.context_estimate(before_request)
+            before_tokens = before_estimate.tokens
+            activity.before_tokens = before_tokens
+            activity.before_source = before_estimate.source
+            self._mark_dirty()
+            self.flush()
             controller = self
 
             class SummaryProvider:
@@ -717,23 +755,125 @@ class SessionController:
                     allow_tool_calls=True,
                     deferred_tool_groups=deferred_tool_groups,
                 )
-                after_tokens = self.estimate_request_tokens(after_request)
+                after_estimate = self.context_estimate(after_request)
+                after_tokens = after_estimate.tokens
                 budget = context_budget(self.context_window, after_request.max_output_tokens)
                 if after_tokens >= before_tokens or after_tokens > budget.input_limit:
                     from lancher_code.errors import ContextCompactionError
                     raise ContextCompactionError("摘要没有缩小完整请求或仍超出输入预算，已保留原上下文。")
+                result = ContextCompactionResult(
+                    before_tokens=before_tokens,
+                    after_tokens=after_tokens,
+                    dropped_groups=compacted.dropped_groups,
+                    before_source=before_estimate.source,
+                    after_source=after_estimate.source,
+                )
+                previous_activity = copy.deepcopy(activity)
+                self._apply_compaction_result(activity, result)
+                activity.status = 'completed'
+                activity.finished_at = self._now()
                 self._mark_dirty()
-                self.flush(context_event='context.compacted')
+                self.flush(context_event='context.compacted', context_activity_id=activity_id)
             except Exception:
+                saved = self._sessions._saved
+                durable = (saved is not None and saved['state'].get('compaction_activities', {})
+                           .get(activity_id, {}).get('status') == 'completed')
+                if durable:
+                    # 完成提交之后，显示/运行时挂接的错误不能把已持久化
+                    # 的上下文撤回；runner 再次终结时会拿到 completed。
+                    raise
                 self._transcript = previous_transcript
                 self._state.context_management = previous_context
+                if 'previous_activity' in locals():
+                    self._state.compaction_activities[activity_id] = previous_activity
                 self._dirty = previous_dirty
                 raise
-            return ContextCompactionResult(
-                before_tokens=before_tokens,
-                after_tokens=after_tokens,
-                dropped_groups=compacted.dropped_groups,
-            )
+            return result
+
+    def begin_compaction(
+        self, trigger: CompactionTrigger, *, message_id: str | None = None, turn_id: str | None = None,
+    ) -> CompactionActivity:
+        """创建一次操作活动，空对话只在内存保留，不提前创建 Session。"""
+        if trigger not in {'manual', 'automatic', 'emergency'}:
+            raise ValueError('压缩触发方式无效。')
+        if message_id is not None:
+            message = self.get_message(message_id)
+            if message.role != 'assistant':
+                raise ValueError('压缩活动只能关联助手消息。')
+        elif trigger != 'manual':
+            raise ValueError('自动压缩活动必须关联当前助手消息。')
+        activity = CompactionActivity(
+            id=uuid4().hex, trigger=trigger, status='running', started_at=self._now(),
+            message_id=message_id, turn_id=turn_id,
+            after_message_id=self._state.messages[-1].id if message_id is None and self._state.messages else None,
+        )
+        self._state.compaction_activities[activity.id] = activity
+        if message_id is not None:
+            message = self.get_message(message_id)
+            # 封口流式正文后插入活动，后续正文会形成新的输出段。
+            if message.trace.entries:
+                last = message.trace.entries[-1]
+                if last.kind in {'text', 'thinking'} and last.metadata.get('state') == 'streaming':
+                    last.metadata['state'] = 'complete'
+            self._expand_trace_on_first_entry(message)
+            message.trace.entries.append(TraceEntry(kind='compaction', metadata={'activity_id': activity.id}))
+        self._mark_dirty()
+        try:
+            self.flush()
+        except Exception as exc:
+            # 启动保存失败时，还没有 worker 能替它收尾。保留同一活动
+            # 的内存失败事实供界面显示，不在故障分支再次尝试写盘。
+            activity.status = 'failed'
+            activity.finished_at = self._now()
+            activity.error_text = str(exc)
+            self._mark_dirty()
+            raise
+        return copy.deepcopy(activity)
+
+    def get_compaction(self, activity_id: str) -> CompactionActivity:
+        """事件携带独立快照，已发出的 running 不能随共享引用变成完成。"""
+        return copy.deepcopy(self._state.compaction_activities[activity_id])
+
+    def finish_compaction(
+        self, activity_id: str, *, status: CompactionStatus,
+        result: ContextCompactionResult | None = None, error_text: str | None = None,
+        continued: bool | None = None,
+    ) -> CompactionActivity:
+        if status not in {'completed', 'failed', 'cancelled', 'interrupted'}:
+            raise ValueError('压缩活动必须以终态结束。')
+        activity = self._state.compaction_activities[activity_id]
+        if activity.status != 'running':
+            # 停止和成功提交可能先后抵达；第一次终态就是持久化事实。
+            if continued and activity.status == 'failed' and activity.trigger != 'manual' and not activity.continued:
+                activity.continued = True
+                self._mark_dirty()
+                self.flush()
+            return copy.deepcopy(activity)
+        if continued and (status != 'failed' or activity.trigger == 'manual'):
+            raise ValueError('只有自动压缩失败可以标记继续本轮。')
+        if status == 'completed':
+            if result is None:
+                raise ValueError('完成压缩必须提供前后估算。')
+            self._apply_compaction_result(activity, result)
+        activity.status = status
+        activity.finished_at = None if status == 'interrupted' else self._now()
+        activity.error_text = error_text
+        activity.continued = bool(continued)
+        self._mark_dirty()
+        self.flush()
+        return copy.deepcopy(activity)
+
+    @staticmethod
+    def _apply_compaction_result(activity: CompactionActivity, result: ContextCompactionResult) -> None:
+        for name in ('before_tokens', 'after_tokens', 'dropped_groups'):
+            value = getattr(result, name)
+            if type(value) is not int or value < 0:
+                raise ValueError('压缩结果必须包含非负整数计数。')
+        if any(getattr(result, name) not in {'estimated', 'usage_calibrated'}
+               for name in ('before_source', 'after_source')):
+            raise ValueError('压缩结果的估算来源无效。')
+        for name in ('before_tokens', 'after_tokens', 'before_source', 'after_source', 'dropped_groups'):
+            setattr(activity, name, getattr(result, name))
 
     def usage_summary(self, message_id: str | None = None):
         records = [RequestUsageRecord.from_dict(item) for item in self._state.request_usage.values()
@@ -748,13 +888,13 @@ class SessionController:
                                    self._permission_storage.rules_for_scope('session'),
                                    self._selected_model_ref)
 
-    def flush(self, *, force=True, context_event='context.replaced') -> None:
+    def flush(self, *, force=True, context_event='context.replaced', context_activity_id=None) -> None:
         if self._sessions.writer is None:
             return
         now = monotonic()
         if not force and now - self._last_flush < 0.25:
             return
-        self._sessions.persist(self._snapshot(), context_event=context_event)
+        self._sessions.persist(self._snapshot(), context_event=context_event, context_activity_id=context_activity_id)
         self._dirty = False
         self._last_flush = now
         self._register_execution_session()
@@ -928,6 +1068,18 @@ class SessionController:
         state: SessionState, transcript: list[ConversationMessage]
     ) -> list[ConversationMessage]:
         """恢复自动保存的活动任务；补齐未知结果，绝不重放工具操作。"""
+        for activity in state.compaction_activities.values():
+            if activity.status == 'running':
+                activity.status = 'interrupted'
+                # 恢复时刻不是实际结束时刻，不能用它虚构压缩耗时。
+                activity.finished_at = None
+                activity.error_text = '上次压缩未完整收尾，请以恢复后的实际上下文为准。'
+            if activity.message_id is not None:
+                message = next(item for item in state.messages if item.id == activity.message_id)
+                if not any(entry.kind == 'compaction' and entry.metadata.get('activity_id') == activity.id
+                           for entry in message.trace.entries):
+                    # 活动事件先于消息轨迹落盘时，中断恢复补上展示位置。
+                    message.trace.entries.append(TraceEntry(kind='compaction', metadata={'activity_id': activity.id}))
         for record in state.request_usage.values():
             if record['status'] == 'running':
                 record['status'] = 'incomplete'

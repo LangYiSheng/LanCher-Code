@@ -8,7 +8,7 @@ from lancher_code.models import (
     SessionState, SessionMessage, ConversationMessage, ContentBlock, MessageUsage,
     ThinkingTrace, TraceEntry, PlanSnapshot, PendingInput, PermissionRule,
     ContextManagementState, ContextUsageAnchor, ContextFileSnapshot,
-    ToolResultReplacement, resolve_runtime_axes,
+    ToolResultReplacement, CompactionActivity, resolve_runtime_axes,
 )
 from lancher_code.sessions.repository import SessionRepositoryError
 from lancher_code.run_usage import RequestUsageRecord
@@ -30,6 +30,8 @@ class SessionCodec:
             'context_management': cls._encode_context_management(state.context_management),
             'execution': copy.deepcopy(state.execution),
             'request_usage': copy.deepcopy(state.request_usage),
+            'compaction_activities': {key: cls._encode_compaction(item)
+                                      for key, item in state.compaction_activities.items()},
         }
         messages = []
         for message in state.messages:
@@ -66,9 +68,24 @@ class SessionCodec:
                 context_management=cls._decode_context_management(raw['context_management']),
                 execution=cls._decode_execution(raw.get('execution', {'processes': {}, 'invocations': {}, 'inbox': []})),
                 request_usage=cls._decode_request_usage(raw['request_usage'], session_id),
+                compaction_activities=cls._decode_compactions(raw.get('compaction_activities', {})),
             )
             if len({item.id for item in state.messages}) != len(state.messages):
                 raise ValueError("消息 id 重复。")
+            known_messages = {item.id: item for item in state.messages}
+            for activity in state.compaction_activities.values():
+                if activity.message_id is not None:
+                    owner = known_messages.get(activity.message_id)
+                    if owner is None or owner.role != 'assistant':
+                        raise ValueError('压缩活动关联的助手消息无效。')
+                if activity.after_message_id is not None and activity.after_message_id not in known_messages:
+                    raise ValueError('压缩活动的对话位置无效。')
+            for message in state.messages:
+                for entry in message.trace.entries:
+                    if entry.kind == 'compaction':
+                        activity = state.compaction_activities.get(entry.metadata.get('activity_id'))
+                        if activity is None or activity.message_id != message.id:
+                            raise ValueError('压缩活动轨迹关联无效。')
             transcript = [cls._decode_transcript(item) for item in data['transcript']]
             rules = cls._decode_permission_rules({'rules': data['rules']})
             model_ref = data['model_ref']
@@ -112,13 +129,21 @@ class SessionCodec:
                 result['transcript'][data['index']] = copy.deepcopy(data['message'])
             elif kind in {'context.compacted', 'context.replaced'}:
                 result['transcript'] = copy.deepcopy(data['messages'])
+                if kind == 'context.compacted' and ('activity_id' in data or 'compaction' in data):
+                    activity = SessionCodec._decode_compaction(data['compaction'])
+                    if activity.id != data['activity_id'] or activity.status != 'completed':
+                        raise ValueError('上下文压缩提交必须关联同一活动的完成快照。')
+                    result['state'].setdefault('compaction_activities', {})[activity.id] = copy.deepcopy(data['compaction'])
+                    result['state']['context_management'] = copy.deepcopy(data['context_management'])
             elif kind == 'state.changed':
                 # 其它状态变更不会携带累计账本，账本仅由请求增量事件更新。
                 if 'request_usage' not in result['state']:
                     raise SessionRepositoryError('会话缺少请求用量账本，不能恢复未知的历史消耗。')
                 request_usage = result['state']['request_usage']
+                activities = result['state'].get('compaction_activities', {})
                 result['state'] = copy.deepcopy(data)
                 result['state']['request_usage'] = request_usage
+                result['state']['compaction_activities'] = activities
             elif kind == 'permissions.changed':
                 result['rules'] = copy.deepcopy(data['rules'])
             elif kind == 'model.changed':
@@ -130,11 +155,95 @@ class SessionCodec:
                 if 'request_usage' not in result['state']:
                     raise SessionRepositoryError('会话缺少请求用量账本，不能恢复未知的历史消耗。')
                 result['state']['request_usage'][data['request_id']] = copy.deepcopy(data)
+            elif kind == 'compaction.updated':
+                activity = SessionCodec._decode_compaction(data)
+                result['state'].setdefault('compaction_activities', {})[activity.id] = copy.deepcopy(data)
+                if activity.message_id is not None:
+                    owner = messages.get(activity.message_id)
+                    if owner is None or owner['role'] != 'assistant':
+                        raise ValueError('压缩活动关联的助手消息无效。')
+                    entries = owner['trace']['entries']
+                    if not any(entry['kind'] == 'compaction' and entry['metadata'].get('activity_id') == activity.id
+                               for entry in entries):
+                        # 开始事件本身就固定活动位置；随后 message.updated
+                        # 尚未落盘也能恢复卡片，终态事件则不会重复追加。
+                        if entries:
+                            last = entries[-1]
+                            if last['kind'] in {'text', 'thinking'} and last['metadata'].get('state') == 'streaming':
+                                last['metadata']['state'] = 'complete'
+                        elif owner['status'] == 'streaming':
+                            owner['trace']['collapsed'] = False
+                        entries.append(asdict(TraceEntry(kind='compaction', metadata={'activity_id': activity.id})))
             elif kind in {'session.renamed', 'session.archived', 'turn.started', 'turn.completed', 'turn.failed', 'turn.interrupted', 'tool.started', 'tool.finished'}:
                 pass
             else:
                 raise SessionRepositoryError(f'未知的会话事件：{kind}')
         return result
+
+    @staticmethod
+    def _encode_compaction(activity):
+        data = asdict(activity)
+        data['started_at'] = activity.started_at.isoformat()
+        data['finished_at'] = activity.finished_at.isoformat() if activity.finished_at else None
+        return data
+
+    @classmethod
+    def _decode_compactions(cls, raw):
+        if not isinstance(raw, dict):
+            raise ValueError('压缩活动必须为对象。')
+        result = {}
+        for activity_id, data in raw.items():
+            activity = cls._decode_compaction(data)
+            if activity_id != activity.id:
+                raise ValueError('压缩活动 ID 与存储键不一致。')
+            result[activity_id] = activity
+        return result
+
+    @staticmethod
+    def _decode_compaction(raw):
+        if not isinstance(raw, dict):
+            raise ValueError('压缩活动必须为对象。')
+        data = copy.deepcopy(raw)
+        for name in ('id', 'message_id', 'after_message_id', 'turn_id'):
+            value = data.get(name)
+            if (name == 'id' or value is not None) and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f'压缩活动 {name} 无效。')
+        if data.get('trigger') not in {'manual', 'automatic', 'emergency'}:
+            raise ValueError('压缩触发方式无效。')
+        if data.get('status') not in {'running', 'completed', 'failed', 'cancelled', 'interrupted'}:
+            raise ValueError('压缩活动状态无效。')
+        for name in ('started_at', 'finished_at'):
+            value = data.get(name)
+            if name == 'finished_at' and value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError('压缩活动时间必须为字符串。')
+            data[name] = datetime.fromisoformat(value)
+            if data[name].tzinfo is None:
+                raise ValueError('压缩活动时间必须包含时区。')
+        if ((data['status'] == 'running' and data.get('finished_at') is not None)
+                or (data['status'] not in {'running', 'interrupted'} and data.get('finished_at') is None)
+                or (data.get('finished_at') is not None and data['finished_at'] < data['started_at'])):
+            raise ValueError('压缩活动开始与结束状态不一致。')
+        for prefix in ('before', 'after'):
+            tokens, source = data.get(f'{prefix}_tokens'), data.get(f'{prefix}_source')
+            if tokens is not None and (type(tokens) is not int or tokens < 0):
+                raise ValueError('压缩活动估算必须为非负整数。')
+            if source not in {None, 'estimated', 'usage_calibrated'} or (tokens is None) != (source is None):
+                raise ValueError('压缩活动计数与估算来源不一致。')
+        if data['status'] == 'completed' and (data.get('before_tokens') is None or data.get('after_tokens') is None):
+            raise ValueError('完成的压缩活动缺少前后估算。')
+        if data['status'] != 'completed' and data.get('after_tokens') is not None:
+            raise ValueError('未完成的压缩活动不能记录成功后的估算。')
+        if type(data.get('dropped_groups')) is not int or data['dropped_groups'] < 0:
+            raise ValueError('压缩活动省略组数无效。')
+        if type(data.get('continued')) is not bool:
+            raise ValueError('压缩活动继续标记无效。')
+        if data['continued'] and (data['status'] != 'failed' or data['trigger'] == 'manual'):
+            raise ValueError('仅自动压缩失败可以继续本轮。')
+        if data.get('error_text') is not None and not isinstance(data['error_text'], str):
+            raise ValueError('压缩活动失败说明必须为字符串。')
+        return CompactionActivity(**data)
 
     @staticmethod
     def _decode_request_usage(raw, session_id):
@@ -330,7 +439,7 @@ class SessionCodec:
             raise ValueError('消息轨迹状态无效。')
         entries = []
         for entry in trace['entries']:
-            if not isinstance(entry, dict) or entry.get('kind') not in {'thinking', 'text', 'notice', 'tool_call', 'tool_result'}:
+            if not isinstance(entry, dict) or entry.get('kind') not in {'thinking', 'text', 'notice', 'tool_call', 'tool_result', 'compaction'}:
                 raise ValueError('消息轨迹条目无效。')
             if not isinstance(entry.get('metadata'), dict) or not isinstance(entry.get('arguments'), dict):
                 raise ValueError('消息轨迹 metadata 和 arguments 必须是对象。')

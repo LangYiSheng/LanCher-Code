@@ -162,6 +162,12 @@ async def test_turn_runner_emergency_compacts_and_retries_once(openai_provider_c
     assert provider.requests[1].tools == []
     assert provider.requests[2].allow_tool_calls is True
     assert session.context_state.usage_anchor is not None
+    compactions = [event.compaction for event in events if event.kind == "compaction_updated"]
+    assert [activity.status for activity in compactions] == ["running", "completed"]
+    assert compactions[0].id == compactions[1].id
+    assert compactions[0].trigger == "emergency"
+    assert compactions[1].message_id == events[-1].message.id
+    assert compactions[1].after_tokens < compactions[1].before_tokens
 
 
 @pytest.mark.asyncio
@@ -180,15 +186,25 @@ async def test_manual_compact_does_not_create_display_message(openai_provider_co
     saved_id = session.session_id
     message_count = len(session.state.messages)
 
-    result = await runner.compact_context()
+    activity_events = []
+
+    async def observe(event):
+        activity_events.append(event)
+
+    result = await runner.compact_context(on_activity=observe)
 
     assert result.before_tokens > 0
     assert len(session.state.messages) == message_count
     assert provider.requests[0].allow_tool_calls is False
+    assert [event.compaction.status for event in activity_events] == ["running", "completed"]
+    assert all(event.kind == "compaction_updated" and event.message is None for event in activity_events)
+    activity_id = activity_events[0].compaction.id
+    assert activity_events[1].compaction.id == activity_id
     session.close()
     restored = SessionController(openai_provider_config, cwd=tmp_path)
     restored.resume_session(saved_id)
     assert restored.transcript[0].blocks[0].text == "以下内容是较早会话的压缩历史。"
+    assert restored.get_compaction(activity_id).status == "completed"
 
 
 @pytest.mark.asyncio
@@ -215,6 +231,11 @@ async def test_automatic_compaction_triggers_before_normal_request(openai_provid
     assert provider.requests[0].allow_tool_calls is False
     assert provider.requests[1].allow_tool_calls is True
     assert session.context_state.automatic_failure_count == 0
+    activity_events = [event for event in events if event.kind == "compaction_updated"]
+    assert [event.compaction.status for event in activity_events] == ["running", "completed"]
+    assert activity_events[0].compaction.id == activity_events[1].compaction.id
+    assert activity_events[0].compaction.trigger == "automatic"
+    assert all(event.message.id == events[-1].message.id for event in activity_events)
 
 
 @pytest.mark.asyncio
@@ -239,12 +260,18 @@ async def test_automatic_compaction_circuit_breaker_persists_after_three_failure
     previous = session.create_assistant_message()
     session.append_message_content(previous.id, "旧材料已读")
     session.complete_message(previous.id)
+    compactions = []
     for index in range(4):
-        _ = [event async for event in runner.run_user_turn(f"{index}" + "x" * 1_000)]
+        events = [event async for event in runner.run_user_turn(f"{index}" + "x" * 1_000)]
+        assert events[-1].kind == "turn_completed"
+        compactions.extend(event.compaction for event in events if event.kind == "compaction_updated")
 
     assert session.context_state.automatic_failure_count == 3
     assert session.context_state.automatic_compaction_disabled is True
     assert len([request for request in provider.requests if not request.allow_tool_calls]) == 3
+    assert [activity.status for activity in compactions] == ["running", "failed"] * 3
+    assert len({activity.id for activity in compactions}) == 3
+    assert all(activity.continued for activity in compactions if activity.status == "failed")
 
 
 @pytest.mark.asyncio

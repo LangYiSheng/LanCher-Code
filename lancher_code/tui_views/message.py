@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 from rich.console import Group, RenderableType
@@ -10,8 +11,9 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
-from lancher_code.models import SessionMessage, TraceEntry
+from lancher_code.models import CompactionActivity, SessionMessage, TraceEntry
 from lancher_code.mcp.manager import MCPInitializationProgress, MCPServerInitialization
+from lancher_code.tui_views.compaction import CompactionActivityWidget
 from lancher_code.tui_views.theme import TerminalMarkdown, theme_palette
 from lancher_code.tui_views.timeline import (
     ThinkingTraceWidget, ToolActivityWidget, ToolCallWidget, timeline_blocks,
@@ -220,7 +222,8 @@ class MessageWidget(Vertical):
         "cancelled": "已停止",
     }
 
-    def __init__(self, message: SessionMessage, *, show_thinking: bool) -> None:
+    def __init__(self, message: SessionMessage, *, show_thinking: bool,
+                 compaction_activities: Mapping[str, CompactionActivity] | None = None) -> None:
         super().__init__(classes=f"message message--{message.role}")
         self.message_id = message.id
         self._show_thinking = show_thinking
@@ -230,8 +233,9 @@ class MessageWidget(Vertical):
         self.trace_entries = list(message.trace.entries)
         self.trace_collapsed = message.trace.collapsed
         self._message = message
+        self._compaction_activities = compaction_activities if compaction_activities is not None else {}
         self._sync_lock = asyncio.Lock()
-        self._blocks: dict[str, Static | ThinkingTraceWidget | ToolActivityWidget] = {}
+        self._blocks: dict[str, Static | ThinkingTraceWidget | ToolActivityWidget | CompactionActivityWidget] = {}
         self._completion_collapsed = False
         self._restored_complete = message.role == "assistant" and message.status == "complete"
 
@@ -245,12 +249,15 @@ class MessageWidget(Vertical):
         if self._restored_complete:
             self.collapse_for_completion()
 
-    async def update_from_message(self, message: SessionMessage) -> None:
+    async def update_from_message(self, message: SessionMessage, *,
+                                  compaction_activities: Mapping[str, CompactionActivity] | None = None) -> None:
         self.role = message.role
         self.content = message.content
         self.status = message.status
         self.trace_entries = list(message.trace.entries)
         self._message = message
+        if compaction_activities is not None:
+            self._compaction_activities = compaction_activities
         await self._sync_view()
 
     async def _sync_view(self) -> None:
@@ -274,12 +281,22 @@ class MessageWidget(Vertical):
         # 增量更新原有控件；不要在每个 delta 重建并丢掉焦点和展开选择。
         previous_kind: str | None = None
         for block in blocks:
+            activity = self._compaction_activities.get(block.entries[0].metadata.get("activity_id", "")) if block.kind == "compaction" else None
             widget = self._blocks.get(block.key)
+            if activity is not None and widget is not None and not isinstance(widget, CompactionActivityWidget):
+                # 不完整投影可能先显示占位；真实记录到达后在原位置替换。
+                old_widget = widget
+                widget = CompactionActivityWidget(activity)
+                await timeline.mount(widget, before=old_widget)
+                await old_widget.remove()
+                self._blocks[block.key] = widget
             if widget is None:
                 if block.kind == "thinking":
                     widget = ThinkingTraceWidget(block.entries, collapsed=block.entries[0].metadata.get("state") != "streaming")
                 elif block.kind == "tool":
                     widget = ToolActivityWidget(block.entries, status=self.status)
+                elif activity is not None:
+                    widget = CompactionActivityWidget(activity)
                 else:
                     widget = Static(classes=f"timeline-text timeline-{block.kind}")
                 self._blocks[block.key] = widget
@@ -289,9 +306,14 @@ class MessageWidget(Vertical):
                 widget.update_entries(block.entries)
             elif isinstance(widget, ToolActivityWidget):
                 await widget.update_entries(block.entries, status=self.status)
+            elif isinstance(widget, CompactionActivityWidget):
+                if activity is not None:
+                    widget.update_activity(activity)
             else:
                 text = block.entries[0].text
-                if block.kind == "text":
+                if block.kind == "compaction":
+                    widget.update(Text("压缩记录不可用", style=theme_palette(self.app.theme)["muted"]))
+                elif block.kind == "text":
                     widget.update(TerminalMarkdown(text, self.app.theme))
                 else:
                     colors = theme_palette(self.app.theme)

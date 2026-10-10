@@ -128,5 +128,6 @@ run_user_turn(text)
 ## 注意事项
 
 - `run_user_turn()` 每次调用创建一个新的后台任务，事件流结束后任务被 `gather` 回收。
-- 手动 `/compact` 与自动压缩复用 `SessionController.compact_context()`，但手动压缩 `persist=True` 会写会话文件。
+- 手动、自动与紧急压缩通过统一活动包装调用 `SessionController.compact_context()`。每次操作使用稳定活动 ID，内部摘要重试更新同一条记录；结构化 `compaction_updated` 事件携带状态快照，聊天界面据此更新原控件。
+- 手动调用可传入预先创建的 `activity_id` 和 `on_activity` 回调，让 worker 排入时就有可见记录。取消、失败和成功均终结该活动；自动失败后继续本轮会记录 `continued`，原有硬预算和重试边界仍生效。详见 [聊天中的压缩记录](../workflows/context-compaction.md)。
 - 不要直接调用 `_run_turn` 内部方法；外部只使用公开 API。

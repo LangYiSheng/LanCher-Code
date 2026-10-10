@@ -28,7 +28,7 @@
 | `/session <new\|list\|resume\|rename\|archive\|remove> [UUID] [标题]` | 新建、列出、恢复、改标题、归档或删除项目会话 |
 | `/session stop` | 停止本轮及当前 Session 全部托管进程，记录、草稿和队列保留 |
 | `/tasks [list\|show\|read\|stop\|background] [进程UUID]` | 查看当前会话的进程列表与详情、输出、输入，或停止与转后台 |
-| `/compact` | 压缩当前上下文 |
+| `/compact` | 压缩当前上下文；进度与结果显示为聊天中的折叠活动行 |
 | `/settings theme <dark\|light>` | 保存并立即切换主题 |
 | `/settings thinking <on\|off>` | 显示或隐藏思考，不影响工具记录 |
 | `/settings busy-enter <follow_up\|steer\|draft>` | 设置忙时 Enter 为排队、补充或保留草稿 |
@@ -48,6 +48,8 @@
 ## 安静对话与 HUD
 
 正文连续显示，工具活动默认折叠；失败与等待批准保持可见。工具记录不受思考显示开关影响。上滚阅读时，新消息不会强制拉到底部。
+
+上下文压缩也显示为聊天中的活动行：运行时图标转动，结束后原地显示成功、失败或已停止。点击标题，或聚焦后按 Enter / Space，可查看前后 token 估算、上下文减少比例、耗时及原因。手动、自动、超限后压缩共用此交互，记录随 `/session resume` 恢复；上次未完整结束的活动显示已中断。详见 [聊天中的压缩记录](workflows/context-compaction.md)。
 
 HUD 分别显示本次模型、阶段、权限、预计上下文和任务状态。预计上下文是下一次请求的估算占比；累计输入、缓存输入、输出及 MCP 服务器状态位于详情，不能把累计用量当作上下文占用。
 
