@@ -11,6 +11,9 @@ from lancher_code.permissions.rules import MatchTarget
 
 def _request_file_paths(tool_name: str, arguments: dict[str, object], context: ToolContext) -> list[str]:
     project_root = context.project_root or context.cwd
+    if tool_name == "delete_file":
+        from lancher_code.filesystem.deletion import plan_delete
+        return [str(entry.path.relative_to(project_root.resolve())) for entry in plan_delete(arguments, context).entries]
     if tool_name == "write_plan_file":
         if context.plan_file_path is None:
             return []
@@ -63,7 +66,7 @@ def build_denied_metadata(
     if tool.name == "run_command":
         metadata["command"] = str(call.arguments.get("command", "")).strip()
         metadata["description"] = str(call.arguments.get("description", "")).strip()
-    elif tool.name in {"read_file", "write_file", "edit_file", "write_plan_file"}:
+    elif tool.name in {"read_file", "write_file", "edit_file", "delete_file", "write_plan_file"}:
         try:
             metadata["paths"] = _request_file_paths(tool.name, call.arguments, context)
         except ValueError:
@@ -141,7 +144,8 @@ def build_permission_request(
             description=description,
             session_rule=exact_rule,
             project_rule=exact_rule,
-            metadata={**metadata, "command_cwd": str(command_cwd), "lifetime": lifetime,
+            metadata={**metadata, "cwd": target.command_cwd or str(command_cwd), "command_cwd": target.command_cwd or str(command_cwd),
+                      "command_shell": target.command_shell, "lifetime": lifetime,
                       "transport": transport, "yield_ms": yield_ms, "max_runtime_ms": maximum},
         )
 
@@ -162,6 +166,20 @@ def build_permission_request(
 
     file_paths = _request_file_paths(tool.name, call.arguments, context)
     preview_lines = _build_preview_lines(tool.name, call.arguments, context)
+    if tool.name == "delete_file":
+        from lancher_code.filesystem.deletion import plan_delete
+        plan = plan_delete(call.arguments, context)
+        once_only = plan.is_directory or plan.recursive
+        return PermissionRequest(
+            request_id=request_id, call_id=call.call_id, tool_name=tool.name, tool_label=target.tool_label,
+            kind="file_edit", work_phase=context.work_phase, permission_policy=context.permission_policy,
+            title="是否允许删除这些目标", prompt="删除会移除目标；请核对完整清单。",
+            details=f"删除项数：{len(plan.entries)}\n普通文件字节数：{plan.total_bytes}\n" + "\n".join(file_paths),
+            file_paths=file_paths, session_rule=None if once_only else f"DeleteFile({target.value})",
+            project_rule=None if once_only else f"DeleteFile({target.value})",
+            metadata={**metadata, "delete_signature": plan.signature, "allow_once_only": once_only,
+                      "delete_count": len(plan.entries), "delete_bytes": plan.total_bytes},
+        )
     return PermissionRequest(
         request_id=request_id,
         call_id=call.call_id,

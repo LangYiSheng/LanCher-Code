@@ -44,7 +44,7 @@ flowchart TD
     N -->|任务补充撤销审批| P[跳过 steering_superseded]
     N -->|用户允许| Q{执行前仍有效?}
     Q -->|否| P
-    Q -->|是| R[按选择保存精确规则并执行]
+    Q -->|是| R[重检目标并执行，成功后保存精确规则]
 ```
 
 工具搜索、执行器和权限引擎共享阶段边界。请求可以保留已发布的工具定义，模型请求当前阶段不可用的工具仍会被执行器拒绝。执行器在每组工具开始前及审批返回后检查取消或补充消息；已经启动的并行组收齐结果，尚未启动的后续组返回 `steering_superseded`。
@@ -53,7 +53,8 @@ flowchart TD
 
 | 工具 | 新确认产生的精确规则 |
 |---|---|
-| `run_command` | 完整命令，例如 `RunCommand(git status --short)`；保留大小写及命令内部空白 |
+| `run_command` | 完整命令，例如 `RunCommand(git status --short)`；保留大小写及命令内部空白，绑定 command_cwd / command_shell |
+| `delete_file` | 精确项目相对路径；目录须 recursive=true，清单与版本绑定本次批准 |
 | `read_file` / `write_file` / `edit_file` | 解析符号链接后的项目相对路径，按现有路径规范化规则比较 |
 | `write_plan_file` | 专用计划文件的项目相对路径 |
 | `glob` / `grep` | 分别为搜索模式、搜索范围 |
@@ -70,20 +71,22 @@ ToolExecutor → PermissionEngine.evaluate → ask
 → TurnRunner._request_permission 创建 Future
 → permission_request_created → 聊天内联权限面板
 → 用户选择 → resolve_permission_request 唤醒 Future
-→ 执行器重新检查取消与补充 → apply_resolution → 执行工具
+→ 执行器重新检查取消、补充、资源、目标版本 → 执行工具成功 → apply_resolution
 ```
 
 | 决议 | 本次调用 | 后续影响 |
 |---|---|---|
 | `allow_once` | 放行 | 不保存规则 |
-| `allow_session` | 放行 | 保存会话精确规则，随 UUID Session 自动持久化 |
-| `allow_project` | 放行 | 精确规则写入 `./.lancher/permissions.yaml` |
+| `allow_session` | 放行 | 成功后保存会话精确规则，随 UUID Session 自动持久化 |
+| `allow_project` | 放行 | 成功后精确规则写入 `./.lancher/permissions.yaml` |
 | `deny` | 拒绝 | 返回 `permission_user_denied`，模型可调整策略 |
 | `superseded`（内部状态） | 跳过 | 不保存规则，返回 `steering_superseded` |
 
 提交“补充当前任务”立即撤销仍在等待的审批。`superseded` 不是用户可选按钮，也不表示用户拒绝；即使随后删除该补充，已撤销的审批仍不会执行或保存允许规则。旧面板的迟到决议返回 `False`。
 
 进程输入和转后台请求仅提供允许本次与拒绝，不生成 Session 或项目永久输入授权。任务窗口中用户实际点击和发送的控制操作则直接交给有归属检查的 Runtime；模型请求仍经过这条权限判定链。管理进程的停止、查询和等待不因切到讨论或计划阶段失去入口。
+
+目录删除、批量 Shell 删除和无法完整分析的 Shell 调用也只提供本次允许与拒绝，bypass 仍需确认。普通 Shell 删除可以批准；审批完整展示可确定目标，超长命令只折叠界面显示，按 D 查看完整原文。解析超预算时不会把已分析前缀当成完整授权。旧 Shell exact allow 若缺少 cwd/Shell 上下文不会自动复用，原规则文件保持不变。
 
 每个审批退出时发 `permission_request_closed`，用于移除内联面板；撤销的审批不发 `permission_request_resolved`。正常等待审批时输入区仍可用于补充或排队。
 

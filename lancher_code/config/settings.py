@@ -162,10 +162,17 @@ class SettingsService:
 
     @staticmethod
     def _validate_rules(rules: list[PermissionRule]) -> None:
+        from lancher_code.permissions.storage import validate_command_context
         for rule in rules:
             if not rule.match.strip() or rule.result not in {"allow", "deny"} or rule.match_kind not in {"exact", "glob"}:
                 raise SettingsError("权限规则必须包含 match，result 只能是 allow 或 deny。", field_id="rule-match")
+            try:
+                validate_command_context(rule.command_cwd, rule.command_shell)
+            except ValueError as exc:
+                raise SettingsError(str(exc), field_id="rule-command-cwd") from exc
 
     @staticmethod
     def _rules_data(rules: list[PermissionRule]) -> dict[str, Any]:
-        return {"rules": [{"match": rule.match, "result": rule.result, "match_kind": rule.match_kind} for rule in rules]}
+        return {"rules": [{"match": rule.match, "result": rule.result, "match_kind": rule.match_kind,
+                           **({"command_cwd": rule.command_cwd, "command_shell": rule.command_shell}
+                              if rule.command_cwd is not None else {})} for rule in rules]}

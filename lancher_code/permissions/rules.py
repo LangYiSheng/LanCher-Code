@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
+from pathlib import Path
 from dataclasses import dataclass
 from lancher_code.permissions.models import PermissionMatchKind
 from lancher_code.contracts.tools import ToolCall, ToolDefinition
@@ -19,20 +21,11 @@ TOOL_LABELS: dict[str, str] = {
     "glob": "Glob",
     "grep": "Grep",
     "write_plan_file": "WritePlanFile",
+    "delete_file": "DeleteFile",
 }
 
 
 LABEL_TO_TOOL = {label.casefold(): tool_name for tool_name, label in TOOL_LABELS.items()}
-
-
-COMMAND_BLACKLIST_PATTERNS = (
-    re.compile(r"(^|[;&|])\s*(remove-item|del|erase|rm)\b", re.IGNORECASE),
-    re.compile(r"(^|[;&|])\s*(shutdown|restart-computer|stop-computer)\b", re.IGNORECASE),
-    re.compile(r"\b(format|diskpart|cipher)\b", re.IGNORECASE),
-    re.compile(r"\b(runas|sudo)\b", re.IGNORECASE),
-    re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-fdx?|checkout\s+--|restore\s+--source=)", re.IGNORECASE),
-    re.compile(r"(?:^|[^<])>>?(?:[^>]|$)"),
-)
 
 
 @dataclass(slots=True)
@@ -41,13 +34,23 @@ class MatchTarget:
     tool_label: str
     value: str
     exact_value: str | None = None
+    command_cwd: str | None = None
+    command_shell: str | None = None
+    command_name: str | None = None
 
 
-def match_command_blacklist(command: str) -> str | None:
-    for pattern in COMMAND_BLACKLIST_PATTERNS:
-        if pattern.search(command):
-            return "命中不可绕过的危险命令黑名单，已拒绝执行。"
-    return None
+def current_command_shell() -> str:
+    """与实际进程后端保持一致，不根据命令正文猜测 Shell。"""
+    return "powershell" if os.name == "nt" else "sh"
+
+
+def rule_context_matches(rule, target: MatchTarget) -> bool:
+    if rule.command_cwd is None:
+        # 旧精确允许缺少 cwd/Shell 绑定；保留记录但要求重新批准。
+        return not (target.tool_name == "run_command" and rule.result == "allow" and rule.match_kind == "exact")
+    if target.command_cwd is None or target.command_shell != rule.command_shell:
+        return False
+    return os.path.normcase(os.path.normpath(rule.command_cwd)) == os.path.normcase(os.path.normpath(target.command_cwd))
 
 
 def validate_match_kind(match_kind: str) -> None:
@@ -73,6 +76,14 @@ def rule_matches(rule_match: str, target: MatchTarget, match_kind: PermissionMat
     if match_kind == "exact":
         return candidate == normalized_rule
     if match_kind == "glob":
+        if target.tool_name == "run_command" and target.command_shell == "powershell" and target.command_name:
+            # 只规范化命令名称，不改变参数中的大小写、引号或空白。
+            from lancher_code.permissions.shell import canonical_command_name
+            head = re.match(r"([^\s]+)(.*)", normalized_rule, re.DOTALL)
+            candidate_head = re.match(r"([^\s]+)(.*)", candidate, re.DOTALL)
+            if head and candidate_head and not any(char in head[1] for char in "*?["):
+                normalized_rule = canonical_command_name(head[1], "powershell") + head[2]
+                candidate = target.command_name + candidate_head[2]
         return fnmatch.fnmatchcase(candidate, normalized_rule)
     return candidate == normalized_rule
 
@@ -92,14 +103,10 @@ def _parse_rule(rule_match: str) -> tuple[str, str] | None:
 
 def _normalize_rule_value(tool_name: str, value: str) -> str:
     if tool_name == "run_command":
-        return _normalize_command(value)
-    if tool_name in {"read_file", "write_file", "edit_file", "write_plan_file", "grep"}:
+        return value.strip()
+    if tool_name in {"read_file", "write_file", "edit_file", "delete_file", "write_plan_file", "grep"}:
         return _normalize_path(value)
     return value.casefold()
-
-
-def _normalize_command(command: str) -> str:
-    return re.sub(r"\s+", " ", command.strip().casefold())
 
 
 def _normalize_path(path: str) -> str:
@@ -117,12 +124,13 @@ def build_match_target(call: ToolCall, tool: ToolDefinition, context: ToolContex
     if tool.name == "run_command":
         command = str(call.arguments.get("command", "")).strip()
         raw_cwd = call.arguments.get("cwd")
+        command_cwd = resolve_path_in_root(context.cwd, ".", context.project_root or context.cwd)
         if raw_cwd is not None:
             if not isinstance(raw_cwd, str) or not raw_cwd.strip():
                 raise ValueError("cwd 必须是项目内的非空路径字符串。")
-            resolve_path_in_root(context.cwd, raw_cwd, context.project_root or context.cwd)
-        normalized = _normalize_command(command)
-        return MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=normalized, exact_value=command)
+            command_cwd = resolve_path_in_root(context.cwd, raw_cwd, context.project_root or context.cwd)
+        return MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=command, exact_value=command,
+                           command_cwd=str(command_cwd), command_shell=current_command_shell())
     if tool.name in {"process_write", "process_background"}:
         process_id = str(call.arguments.get("process_id", "")).strip()
         return MatchTarget(tool.name, TOOL_LABELS[tool.name], process_id)
@@ -133,6 +141,11 @@ def build_match_target(call: ToolCall, tool: ToolDefinition, context: ToolContex
             plan_path = ensure_path_in_root(context.plan_file_path, context.project_root or context.cwd)
             relative_path = relative_display_path(plan_path, context.project_root or context.cwd)
         return MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=_normalize_path(relative_path),)
+    if tool.name == "delete_file":
+        from lancher_code.filesystem.deletion import plan_delete
+        plan = plan_delete(call.arguments, context)
+        relative_path = str(plan.target.relative_to((context.project_root or context.cwd).resolve()))
+        return MatchTarget(tool.name, TOOL_LABELS[tool.name], _normalize_path(relative_path))
     if tool.name in {"read_file", "write_file", "edit_file"}:
         raw_path = str(call.arguments.get("path", "")).strip()
         resolved = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)

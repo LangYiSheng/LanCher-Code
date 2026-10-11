@@ -63,6 +63,8 @@ class InlinePermissionPanel(VerticalScroll):
 
     DEFAULT_CSS = """
     #permission-body, #permission-primary, #permission-secondary { height: auto; }
+    #permission-folded-heading { dock: top; height: auto; }
+    #permission-command-notice { height: auto; color: $text-muted; }
     #permission-compact-actions { display: none; height: 1; }
     #permission-compact-actions Button { padding: 0; width: 1fr; min-width: 4; }
     """
@@ -94,10 +96,22 @@ class InlinePermissionPanel(VerticalScroll):
         self._request_screen: ModalScreen | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static(f"需要确认 · {self.request.tool_label}", id="permission-title", markup=False)
+        command = self.request.command or ""
+        visible = "".join(command.splitlines(keepends=True)[:4])[:400]
+        folded = self.request.kind == "command" and visible != command
+        title = Static(f"需要确认 · {self.request.tool_label}", id="permission-title", markup=False)
+        if folded:
+            # 提示固定在可见标题区域，滚动到授权选项时仍能发现完整原文入口。
+            with Vertical(id="permission-folded-heading"):
+                yield title
+                yield Static("命令显示已折叠，按 D 查看完整原文", id="permission-command-notice", markup=False)
+        else:
+            yield title
         with Vertical(id="permission-body"):
             if self.request.kind == "command":
-                yield Static(self.request.command or "", id="permission-command", markup=False)
+                yield Static(visible, id="permission-command", markup=False)
+                if self.request.metadata.get("analysis_summary"):
+                    yield Static(self.request.metadata["analysis_summary"], id="permission-analysis", markup=False)
                 yield Static(self.request.description or "执行此命令需要你的确认", id="permission-description", markup=False)
             else:
                 yield Static(self.request.details, id="permission-details", markup=False)
@@ -130,7 +144,7 @@ class InlinePermissionPanel(VerticalScroll):
 
     def set_compact(self, compact: bool) -> None:
         self.set_class(compact, "-compact")
-        for selector in ("#permission-body", "#permission-prompt", "#permission-help", "#permission-secondary", "#permission-more"):
+        for selector in ("#permission-body", "#permission-prompt", "#permission-help", "#permission-secondary", "#permission-more", "#permission-command-notice"):
             for widget in self.query(selector):
                 widget.display = not compact
         self.query_one("#permission-compact-actions").display = compact
@@ -191,9 +205,14 @@ class InlinePermissionPanel(VerticalScroll):
 
     def action_show_details(self) -> None:
         request = self.request
-        lines = [request.title, request.command or request.details, request.description or ""]
-        if request.metadata.get("cwd"):
-            lines.append(f"工作目录：{request.metadata['cwd']}")
+        lines = [request.title, request.details]
+        if request.command and request.command not in request.details:
+            lines.insert(1, request.command)
+        if request.description and request.description not in request.details:
+            lines.append(request.description)
+        cwd = request.metadata.get("cwd")
+        if cwd and str(cwd) not in request.details:
+            lines.append(f"工作目录：{cwd}")
         lines.extend(preview.get("text", "") for preview in request.preview_lines)
         self._request_screen = PermissionDetailsScreen("\n".join(line for line in lines if line))
         self.app.push_screen(self._request_screen)
@@ -338,5 +357,5 @@ def _option_specs(
         ]
     return [
         ("allow_once", "仅允许本次", None),
-        ("deny", "拒绝本次编辑", None),
+        ("deny", "拒绝删除" if request.tool_name == "delete_file" else "拒绝本次编辑", None),
     ]

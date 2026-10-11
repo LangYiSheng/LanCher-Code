@@ -10,6 +10,16 @@ from lancher_code.permissions.models import PermissionRule, RuleScope, Permissio
 from lancher_code.permissions.rules import validate_match_kind
 
 
+def validate_command_context(cwd: object, shell: object) -> None:
+    """命令授权的两个执行上下文字段必须成对保存。"""
+    if cwd is None and shell is None:
+        return
+    if not isinstance(cwd, str) or not cwd.strip() or not Path(cwd).is_absolute():
+        raise ValueError("command_cwd 必须是绝对路径。")
+    if not isinstance(shell, str) or shell not in {"powershell", "sh", "bash"}:
+        raise ValueError("command_shell 必须为 powershell、sh 或 bash。")
+
+
 class PermissionRuleFileError(LanCherError):
     pass
 
@@ -55,11 +65,13 @@ class PermissionStorage:
         if path is None:
             raise PermissionRuleFileError(f"{scope} 权限规则文件路径未配置。")
         normalized = [
-            PermissionRule(match=rule.match, result=rule.result, scope=scope, match_kind=rule.match_kind)
+            PermissionRule(match=rule.match, result=rule.result, scope=scope, match_kind=rule.match_kind,
+                           command_cwd=rule.command_cwd, command_shell=rule.command_shell)
             for rule in rules
         ]
         for rule in normalized:
             validate_match_kind(rule.match_kind)
+            validate_command_context(rule.command_cwd, rule.command_shell)
         if persist:
             self._write_rules(path, normalized)
         if scope == "project":
@@ -67,12 +79,15 @@ class PermissionStorage:
         else:
             self._user_rules = normalized
 
-    def add_session_rule(self, match: str, result: Literal["allow", "deny"], *, match_kind: PermissionMatchKind = "exact") -> PermissionRule:
+    def add_session_rule(self, match: str, result: Literal["allow", "deny"], *, match_kind: PermissionMatchKind = "exact",
+                         command_cwd: str | None = None, command_shell: str | None = None) -> PermissionRule:
         normalized_match = match.strip()
         if not normalized_match:
             raise ValueError("session 权限规则的 match 不能为空。")
         validate_match_kind(match_kind)
-        rule = PermissionRule(match=normalized_match, result=result, scope="session", match_kind=match_kind)
+        validate_command_context(command_cwd, command_shell)
+        rule = PermissionRule(match=normalized_match, result=result, scope="session", match_kind=match_kind,
+                              command_cwd=command_cwd, command_shell=command_shell)
         self._session_rules.append(rule)
         self._notify_session_rules_changed()
         return rule
@@ -91,7 +106,9 @@ class PermissionStorage:
             if rule.result not in {"allow", "deny"}:
                 raise ValueError("session 权限规则的 result 只能是 allow 或 deny。")
             validate_match_kind(rule.match_kind)
-            normalized.append(PermissionRule(match=match, result=rule.result, scope="session", match_kind=rule.match_kind))
+            validate_command_context(rule.command_cwd, rule.command_shell)
+            normalized.append(PermissionRule(match=match, result=rule.result, scope="session", match_kind=rule.match_kind,
+                                             command_cwd=rule.command_cwd, command_shell=rule.command_shell))
         self._session_rules = normalized
         if notify:
             self._notify_session_rules_changed()
@@ -104,11 +121,14 @@ class PermissionStorage:
         for callback in tuple(self._session_rule_callbacks):
             callback()
 
-    def add_project_rule(self, match: str, result: Literal["allow", "deny"], *, match_kind: PermissionMatchKind = "exact") -> PermissionRule:
+    def add_project_rule(self, match: str, result: Literal["allow", "deny"], *, match_kind: PermissionMatchKind = "exact",
+                         command_cwd: str | None = None, command_shell: str | None = None) -> PermissionRule:
         if self._project_rules_path is None:
             raise PermissionRuleFileError("当前会话没有配置项目级权限规则文件路径。")
         validate_match_kind(match_kind)
-        rule = PermissionRule(match=match, result=result, scope="project", match_kind=match_kind)
+        validate_command_context(command_cwd, command_shell)
+        rule = PermissionRule(match=match, result=result, scope="project", match_kind=match_kind,
+                              command_cwd=command_cwd, command_shell=command_shell)
         updated = [*self._project_rules, rule]
         self._write_rules(self._project_rules_path, updated)
         self._project_rules = updated
@@ -149,7 +169,13 @@ class PermissionStorage:
             match_kind = item.get("match_kind")
             if not isinstance(match_kind, str) or match_kind not in {"exact", "glob"}:
                 raise PermissionRuleFileError(f"权限规则第 {index} 项必须明确指定 match_kind 为 exact 或 glob，请重新配置；原文件已保留: {path}")
-            rules.append(PermissionRule(match=match.strip(), result=result, scope=scope, match_kind=match_kind))
+            command_cwd, command_shell = item.get("command_cwd"), item.get("command_shell")
+            try:
+                validate_command_context(command_cwd, command_shell)
+            except ValueError as exc:
+                raise PermissionRuleFileError(f"权限规则第 {index} 项的命令上下文无效: {path}: {exc}") from exc
+            rules.append(PermissionRule(match=match.strip(), result=result, scope=scope, match_kind=match_kind,
+                                        command_cwd=command_cwd, command_shell=command_shell))
         return rules
 
     @staticmethod
@@ -160,6 +186,8 @@ class PermissionStorage:
                     "match": rule.match,
                     "result": rule.result,
                     "match_kind": rule.match_kind,
+                    **({"command_cwd": rule.command_cwd, "command_shell": rule.command_shell}
+                       if rule.command_cwd is not None else {}),
                 }
                 for rule in rules
             ]

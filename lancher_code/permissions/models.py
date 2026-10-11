@@ -29,6 +29,8 @@ class PermissionRule:
     result: PermissionRuleResult
     scope: RuleScope
     match_kind: PermissionMatchKind = "exact"
+    command_cwd: str | None = None
+    command_shell: str | None = None
 
 
 @dataclass(slots=True)

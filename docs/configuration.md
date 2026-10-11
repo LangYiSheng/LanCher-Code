@@ -153,10 +153,15 @@ execution:
 
 ## 权限规则文件
 
-`permissions.yaml` 顶层为 `rules` 数组，每项 `{match, result, match_kind}`。`match_kind` 必须明确填写 `exact` 或 `glob`；缺少该字段或使用 `legacy` 会提示重新配置并保留原文件。新的命令授权默认 `exact`，完整命令精确匹配，不把 `*` 等字符当通配符：
+`permissions.yaml` 顶层为 `rules` 数组，每项包含 `match`、`result`、`match_kind`。`match_kind` 必须明确填写 `exact` 或 `glob`；缺少该字段或使用 `legacy` 会提示重新配置并保留原文件。新的命令授权默认 `exact`，保留完整原文，同时保存绝对 `command_cwd` 与 `command_shell`（Windows 为 `powershell`，其他平台为 `sh`），不把 `*` 等字符当通配符：
 
 ```yaml
 rules:
+  - match: "RunCommand(git status --short)"
+    match_kind: exact
+    result: allow
+    command_cwd: "D:/projects/demo"
+    command_shell: powershell
   - match: "RunCommand(git *)"
     match_kind: glob
     result: allow
@@ -167,16 +172,19 @@ rules:
 
 三层规则优先级：**session > project > user**（session 规则随当前 UUID Session 自动持久化，project / user 规则写入 YAML）。
 
+`command_cwd` 与 `command_shell` 必须同时填写或同时省略。新 Shell exact allow 授权绑定这两项；旧的无上下文 exact allow 记录不自动复用，旧拒绝规则继续生效。手工 glob 规则逐个匹配 AST 子命令；变量、嵌套解释器、未知程序或解析超预算只支持本次确认。目录和批量删除也只支持本次确认。
+
 阶段硬限制先于三层规则；讨论和计划阶段不开放通用 Shell 和源码修改，MCP 必须明确声明只读。当前 Session 的 `workspace/` 在所有阶段支持已批准的内置文件工具读写，计划路径由 Session 管理，不再使用 `runtime.plan_file_path`。此路径批准不构成操作系统沙箱。
 
 ### 匹配格式
 
 | 工具 | 规则写法 | 匹配对象 |
 |---|---|---|
-| `run_command` | `RunCommand(<命令>)` | exact 保留完整命令的大小写与内部空白；glob 按显式通配方式匹配 |
+| `run_command` | `RunCommand(<命令>)` | exact 保留完整命令并绑定 cwd/Shell；glob 逐个 AST 子命令匹配 |
 | `read_file` | `ReadFile(<路径>)` | 项目相对路径（正斜杠、小写） |
 | `write_file` | `WriteFile(<路径>)` | 同上 |
 | `edit_file` | `EditFile(<路径>)` | 同上 |
+| `delete_file` | `DeleteFile(<路径>)` | 项目相对的精确删除目标，链接匹配本体；目录只支持本次确认 |
 | `glob` | `Glob(<模式>)` | glob 模式本身（小写） |
 | `grep` | `Grep(<路径>)` | 搜索范围路径 |
 | `write_plan_file` | `WritePlanFile(<路径>)` | 计划文件相对路径 |

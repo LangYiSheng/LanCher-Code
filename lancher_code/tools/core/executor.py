@@ -16,6 +16,7 @@ from lancher_code.contracts.tools import ToolCall, ToolExecutionResult, tool_ava
 from lancher_code.tools.context import ToolContext
 from lancher_code.permissions.models import PermissionCheck
 from lancher_code.permissions.engine import PermissionEngine
+from lancher_code.permissions.storage import PermissionRuleFileError
 from lancher_code.sessions.storage import SessionRepositoryError
 from lancher_code.filesystem.access import resolve_path_in_root
 from lancher_code.tools.core.file_state_cache import FileStateCache
@@ -90,12 +91,16 @@ class ToolExecutor:
             )))
         try:
             # gather 保留输入顺序，on_result 按实际完成顺序立即推送。
-            return list(await asyncio.gather(*tasks))
+            batch = asyncio.gather(*tasks)
+            # 父任务停止时由下面统一取消子调用并等待收尾，避免 gather 与
+            # 收尾逻辑重复取消，丢掉工具报告的已提交结果。
+            return list(await asyncio.shield(batch))
         except BaseException:
             # 业务失败已转换为结构化结果；只有取消或日志/通知基础设施失败才收束整批。
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(batch, return_exceptions=True)
             raise
 
     def _argument_error(self, call: ToolCall) -> ToolExecutionResult | None:
@@ -246,7 +251,10 @@ class ToolExecutor:
         argument_error = self._argument_error(call)
         if argument_error is not None:
             return argument_error
-        check = self._permission_engine.evaluate(call=call, tool=tool.definition, context=context)
+        check = await self._evaluate_permission(call, tool, context)
+        if call.tool_name == "delete_file" and check.decision != "deny":
+            from lancher_code.filesystem.deletion import plan_delete
+            context.delete_plan = await self._await_cancelable(asyncio.to_thread(plan_delete, call.arguments, context), context)
         approval_signature = self._permission_signature(check)
         if check.decision == "ask":
             await self._report_state(call, invocation, "awaiting_permission", on_invocation_state)
@@ -270,11 +278,13 @@ class ToolExecutor:
         if self._superseded_now(context, should_interrupt):
             return self._superseded(call)
         # 审批等待和资源排队都会让文件、规则发生变化；真正执行前再次检查。
-        checked = self._permission_engine.evaluate(call=call, tool=tool.definition, context=context)
+        checked = await self._evaluate_permission(call, tool, context)
         if checked.decision == "deny":
             return self._permission_denied(call, checked)
         if checked.decision == "ask" and (check.decision != "ask" or self._permission_signature(checked) != approval_signature):
             return self._error(call, "permission_target_changed", "等待期间权限或目标已改变，请重新请求执行。")
+        if self._target_signature(checked) != self._target_signature(check):
+            return self._error(call, "permission_target_changed", "等待期间实际执行目标或文件版本已改变，当前调用未执行。")
         if self._resource_claims(call, context) != claims:
             return self._error(call, "resource_target_changed", "等待期间资源目标已改变，当前调用未执行。")
         argument_error = self._argument_error(call)
@@ -292,6 +302,18 @@ class ToolExecutor:
         self._raise_if_cancelled(context)
         if self._superseded_now(context, should_interrupt):
             return self._superseded(call)
+        final_check = await self._evaluate_permission(call, tool, context)
+        if final_check.decision == "deny":
+            return self._permission_denied(call, final_check)
+        if (self._target_signature(final_check) != self._target_signature(check)
+                or (final_check.decision == "ask" and (check.decision != "ask"
+                    or self._permission_signature(final_check) != approval_signature))):
+            return self._error(call, "permission_target_changed", "执行前权限或目标已改变，当前调用未执行。")
+        if self._resource_claims(call, context) != claims:
+            return self._error(call, "resource_target_changed", "执行前资源目标已改变，当前调用未执行。")
+        self._raise_if_cancelled(context)
+        if self._superseded_now(context, should_interrupt):
+            return self._superseded(call)
         try:
             # 进程工具分别管理本次等待期限和进程运行期限；普通工具超时不能
             # 把这些期限重新合并，也不能在停止流程完成之前打断收尾。
@@ -305,6 +327,18 @@ class ToolExecutor:
                 return self._changed_tool_result(call)
             result = await self._await_cancelable(tool.execute(call.arguments, context), context, timeout=timeout)
             result.call_id, result.tool_name = call.call_id, call.tool_name
+            # 操作失败、目标变更或停止不留下永久授权；仅成功调用落实保存选择。
+            if (not result.is_error and context.pending_permission_request is not None
+                    and context.pending_permission_resolution is not None
+                    and not self._superseded_now(context, should_interrupt)
+                    and not (context.cancellation_token and context.cancellation_token.is_cancelled)):
+                try:
+                    self._permission_engine.apply_resolution(context.pending_permission_request,
+                                                             context.pending_permission_resolution)
+                except PermissionRuleFileError as exc:
+                    # 操作已成功，保存授权失败不能把真实副作用改报成执行失败。
+                    result.metadata["permission_rule_save_error"] = str(exc)
+                    result.content += f"\n操作已完成，但未能保存后续授权：{exc}"
             return result
         except asyncio.CancelledError:
             if self._external_side_effect(tool):
@@ -360,7 +394,9 @@ class ToolExecutor:
         if resolution.request_id != request.request_id:
             return self._error(call, "permission_resolution_mismatch", "授权结果与当前请求不匹配。")
         if resolution.outcome in {"allow_once", "allow_session", "allow_project"}:
-            self._permission_engine.apply_resolution(request, resolution)
+            if context is not None:
+                context.pending_permission_request = request
+                context.pending_permission_resolution = resolution
             return None
         return self._error(call, "permission_user_denied", "用户拒绝了本次工具调用。",
                            {**(permission_check.metadata or {}), "permission_request_id": request.request_id})
@@ -388,6 +424,16 @@ class ToolExecutor:
             if operation not in done:
                 raise asyncio.TimeoutError
             return await operation
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            if not operation.done():
+                operation.cancel()
+            await asyncio.gather(operation, return_exceptions=True)
+            if not operation.cancelled() and operation.exception() is None:
+                settled = operation.result()
+                if isinstance(settled, ToolExecutionResult):
+                    # Token、Task.cancel 和超时都保留工具收尾时的实际结果。
+                    return settled
+            raise
         finally:
             if not operation.done():
                 operation.cancel()
@@ -397,12 +443,25 @@ class ToolExecutor:
                 await asyncio.gather(cancellation_wait, return_exceptions=True)
 
     @staticmethod
+    def _target_signature(check: PermissionCheck) -> tuple[object, ...]:
+        metadata = check.metadata or (check.request.metadata if check.request is not None else {})
+        return (metadata.get("delete_signature"), metadata.get("execution_signature"))
+
+    async def _evaluate_permission(self, call: ToolCall, tool: Tool, context: ToolContext) -> PermissionCheck:
+        if call.tool_name in {"run_command", "process_write", "delete_file"}:
+            # AST 子进程和目录扫描只读但可能耗时，不阻塞 TUI 处理停止/补充。
+            return await self._await_cancelable(asyncio.to_thread(self._permission_engine.evaluate,
+                call=call, tool=tool.definition, context=context), context)
+        return self._permission_engine.evaluate(call=call, tool=tool.definition, context=context)
+
+    @staticmethod
     def _permission_signature(check: PermissionCheck) -> tuple[object, ...]:
         request = check.request
         if request is None:
             return (check.decision,)
         return (request.tool_name, request.kind, request.command, request.details,
-                tuple(request.file_paths), request.work_phase, request.permission_policy)
+                tuple(request.file_paths), request.work_phase, request.permission_policy,
+                ToolExecutor._target_signature(check))
 
     @staticmethod
     def _permission_denied(call: ToolCall, check: PermissionCheck) -> ToolExecutionResult:

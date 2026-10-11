@@ -32,7 +32,9 @@ class PermissionSettingsEditor(SettingsDomainEditor):
         rules = deepcopy(self._rules())
         rule = PermissionRule(self.query_one("#rule-match", Input).value.strip(),
             self.query_one("#rule-result", Select).value, self._rule_scope,
-            match_kind=self.query_one("#rule-match-kind", Select).value)
+            match_kind=self.query_one("#rule-match-kind", Select).value,
+            command_cwd=self.query_one("#rule-command-cwd", Input).value.strip() or None,
+            command_shell=self.query_one("#rule-command-shell", Input).value.strip() or None)
         if self._editing_rule_index is None:
             rules.append(rule)
         else:
@@ -49,8 +51,10 @@ class PermissionSettingsEditor(SettingsDomainEditor):
             yield Static("权限规则", classes="editor-title")
             yield Static("", id="rule-editor-scope", classes="scope-note")
             yield from field("匹配表达式", Input(placeholder="例如 RunCommand(git status)", id="rule-match"))
+            yield from field("命令工作目录（可选，绝对路径）", Input(id="rule-command-cwd"))
+            yield from field("命令 Shell（与工作目录成对填写）", Input(placeholder="powershell / sh / bash", id="rule-command-shell"))
             yield from field("匹配方式", Select((("精确匹配", "exact"), ("通配规则（glob）", "glob")), value="exact", allow_blank=False, id="rule-match-kind"))
-            yield Static("精确匹配只授权完整目标；通配规则可覆盖多个目标。", classes="scope-note")
+            yield Static("精确匹配只授权完整目标；Shell 精确允许需同时填写工作目录与 Shell。通配规则逐个检查子命令。", classes="scope-note")
             yield from field("处理方式", Select((("允许", "allow"), ("拒绝", "deny")), value="allow", allow_blank=False, id="rule-result"))
             with Horizontal(classes="row-actions"):
                 yield Button("上移", id="rule-up")
@@ -88,6 +92,8 @@ class PermissionSettingsEditor(SettingsDomainEditor):
         self.query_one("#rule-match", Input).value = rule.match
         self.query_one("#rule-result", Select).value = rule.result
         self.query_one("#rule-match-kind", Select).value = rule.match_kind
+        self.query_one("#rule-command-cwd", Input).value = rule.command_cwd or ""
+        self.query_one("#rule-command-shell", Input).value = rule.command_shell or ""
         for action in ("up", "down", "delete"):
             self.query_one(f"#rule-{action}").display = index is not None
         self.begin_form("#rule-match")

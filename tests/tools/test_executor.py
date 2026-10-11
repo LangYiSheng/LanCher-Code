@@ -443,8 +443,11 @@ async def test_default_background_command_releases_fallback_after_returning_hand
     registry.register(command)
     registry.register(file)
     executor = ToolExecutor(registry, cwd=tmp_path)
+    async def approve(request):
+        return PermissionResolution(request.request_id, "allow_once")
+
     result, = await executor.execute_calls([_call("run_command", {"command": "python server.py",
-        "description": "启动服务", "lifetime": "session"})], permission_policy="bypass")
+        "description": "启动服务", "lifetime": "session"})], permission_policy="bypass", permission_resolver=approve)
     assert (not result.is_error) and command.lease.transferred
     try:
         assert (not (await asyncio.wait_for(executor.execute_calls([
@@ -764,9 +767,12 @@ async def test_stop_process_enters_when_ordinary_capacity_is_full(tmp_path: Path
     registry.register(blocked)
     registry.register(StopTool())
     runtime = ExecutionRuntime(tmp_path, ExecutionConfig(limits=ExecutionLimits(max_concurrency=1)))
+    async def approve(request):
+        return PermissionResolution(request.request_id, "allow_once")
+
     task = asyncio.create_task(ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime).execute_calls([
         _call(blocking_tool, {"process_id": "a" * 32}), _call("process_stop", {"process_id": "a" * 32}, index=1)],
-        permission_policy="bypass"))
+        permission_policy="bypass", permission_resolver=approve))
     try:
         await asyncio.wait_for(stop_entered.wait(), 1)
         results = await asyncio.wait_for(task, 1)

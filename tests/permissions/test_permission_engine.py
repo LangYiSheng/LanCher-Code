@@ -82,7 +82,7 @@ def test_old_rules_are_rejected_without_rewriting(tmp_path: Path, kind) -> None:
 def test_builtin_phase_matrix_preserves_workspace_and_process_control() -> None:
     from lancher_code.tools import create_default_tool_registry
     registry = create_default_tool_registry()
-    shared = {"read_file", "write_file", "edit_file", "glob", "grep", "tool_search",
+    shared = {"read_file", "write_file", "edit_file", "delete_file", "glob", "grep", "tool_search",
               "process_list", "process_read", "process_wait", "process_stop"}
     for phase in ("discuss", "plan", "execute"):
         expected = shared | ({"write_plan_file"} if phase == "plan" else set())
@@ -95,7 +95,7 @@ def test_blacklisted_command_is_denied_even_in_bypass_mode(tmp_path: Path) -> No
     engine = PermissionEngine(PermissionStorage())
 
     check = engine.evaluate(
-        call=_call("run_command", {"description": "危险删除", "command": "Remove-Item -Recurse demo"}),
+        call=_call("run_command", {"description": "磁盘管理", "command": "diskpart"}),
         tool=RunCommandTool().definition,
         context=_context(tmp_path, permission_policy="bypass"),
     )
@@ -350,7 +350,7 @@ def test_process_input_cannot_bypass_command_blacklist(tmp_path: Path) -> None:
     from lancher_code.tools.builtin.process import ProcessTool
 
     check = PermissionEngine().evaluate(
-        call=_call("process_write", {"process_id": "a" * 32, "text": "echo ready\nRemove-Item target\n"}),
+        call=_call("process_write", {"process_id": "a" * 32, "text": "echo ready\ndiskpart\n"}),
         tool=ProcessTool("process_write").definition, context=_context(tmp_path, permission_policy="bypass"),
     )
     assert check.decision == "deny" and check.reason_code == "permission_blacklist_denied"

@@ -20,6 +20,13 @@ class FileStateCache:
     def get(self, path: Path) -> FileState | None:
         return self._entries.get(path.resolve())
 
+    def discard(self, path: Path, *, recursive: bool = False) -> None:
+        """删除后丢弃旧版本，避免同路径重建文件沿用先前的读取授权。"""
+        resolved = path.resolve()
+        for key in tuple(self._entries):
+            if key == resolved or (recursive and key.is_relative_to(resolved)):
+                del self._entries[key]
+
     def record_read(self, path: Path, content: str, *, mtime_ns: int, is_complete: bool) -> FileState:
         resolved = path.resolve()
         state = FileState(

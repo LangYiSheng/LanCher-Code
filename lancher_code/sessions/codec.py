@@ -362,6 +362,7 @@ class SessionCodec:
 
     @staticmethod
     def _decode_permission_rules(value: object) -> list[PermissionRule]:
+        from lancher_code.permissions.storage import validate_command_context
         if not isinstance(value, dict) or not isinstance(value.get("rules"), list):
             raise TypeError("permissions data")
         rules: list[PermissionRule] = []
@@ -377,8 +378,11 @@ class SessionCodec:
             match_kind = item["match_kind"]
             if match_kind not in {"exact", "glob"}:
                 raise ValueError("权限规则 match_kind 无效。")
+            cwd, shell = item.get("command_cwd"), item.get("command_shell")
+            validate_command_context(cwd, shell)
             rules.append(
-                PermissionRule(match=match.strip(), result=result, scope="session", match_kind=match_kind)
+                PermissionRule(match=match.strip(), result=result, scope="session", match_kind=match_kind,
+                               command_cwd=cwd, command_shell=shell)
             )
         return rules
 

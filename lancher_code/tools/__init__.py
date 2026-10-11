@@ -7,7 +7,7 @@ if TYPE_CHECKING:
 from lancher_code.contracts.tools import ToolPermissionMetadata
 
 _BUILTIN_LABELS = {
-    "read_file": "ReadFile", "write_file": "WriteFile", "edit_file": "EditFile",
+    "read_file": "ReadFile", "write_file": "WriteFile", "edit_file": "EditFile", "delete_file": "DeleteFile",
     "run_command": "RunCommand", "glob": "Glob", "grep": "Grep", "write_plan_file": "WritePlanFile",
     "tool_search": "ToolSearch",
     "process_list": "ProcessList", "process_read": "ProcessRead", "process_wait": "ProcessWait",
@@ -21,6 +21,7 @@ def create_default_tool_registry() -> ToolRegistry:
         RunCommandTool,
         create_process_tools,
         EditFileTool,
+        DeleteFileTool,
         GlobTool,
         GrepTool,
         ReadFileTool,
@@ -33,6 +34,7 @@ def create_default_tool_registry() -> ToolRegistry:
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
+    registry.register(DeleteFileTool())
     registry.register(RunCommandTool())
     for process_tool in create_process_tools():
         registry.register(process_tool)

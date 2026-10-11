@@ -27,7 +27,7 @@ def test_session_controller_filters_tools_for_plan_mode(openai_provider_config, 
     )
 
     tool_names = [tool.name for tool in request.tools]
-    assert set(tool_names) == {"read_file", "write_file", "edit_file", "glob", "grep", "write_plan_file", "tool_search", "process_list", "process_read", "process_wait", "process_stop"}
+    assert set(tool_names) == {"read_file", "write_file", "edit_file", "delete_file", "glob", "grep", "write_plan_file", "tool_search", "process_list", "process_read", "process_wait", "process_stop"}
 
 
 def test_run_command_tool_rejects_even_readonly_command_in_plan_mode(tmp_path: Path) -> None:

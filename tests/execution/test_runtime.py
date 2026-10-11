@@ -33,6 +33,25 @@ def python_command(script: str) -> str:
     return f'{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}'
 
 
+async def approve_once(request):
+    """生命周期测试显式批准解释器，不通过 bypass 跳过未知命令审批。"""
+    return PermissionResolution(request.request_id, 'allow_once')
+
+
+def approve_requested_permission(runner, event):
+    if event.kind == 'permission_request_created':
+        assert runner.resolve_permission_request(PermissionResolution(
+            event.permission_request.request_id, 'allow_once'))
+
+
+async def approved_turn(runner, prompt):
+    events = []
+    async for event in runner.run_user_turn(prompt):
+        approve_requested_permission(runner, event)
+        events.append(event)
+    return events
+
+
 class IdleProvider:
     @complete_test_response
     async def stream_chat(self, request):
@@ -54,7 +73,8 @@ async def launch(executor, session, script, *, lifetime='session', turn_id='orig
     arguments = {'description': '生命周期测试', 'command': python_command(script), 'yield_ms': 0, 'lifetime': lifetime}
     results = await executor.execute_calls([ToolCall(0, 'provider-call', 'run_command', arguments, json.dumps(arguments))],
         session_id=session.session_id, session_workspace=session.paths.workspace,
-        session_root=session.paths.root, permission_policy='bypass', turn_id=turn_id)
+        session_root=session.paths.root, permission_policy='bypass', turn_id=turn_id,
+        permission_resolver=approve_once)
     assert (not results[0].is_error), results[0].error_message
     return results[0].metadata['process_id']
 
@@ -87,8 +107,8 @@ async def test_successive_turns_own_distinct_scopes_before_execution(
     try:
         if eager:
             loop.set_task_factory(asyncio.eager_task_factory)
-        first = [event async for event in runner.run_user_turn('先聊天')]
-        second = [event async for event in runner.run_user_turn('再检查 Python')]
+        first = await approved_turn(runner, '先聊天')
+        second = await approved_turn(runner, '再检查 Python')
         result, = [event.tool_result for event in second if event.kind == 'tool_result_received']
         assert (not result.is_error), result.error_message
         assert 'scope-ok' in result.content
@@ -117,7 +137,7 @@ async def test_stop_before_bound_turn_starts_closes_event_consumer(tmp_path, ope
     consumer = None
 
     async def consume():
-        return [event async for event in runner.run_user_turn('立即停止')]
+        return await approved_turn(runner, '立即停止')
 
     try:
         loop.set_task_factory(asyncio.eager_task_factory)
@@ -127,7 +147,7 @@ async def test_stop_before_bound_turn_starts_closes_event_consumer(tmp_path, ope
         assert not runner.has_active_turn
         assert not runtime.processes._processes
         # 停止入口未开始的轮次，不封住下一次正常请求。
-        events = [event async for event in runner.run_user_turn('现在继续')]
+        events = await approved_turn(runner, '现在继续')
         assert any(event.kind == 'turn_completed' and event.task_id for event in events)
     finally:
         if consumer is not None:
@@ -162,6 +182,7 @@ async def test_stop_during_completed_turn_cleanup_keeps_terminal_journal(tmp_pat
     async def consume():
         nonlocal completed_id
         async for event in runner.run_user_turn('启动本轮任务后结束回答'):
+            approve_requested_permission(runner, event)
             if event.kind == 'turn_completed':
                 completed_id = event.task_id
                 # 回答已完成，托管进程仍在 finally 中进行真实停止。
@@ -244,6 +265,7 @@ async def test_stop_turn_kills_foreground_keeps_background_and_closes_all_on_exi
 
     async def consume():
         async for event in runner.run_user_turn('启动两个任务'):
+            approve_requested_permission(runner, event)
             events.append(event)
 
     consumer = asyncio.create_task(consume())
@@ -389,7 +411,7 @@ async def test_explicit_process_profile_blocks_until_real_exit_and_reports_proce
             [ToolCall(0, call_id or uuid4().hex, name, arguments, json.dumps(arguments))],
             session_id=session.session_id, session_workspace=session.paths.workspace,
             session_root=session.paths.root, turn_id='profile-turn', permission_policy='bypass',
-            on_call_started=on_started,
+            on_call_started=on_started, permission_resolver=approve_once,
         )
         assert (not result.is_error), result.error_message
         return result
@@ -600,7 +622,7 @@ async def test_cancelled_remote_side_effect_is_unknown_and_not_replayed(tmp_path
     runner._models.provider = provider
 
     async def consume():
-        return [event async for event in runner.run_user_turn('提交远端任务')]
+        return await approved_turn(runner, '提交远端任务')
 
     consumer = asyncio.create_task(consume())
     try:
@@ -661,7 +683,7 @@ async def test_session_stop_blocks_new_turn_and_file_calls_until_all_stops_finis
         finishes[1].set()
         await stops[1]
         assert runtime.accepting(session.session_id)
-        events = [event async for event in runner.run_user_turn('收尾后继续')]
+        events = await approved_turn(runner, '收尾后继续')
         assert any(event.kind == 'turn_completed' for event in events)
     finally:
         for event in finishes:

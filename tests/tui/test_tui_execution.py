@@ -107,6 +107,9 @@ async def grant_command(app, pilot):
     panel = app.query_one(InlinePermissionPanel)
     assert panel.request.tool_name == "run_command"
     assert panel.request.permission_policy == "default"
+    # Python 的脚本影响无法静态预测；必须在真实界面批准本次，资源配置不能放行。
+    assert panel.request.metadata["allow_once_only"] is True
+    assert panel.request.session_rule is None and panel.request.project_rule is None
     request_id = panel.request.request_id
     panel.focus()
     await pilot.press("enter")

@@ -69,6 +69,25 @@ async def _submit_message(app: LanCherTextualApp, pilot, value: str) -> None:
     await pilot.press("enter")
 
 
+async def _until(pilot, predicate, *, timeout: float = 10) -> None:
+    """等待明确的界面状态，解析器首次启动较慢也不能提前发送审批按键。"""
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await pilot.pause(0.02)
+
+
+async def _wait_permission(app: LanCherTextualApp, pilot) -> None:
+    await _until(pilot, lambda: bool(app.query(InlinePermissionPanel))
+                 and app.focused is app.query_one(InlinePermissionPanel))
+
+
+async def _wait_completed_turn(app: LanCherTextualApp, pilot) -> None:
+    await _until(pilot, lambda: not app._is_streaming and not app._turn_runner.has_active_turn
+                 and bool(app._session_controller.state.messages)
+                 and app._session_controller.state.messages[-1].role == "assistant"
+                 and app._session_controller.state.messages[-1].status == "complete")
+
+
 def _permission_request_responses() -> list[list[StreamEvent]]:
     return [
         [
@@ -123,11 +142,11 @@ async def test_permission_denial_does_not_break_turn(openai_provider_config, ui_
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "看看仓库状态")
-        await pilot.pause(0.1)
+        await _wait_permission(app, pilot)
 
         assert isinstance(app.query_one(InlinePermissionPanel), InlinePermissionPanel)
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await _wait_completed_turn(app, pilot)
 
         assert session.state.messages[-1].status == "complete"
         assert session.state.messages[-1].content == "已改用无需执行命令的策略"
@@ -145,7 +164,7 @@ async def test_file_edit_permission_uses_inline_panel(
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "写入 demo.txt")
-        await pilot.pause(0.1)
+        await _wait_permission(app, pilot)
 
         panel = app.query_one(InlinePermissionPanel)
         assert panel.request.kind == "file_edit"
@@ -153,7 +172,7 @@ async def test_file_edit_permission_uses_inline_panel(
         assert len(list(panel.query(PermissionOption))) == 2
 
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await _wait_completed_turn(app, pilot)
 
         assert session.state.messages[-1].status == "complete"
         assert session.state.messages[-1].content == "已停止文件写入"
@@ -170,7 +189,7 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "看看仓库状态")
-        await pilot.pause(0.1)
+        await _wait_permission(app, pilot)
 
         panel = app.query_one(InlinePermissionPanel)
         options = list(panel.query(PermissionOption))
@@ -179,25 +198,25 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
         assert options[0].has_class("-active")
         assert not options[2].display
         await pilot.press("m")
-        await pilot.pause(0.05)
+        await _until(pilot, lambda: len(panel._options()) == 4)
         assert len(panel._options()) == 4
         assert "RunCommand(git status)" in options[2].render().plain
         assert "RunCommand(git status)" in options[3].render().plain
 
         await pilot.press("tab")
-        await pilot.pause(0.05)
+        await _until(pilot, lambda: options[1].has_class("-active"))
         assert options[1].has_class("-active")
 
         await pilot.press("shift+tab")
-        await pilot.pause(0.05)
+        await _until(pilot, lambda: options[0].has_class("-active"))
         assert options[0].has_class("-active")
 
         await pilot.press("up")
-        await pilot.pause(0.05)
+        await _until(pilot, lambda: options[3].has_class("-active"))
         assert options[3].has_class("-active")
 
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await _wait_completed_turn(app, pilot)
 
         assert session.state.messages[-1].status == "complete"
         assert session.state.messages[-1].content == "已改用无需执行命令的策略"
@@ -253,11 +272,11 @@ async def test_command_permission_panel_returns_each_outcome(
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "看看仓库状态")
-        await pilot.pause(0.1)
+        await _wait_permission(app, pilot)
         for key in key_presses:
             await pilot.press(key)
         await pilot.press("enter")
-        await pilot.pause(0.2)
+        await _wait_completed_turn(app, pilot)
 
     assert captured_outcomes == [expected_outcome]
 
@@ -268,15 +287,20 @@ async def test_allow_session_resolution_is_persisted_with_automatic_session(
     ui_config,
     tmp_path: Path,
 ) -> None:
-    provider = FakeProvider(responses=_permission_request_responses())
+    command = "Write-Output ready" if os.name == "nt" else "printf ready"
+    responses = _permission_request_responses()
+    responses[0][2].tool_call_chunk.arguments_delta = json.dumps({
+        "description": "执行成功后保存本次会话的命令批准", "command": command,
+    })
+    provider = FakeProvider(responses=responses)
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
 
     async with app.run_test() as pilot:
-        await _submit_message(app, pilot, "查看仓库状态")
-        await pilot.pause(0.1)
+        await _submit_message(app, pilot, "输出测试结果")
+        await _wait_permission(app, pilot)
         await pilot.press("m", "down", "down")
         await pilot.press("enter")
-        await pilot.pause(1.5)
+        await _wait_completed_turn(app, pilot)
 
     saved_id = session.session_id
     assert saved_id is not None
@@ -284,8 +308,11 @@ async def test_allow_session_resolution_is_persisted_with_automatic_session(
     restored = SessionController(openai_provider_config, cwd=tmp_path)
     try:
         assert restored.resume_session(saved_id) == 1
-        assert restored._permission_storage.rules_for_scope("session")[0].match == "RunCommand(git status)"
-        assert restored._permission_storage.rules_for_scope("session")[0].match_kind == "exact"
+        rule = restored._permission_storage.rules_for_scope("session")[0]
+        assert rule.match == f"RunCommand({command})"
+        assert rule.match_kind == "exact"
+        assert rule.command_cwd == str(tmp_path.resolve())
+        assert rule.command_shell == ("powershell" if os.name == "nt" else "sh")
     finally:
         restored.close()
 

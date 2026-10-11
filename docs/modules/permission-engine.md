@@ -27,17 +27,17 @@
 | `project` | `./.lancher/permissions.yaml` | 项目内持久化 |
 | `user` | `~/.lancher/permissions.yaml` | 用户级持久化 |
 
-主要方法为 `rules_for_scope()`、`replace_rules()`、`add_session_rule()`、`replace_session_rules()`、`add_project_rule()` 和 `subscribe_session_rules_changed()`。读写规则均保留 `match_kind`。
+主要方法为 `rules_for_scope()`、`replace_rules()`、`add_session_rule()`、`replace_session_rules()`、`add_project_rule()` 和 `subscribe_session_rules_changed()`。读写规则均保留 `match_kind`，以及可选的 `command_cwd` / `command_shell` 上下文。
 
-`PermissionEngine.evaluate(call, tool, context)` 返回判定。`apply_resolution(request, resolution)` 只负责落实 `allow_session` / `allow_project` 的规则；执行器必须先检查取消、任务补充和审批撤销，不能先保存规则再决定是否执行。
+`PermissionEngine.evaluate(call, tool, context)` 返回判定。`apply_resolution(request, resolution)` 只负责落实 `allow_session` / `allow_project` 的规则；执行器保留审批选择，成功执行后才保存。目标变更、失败、取消或补充撤销不会留下新允许规则。
 
 ## 判定顺序
 
 1. **工作阶段硬限制。** 讨论和计划允许原生只读调查工具、已配置且显式声明 `readOnlyHint=true` 的 MCP；当前 Session 的 `workspace/` 在所有阶段允许文件读写，计划额外允许专用 `write_plan_file`。两阶段均禁止通用 Shell 和普通源码写入。未声明只读的 MCP 也禁止。违规返回 `phase_disallowed`，任何允许规则及 `bypass` 均不能放行。
-2. **匹配目标与路径边界。** 路径解析后必须位于项目根内，否则返回 `path_outside_project`。Shell 精确匹配保留完整命令，显式 `glob` 规则使用通配匹配。
-3. **危险命令黑名单。** Shell 命中 `COMMAND_BLACKLIST_PATTERNS` 时返回 `permission_blacklist_denied`，规则和 `bypass` 无法覆盖。
+2. **匹配目标与路径边界。** 路径解析后必须位于项目根内，否则返回 `path_outside_project`。Shell AST 检查独立 cwd、正文中能确定的文件目标、目录变化和重定向；动态或未识别行为需要确认，不能证明全部子进程访问都在项目内。
+3. **系统高风险操作。** 按 AST 命令名称及参数识别磁盘格式化、关机、提权与部分破坏性 Git 操作，返回 `permission_blacklist_denied`。普通删除和重定向不再因关键字被永久拒绝，引号里的 format 或 > 不是对应操作。
 4. **分层规则。** 按 session → project → user 顺序，采用第一个存在命中规则的作用域；同一作用域最后一条命中规则生效，结果为 allow 或 deny。
-5. **权限策略。** `bypass` 允许；读工具允许；非只读外部工具需要确认；`acceptEdits` 允许原生写工具；其他调用需要确认。
+5. **权限策略。** `bypass` 允许已完成静态分析的普通调用；读工具允许；非只读外部工具需要确认；`acceptEdits` 允许原生写工具（含普通单文件删除）；目录删除、批量 Shell 删除、动态或无法完整分析的命令始终仅本次确认。
 6. **人在回路。** 生成 `PermissionRequest`，由聊天内联权限面板收集决议。
 
 当前 Session 的 `workspace/` 路径批准不覆盖其他会话目录或日志、快照、摘要、blobs 等控制内容；内置文件工具继续检查真实路径、读取状态与显式拒绝规则。会话控制路径拒绝符号链接与 Windows junction，现有普通控制文件拒绝多个硬链接；`write_file`、`edit_file` 和 `write_plan_file` 也拒绝写入现有的多硬链接普通文件，返回 `hardlinked_file_protected`，`bypass` 不能覆盖。`write_plan_file` 写入当前会话的 `workspace/plan.md`，拒绝空白正文。
@@ -53,6 +53,8 @@ rules:
   - match: 'RunCommand(git status --short)'
     match_kind: exact
     result: allow
+    command_cwd: 'D:/projects/demo'
+    command_shell: powershell
   - match: 'WriteFile(src/[draft].py)'
     match_kind: exact
     result: allow
@@ -67,11 +69,13 @@ rules:
     result: allow
 ```
 
-新权限确认默认 `exact`：Shell 授权完整命令，保留命令内部空白及大小写；文件授权精确路径，仍使用现有的正斜杠、小写路径规范化。`*`、`?`、`[` 在精确规则中按普通字符匹配。MCP 精确规则匹配整个可见工具名，仍允许该工具的不同参数组合。
+新权限确认默认 `exact`：Shell 授权完整命令，保留命令内部空白及大小写，同时保存绝对 `command_cwd` 和实际 `command_shell`。更换 cwd 或解释器不复用批准，Session 与项目规则读写均保留上下文。没有上下文的旧 Shell exact allow 记录保留但不再自动放行，需要重新批准；旧拒绝规则继续有效。文件授权精确路径，仍使用现有路径规范化；DeleteFile 授权删除链接本体的项目相对路径。`*`、`?`、`[` 在精确规则中按普通字符匹配。MCP 精确规则匹配整个可见工具名，仍允许该工具的不同参数组合。
+
+人工配置的 Shell glob 规则必须逐个 AST 子命令匹配，不以整段前缀放行后续命令；PowerShell 常见别名仅规范化命令名称，参数原文不改写。命中作用域继续遵守 session → project → user。静态分析不完整时即使命中允许规则仍本次确认，且不生成永久规则。
 
 `glob` 只用于明确配置的通配匹配。缺失 `match_kind` 或填写 `legacy` 的规则会被拒绝，提示重新配置；读取失败不改写原文件。不会从 `git status` 自动生成 `RunCommand(git *)` 一类宽授权。
 
-标签映射为 `RunCommand`、`ReadFile`、`WriteFile`、`EditFile`、`Glob`、`Grep`、`WritePlanFile`。MCP 使用 `mcp__<server>__<tool>` 可见名。
+标签映射为 `RunCommand`、`ReadFile`、`WriteFile`、`EditFile`、`DeleteFile`、`Glob`、`Grep`、`WritePlanFile`。MCP 使用 `mcp__<server>__<tool>` 可见名。
 
 ## 权限请求与决议
 
@@ -88,7 +92,7 @@ rules:
 
 `process_write` 和 `process_background` 只提供本次允许与拒绝。向交互 Shell 输入内容可能执行任意新操作，不能把一次输入批准保存成整个 Session 或项目的永久放行；显式拒绝规则和命令黑名单仍生效。启动 `run_command` 的确认展示 cwd、归属、Pipe / PTY、有限等待和运行期限，让用户看清要启动的实际工作。
 
-JSON Schema 校验在权限询问和资源申请之前。审批不占资源锁；取得资源后重新检查取消令牌、generation、阶段、规则与真实目标，再应用决议。停止后的迟到批准不会保存允许规则或开始执行。
+JSON Schema 校验在权限询问和资源申请之前。审批不占资源锁；取得资源和运行通知后重新检查取消令牌、generation、阶段、规则与真实目标，执行成功后落实保存选择。停止后的迟到批准不会保存允许规则或开始执行。审批签名包含命令、cwd、Shell、路径分析及删除清单版本。AST 解析和清单扫描使用工作线程，不阻塞 TUI 响应停止。
 
 `ToolExecutor.execute_calls(..., should_interrupt=...)` 在每组开始前与审批返回后检查任务补充。已启动的并行组等待结果；后续未启动调用全部记录为跳过。`TurnRunner` 最终发出 `permission_request_closed`，迟到的面板决议不生效。
 

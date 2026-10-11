@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from lancher_code.filesystem.deletion import DeletePlan
+    from lancher_code.permissions.models import PermissionRequest, PermissionResolution
     from lancher_code.execution.runtime import ExecutionRuntime
     from lancher_code.execution.scheduler import ResourceLease
     from lancher_code.tools.core.file_state_cache import FileStateCache
@@ -33,6 +35,9 @@ class ToolContext:
     invocation_id: str | None = None
     generation: int = 0
     resource_lease: "ResourceLease | None" = None
+    delete_plan: "DeletePlan | None" = None
+    pending_permission_request: "PermissionRequest | None" = None
+    pending_permission_resolution: "PermissionResolution | None" = None
 
     def __post_init__(self) -> None:
         validate_runtime_axes(self.work_phase, self.permission_policy)

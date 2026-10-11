@@ -22,7 +22,9 @@ from lancher_code.tui.timeline import ThinkingTraceWidget, ToolActivityWidget
 from lancher_code.tui.permission import InlinePermissionPanel, PermissionScopesScreen
 from lancher_code.tui.theme import theme_palette
 from test_tui_flow import FakeProvider, _build_app, _submit_message
-from test_tui_permissions import _build_app as permission_app, _permission_request_responses
+from test_tui_permissions import (
+    _build_app as permission_app, _permission_request_responses, _until, _wait_permission,
+)
 
 
 class GatedProvider:
@@ -141,12 +143,13 @@ async def test_ctrl_c_while_permission_waiting_closes_panel_and_preserves_draft(
     app, _ = permission_app(provider, openai_provider_config, UIConfig(), tmp_path)
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "运行命令")
-        await pilot.pause(0.1)
+        await _wait_permission(app, pilot)
         assert list(app.query(InlinePermissionPanel))
         composer = app.query_one(ComposerTextArea)
         composer.text = "审批时保留的草稿"
         await pilot.press("ctrl+c")
-        await pilot.pause(0.1)
+        await _until(pilot, lambda: not app.query(InlinePermissionPanel)
+                     and not app._is_streaming and not app._turn_runner.has_active_turn)
         assert not list(app.query(InlinePermissionPanel))
         assert not app._is_streaming
         assert not app._turn_runner.has_active_turn
