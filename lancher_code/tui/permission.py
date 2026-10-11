@@ -242,13 +242,13 @@ class InlinePermissionPanel(VerticalScroll):
         if len(_option_specs(self.request)) <= 2:
             return
         if self.has_class("-compact"):
-            if self.request.kind in {"command", "external_tool"}:
+            if self.request.directory_grants:
                 self._request_screen = PermissionScopesScreen(self.request)
                 self.app.push_screen(self._request_screen, self._scope_chosen)
             return
         self._scopes_expanded = not self._scopes_expanded
         for option in self.query(PermissionOption):
-            if option.outcome in {"allow_session", "allow_project"}:
+            if option.outcome == "allow_session":
                 option.display = self._scopes_expanded
         buttons = list(self.query("#permission-more"))
         if buttons:
@@ -295,11 +295,12 @@ class PermissionDetailsScreen(ReadOnlyDetailsScreen):
 
 
 class PermissionScopesScreen(ModalScreen[PermissionResolutionOutcome | None]):
-    """小屏把较大授权范围放在独立页面，让精确规则可读后再确认。"""
+    """小屏单独展示真实路径及会话读写授权范围。"""
 
     DEFAULT_CSS = """
     PermissionScopesScreen { align: center middle; background: $background 70%; }
-    #permission-scopes-dialog { width: 72; max-width: 96%; height: auto; max-height: 90%; background: $surface; padding: 1; }
+    #permission-scopes-dialog { width: 72; max-width: 96%; height: 90%; max-height: 32; background: $surface; padding: 1; }
+    #permission-scopes-content { height: 1fr; }
     #permission-scopes-dialog Static { height: auto; margin-bottom: 1; }
     #permission-scopes-dialog Button { width: 1fr; min-width: 8; height: 3; background: transparent; border: none; color: $text; text-style: none; }
     #permission-scopes-dialog Button:focus { background: $foreground; color: $background; text-style: bold; }
@@ -314,19 +315,18 @@ class PermissionScopesScreen(ModalScreen[PermissionResolutionOutcome | None]):
         self.request = request
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="permission-scopes-dialog"):
+        with Vertical(id="permission-scopes-dialog"):
             yield Static("扩大授权范围", markup=False)
-            yield Static("后续匹配此规则的操作将不再逐次询问。", markup=False)
-            yield Static(f"本次会话规则：\n{self.request.session_rule or '此操作'}", id="scope-session-rule", markup=False)
-            yield Button("仅此会话放行", id="scope-session")
-            yield Static(f"当前项目规则：\n{self.request.project_rule or '此操作'}", id="scope-project-rule", markup=False)
-            yield Button("保存到当前项目", id="scope-project")
+            with VerticalScroll(id="permission-scopes-content"):
+                yield Static("以下访问范围仅用于本会话，包含子目录的范围会明确标注；只读阶段仍禁止写入。", markup=False)
+                yield Static(_directory_grant_text(self.request), id="scope-session-grants", markup=False)
+            yield Button("本会话允许以上范围", id="scope-session")
             yield Button("返回", id="scope-back")
 
     @on(Button.Pressed)
     def choose(self, event: Button.Pressed) -> None:
         event.stop()
-        outcome = {"scope-session": "allow_session", "scope-project": "allow_project"}.get(event.button.id)
+        outcome = {"scope-session": "allow_session"}.get(event.button.id)
         self.dismiss(outcome)
 
     def action_close(self) -> None:
@@ -339,23 +339,17 @@ class PermissionScopesScreen(ModalScreen[PermissionResolutionOutcome | None]):
 def _option_specs(
     request: PermissionRequest,
 ) -> list[tuple[PermissionResolutionOutcome, str, str | None]]:
-    if request.metadata.get("allow_once_only"):
-        return [("allow_once", "仅允许本次", None), ("deny", "拒绝执行", None)]
-    if request.kind == "command":
-        return [
-            ("allow_once", "仅允许本次", None),
-            ("deny", "拒绝执行", None),
-            ("allow_session", "在本次会话中放行", request.session_rule),
-            ("allow_project", "在当前项目中放行", request.project_rule),
-        ]
-    if request.kind == "external_tool":
-        return [
-            ("allow_once", "仅允许本次", None),
-            ("deny", "拒绝调用", None),
-            ("allow_session", "在本次会话中放行", request.session_rule),
-            ("allow_project", "在当前项目中放行", request.project_rule),
-        ]
-    return [
+    options = [
         ("allow_once", "仅允许本次", None),
-        ("deny", "拒绝删除" if request.tool_name == "delete_file" else "拒绝本次编辑", None),
+        ("deny", "拒绝删除" if request.tool_name == "delete_file" else "拒绝本次", None),
     ]
+    if request.directory_grants:
+        options.append(("allow_session", "本会话允许此访问范围", _directory_grant_text(request)))
+    return options
+
+
+def _directory_grant_text(request: PermissionRequest) -> str:
+    return "\n".join(
+        f"{'读写' if grant.access == 'write' else '只读'} · {'包含子目录' if grant.recursive else '目录及直接文件，不含子目录'} · {grant.path}"
+        for grant in request.directory_grants
+    )

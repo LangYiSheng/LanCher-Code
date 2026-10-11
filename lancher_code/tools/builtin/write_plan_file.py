@@ -54,7 +54,7 @@ class WritePlanFileTool:
             )
 
         try:
-            path = ensure_writable_path(context.plan_file_path, context)
+            path = ensure_writable_path(context.plan_file_path, context, allow_plan_file=True)
         except ValueError as exc:
             return build_tool_error(
                 summary="写入计划文件失败",
@@ -66,7 +66,8 @@ class WritePlanFileTool:
         try:
             existed = path.exists()
             atomic_write_text(path, content, context, expected_exists=existed,
-                              expected_mtime_ns=path.stat().st_mtime_ns if existed else None)
+                              expected_mtime_ns=path.stat().st_mtime_ns if existed else None,
+                              allow_plan_file=True)
         except PathWriteDeniedError as exc:
             return build_tool_error(summary="写入计划文件失败", error_code=exc.reason_code,
                                     error_message=str(exc), tool_name=self.definition.name)

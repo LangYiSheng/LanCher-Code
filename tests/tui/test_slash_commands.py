@@ -13,7 +13,7 @@ def complete(text, **kwargs):
 
 def test_root_only_has_commands_and_supports_chinese_intent():
     rows = complete("/")
-    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "permissions", "compact", "settings", "status", "exit"]
+    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "access", "compact", "settings", "status", "exit"]
     assert all("<" not in r.display and "[" not in r.display for r in rows)
     assert complete("/切换对话")[0].apply("/切换对话") == "/session "
     assert create_default_slash_command_registry().parse_submission("/mode plan") is None
@@ -51,14 +51,14 @@ def test_free_argument_hints_and_tab_advance():
 
 
 def test_settings_and_policy_values_are_discoverable():
-    assert [r.display for r in complete("/permissions")] == ["default", "acceptEdits", "bypass"]
+    assert [r.display for r in complete("/access")] == ["project", "full"]
     assert [r.display for r in complete("/settings theme ")] == ["dark", "light"]
     assert [r.display for r in complete("/settings busy-enter ")] == ["follow_up", "steer", "draft"]
     assert [r.display for r in complete("/settings default-model ", model_choices=(("p/m", "模型"),))] == ["p/m"]
 
 
 @pytest.mark.parametrize("name,args", [
-    ("permissions", "plan"), ("permissions", "default extra"), ("session", "save"),
+    ("access", "plan"), ("access", "default extra"), ("session", "save"),
     ("session", "save name force"), ("session", "rename old"), ("session", "list extra"),
     ("session", "resume uuid --force"), ("session", "new extra"), ("session", "archive"),
     ("session", "remove uuid extra"),

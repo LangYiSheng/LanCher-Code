@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,11 +10,9 @@ import pytest
 from lancher_code.contracts.control import CancellationToken
 from lancher_code.contracts.tools import ToolCall, ToolExecutionResult
 from lancher_code.permissions.engine import PermissionEngine
-from lancher_code.permissions.models import PermissionResolution, PermissionRule
-from lancher_code.permissions.storage import PermissionRuleFileError, PermissionStorage
+from lancher_code.permissions.models import DirectoryGrant, PermissionResolution
+from lancher_code.permissions.storage import PermissionStorage
 from lancher_code.tools import create_default_tool_registry
-from lancher_code.tools.builtin.command import RunCommandTool
-from lancher_code.tools.builtin.delete_file import DeleteFileTool
 from lancher_code.tools.context import ToolContext
 from lancher_code.tools.core.executor import ToolExecutor
 from lancher_code.tools.core.file_state_cache import FileStateCache
@@ -22,281 +22,275 @@ def _call(name: str, arguments: dict[str, object]) -> ToolCall:
     return ToolCall(0, "security-call", name, arguments, "{}")
 
 
-def _context(project: Path, *, policy: str = "default") -> ToolContext:
-    return ToolContext(
-        cwd=project, project_root=project, timeout_seconds=2,
-        permission_policy=policy, file_state_cache=FileStateCache(),  # type: ignore[arg-type]
-    )
+def _context(project: Path, *, phase: str = "execute", access: str = "project") -> ToolContext:
+    return ToolContext(cwd=project, project_root=project, timeout_seconds=2, work_phase=phase,
+                       execution_access=access, file_state_cache=FileStateCache())
 
 
-def _command_check(engine: PermissionEngine, project: Path, command: str, *, cwd: str = ".", policy: str = "default"):
-    return engine.evaluate(
-        call=_call("run_command", {"command": command, "description": "验证权限边界", "cwd": cwd}),
-        tool=RunCommandTool().definition, context=_context(project, policy=policy),
-    )
+def _check(project: Path, name: str, args: dict, *, access: str = "project", storage=None):
+    return PermissionEngine(storage).evaluate(call=_call(name, args), tool=create_default_tool_registry().get(name).definition,
+                                              context=_context(project, access=access))
 
 
-@pytest.mark.parametrize(("policy", "decision"), [("default", "ask"), ("acceptEdits", "allow")])
-def test_single_file_delete_follows_edit_policy(tmp_path: Path, policy: str, decision: str) -> None:
-    (tmp_path / "temporary.txt").write_text("temporary", encoding="utf-8")
+def _shell_delete(path: Path, *, recursive: bool = True) -> str:
+    quoted = f'"{path.as_posix()}"'
+    if os.name == "nt":
+        return f"Remove-Item -LiteralPath {quoted}" + (" -Recurse" if recursive else "")
+    return f"rm {'-r ' if recursive else ''}{quoted}"
 
-    check = PermissionEngine().evaluate(
-        call=_call("delete_file", {"path": "temporary.txt"}),
-        tool=DeleteFileTool().definition, context=_context(tmp_path, policy=policy),
-    )
 
+def _symlink(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError as exc:
+        pytest.skip(f"环境不允许创建符号链接：{exc}")
+
+
+def _directory_link(link: Path, target: Path) -> None:
+    """Windows junction 不需要符号链接特权，必须覆盖真实的目录重定向。"""
+    if os.name != "nt":
+        link.symlink_to(target, target_is_directory=True)
+        return
+    executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    quoted_link, quoted_target = str(link).replace("'", "''"), str(target).replace("'", "''")
+    result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command",
+                             f"New-Item -ItemType Junction -Path '{quoted_link}' -Target '{quoted_target}' -ErrorAction Stop | Out-Null"],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert link.is_junction()
+
+
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_project_recursive_delete_is_automatic(tmp_path: Path, access: str) -> None:
+    target = tmp_path / "temporary"
+    target.mkdir()
+    (target / "data.txt").write_text("data", encoding="utf-8")
+    check = _check(tmp_path, "delete_file", {"path": str(target), "recursive": True}, access=access)
+    assert check.decision == "allow" and check.request is None
+    assert check.metadata["delete_signature"]
+
+
+@pytest.mark.parametrize("access,decision", [("project", "ask"), ("full", "allow")])
+def test_external_recursive_delete_follows_folder_scope(tmp_path: Path, access: str, decision: str) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    (outside / "data.txt").write_text("data", encoding="utf-8")
+    check = _check(project, "delete_file", {"path": str(outside), "recursive": True}, access=access)
     assert check.decision == decision
-    if decision == "ask":
-        assert check.request is not None and check.request.kind == "file_edit"
-        assert "temporary.txt" in "\n".join(check.request.file_paths)
+    if check.request is not None:
+        assert check.request.directory_grants == [DirectoryGrant(str(outside), "write")]
+        assert "data.txt" in check.request.details
 
 
-@pytest.mark.parametrize("policy", ["default", "acceptEdits", "bypass"])
-@pytest.mark.parametrize("outcome", ["allow_session", "allow_project"])
-def test_recursive_delete_always_requires_once_only_approval(tmp_path: Path, policy: str, outcome: str) -> None:
-    directory = tmp_path / "temporary"
-    directory.mkdir()
-    (directory / "first.txt").write_text("first", encoding="utf-8")
-    (directory / "second.txt").write_text("second", encoding="utf-8")
-    storage = PermissionStorage(project_rules_path=tmp_path / ".lancher" / "permissions.yaml")
-    storage.add_session_rule("DeleteFile(*)", "allow", match_kind="glob")
-    before = storage.rules_for_scope("session")
-    engine = PermissionEngine(storage)
-
-    check = engine.evaluate(
-        call=_call("delete_file", {"path": "temporary", "recursive": True}),
-        tool=DeleteFileTool().definition, context=_context(tmp_path, policy=policy),
-    )
-
-    assert check.decision == "ask" and check.request is not None
-    assert check.request.metadata["allow_once_only"] is True
-    assert check.request.session_rule is None and check.request.project_rule is None
-    preview = check.request.details + "\n" + "\n".join(check.request.file_paths)
-    assert "first.txt" in preview and "second.txt" in preview
-    engine.apply_resolution(check.request, PermissionResolution(check.request.request_id, outcome))  # type: ignore[arg-type]
-    assert storage.rules_for_scope("session") == before
-    assert storage.rules_for_scope("project") == []
-    assert not (tmp_path / ".lancher" / "permissions.yaml").exists()
-
-
-@pytest.mark.parametrize("relative", [".", ".git", ".lancher/sessions/" + "a" * 32 + "/events.jsonl"])
-@pytest.mark.parametrize("policy", ["default", "acceptEdits", "bypass"])
-def test_delete_cannot_remove_project_or_control_records(tmp_path: Path, relative: str, policy: str) -> None:
-    (tmp_path / ".git").mkdir()
+@pytest.mark.parametrize("access", ["project", "full"])
+@pytest.mark.parametrize("relative", [".", ".lancher/sessions/" + "a" * 32 + "/events.jsonl"])
+def test_project_root_and_session_records_are_protected_in_both_modes(tmp_path: Path, access: str, relative: str) -> None:
     record = tmp_path / ".lancher" / "sessions" / ("a" * 32) / "events.jsonl"
     record.parent.mkdir(parents=True)
     record.write_text("record", encoding="utf-8")
-
-    check = PermissionEngine().evaluate(
-        call=_call("delete_file", {"path": relative, "recursive": True}),
-        tool=DeleteFileTool().definition, context=_context(tmp_path, policy=policy),
-    )
-
+    check = _check(tmp_path, "delete_file", {"path": relative, "recursive": True}, access=access)
     assert check.decision == "deny"
     assert record.read_text(encoding="utf-8") == "record"
 
 
-@pytest.mark.parametrize("command", [
-    'Write-Output "format"', 'Write-Output "a > b"',
-    "Remove-Item -LiteralPath temporary.txt", "Write-Output ready\nRemove-Item temporary.txt",
-])
-def test_normal_delete_and_quoted_text_are_approvable(tmp_path: Path, command: str) -> None:
-    check = _command_check(PermissionEngine(), tmp_path, command)
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_git_metadata_regular_delete_is_allowed(tmp_path: Path, access: str) -> None:
+    target = tmp_path / ".git" / "temporary"
+    target.parent.mkdir()
+    target.write_text("data", encoding="utf-8")
+    assert _check(tmp_path, "delete_file", {"path": str(target)}, access=access).decision == "allow"
+    assert _check(tmp_path, "run_command", {"command": _shell_delete(target, recursive=False)}, access=access).decision == "allow"
 
+
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_ordinary_git_reset_clean_checkout_restore_can_execute(tmp_path: Path, access: str) -> None:
+    for command in ("git reset --hard", "git clean -fd", "git checkout -- data.txt", "git restore --source HEAD data.txt"):
+        assert _check(tmp_path, "run_command", {"command": command}, access=access).decision == "allow"
+
+
+@pytest.mark.parametrize("access", ["project", "full"])
+@pytest.mark.parametrize("command", ["diskpart", "mkfs.ext4 /dev/sda"])
+def test_disk_destruction_still_hard_denied(tmp_path: Path, access: str, command: str) -> None:
+    check = _check(tmp_path, "run_command", {"command": command}, access=access)
+    assert check.decision == "deny" and check.reason_code == "permission_blacklist_denied"
+
+
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_whole_project_wildcard_delete_hard_denied(tmp_path: Path, access: str) -> None:
+    command = (f'Remove-Item "{tmp_path.as_posix()}/*" -Recurse' if os.name == "nt"
+               else f'rm -rf "{tmp_path.as_posix()}"/*')
+    check = _check(tmp_path, "run_command", {"command": command}, access=access)
+    assert check.decision == "deny" and check.reason_code == "delete_root_protected"
+
+
+def test_extension_glob_delete_is_not_mistaken_for_whole_project(tmp_path: Path) -> None:
+    command = 'Remove-Item "*.txt"' if os.name == "nt" else 'rm *.txt'
+    assert _check(tmp_path, "run_command", {"command": command}, access="full").decision == "allow"
+
+
+def test_empty_directory_shell_remove_does_not_require_native_recursive_argument(tmp_path: Path) -> None:
+    target = tmp_path / "empty"
+    target.mkdir()
+    command = f'Remove-Item -LiteralPath "{target.as_posix()}"' if os.name == "nt" else f'rmdir "{target.as_posix()}"'
+    assert _check(tmp_path, "run_command", {"command": command}).decision == "allow"
+
+
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_shell_known_write_to_session_control_records_cannot_bypass_protection(tmp_path: Path, access: str) -> None:
+    record = tmp_path / ".lancher" / "sessions" / ("a" * 32) / "events.jsonl"
+    command = f'Write-Output hello > "{record.as_posix()}"' if os.name == "nt" else f'printf hello > "{record.as_posix()}"'
+    check = _check(tmp_path, "run_command", {"command": command}, access=access)
+    assert check.decision == "deny" and check.reason_code == "session_records_protected"
+
+
+def test_long_command_detects_external_access_beyond_ui_preview(tmp_path: Path) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    quoted = "ordinary " * 700
+    command = (f'Write-Output "{quoted}"; Get-Content "{outside.as_posix()}/data.txt"' if os.name == "nt"
+               else f'printf "{quoted}"; cat "{outside.as_posix()}/data.txt"')
+    check = _check(project, "run_command", {"command": command})
     assert check.decision == "ask" and check.request is not None
     assert check.request.command == command
+    assert check.request.directory_grants == [DirectoryGrant(str(outside), "read")]
 
 
-@pytest.mark.parametrize("separator", ["; ", "\n", " | "])
-def test_command_glob_does_not_authorize_unmatched_subcommand(tmp_path: Path, separator: str) -> None:
-    storage = PermissionStorage()
-    storage.add_session_rule("RunCommand(git *)", "allow", match_kind="glob")
-    engine = PermissionEngine(storage)
-
-    assert _command_check(engine, tmp_path, "git status").decision == "allow"
-    assert _command_check(engine, tmp_path, f"git status{separator}Write-Output hello").decision == "ask"
-    storage.add_session_rule("RunCommand(Write-Output *)", "allow", match_kind="glob")
-    assert _command_check(engine, tmp_path, f"git status{separator}Write-Output hello").decision == "allow"
-
-
-@pytest.mark.parametrize("command", [
-    'powershell -Command "git status"', 'bash -c "git status"',
-    "$target = 'temporary.txt'; Remove-Item $target", "& $command",
-])
-@pytest.mark.parametrize("policy", ["default", "bypass"])
-def test_unknown_dynamic_or_nested_command_needs_once_only_approval(tmp_path: Path, command: str, policy: str) -> None:
-    storage = PermissionStorage()
-    storage.add_session_rule("RunCommand(*)", "allow", match_kind="glob")
-
-    check = _command_check(PermissionEngine(storage), tmp_path, command, policy=policy)
-
+def test_file_symlink_to_external_requires_real_target_read_grant(tmp_path: Path) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    target = outside / "data.txt"
+    target.write_text("data", encoding="utf-8")
+    link = project / "link.txt"
+    _symlink(link, target)
+    check = _check(project, "read_file", {"path": str(link)})
     assert check.decision == "ask" and check.request is not None
-    assert check.request.metadata["allow_once_only"] is True
-    assert check.request.session_rule is None and check.request.project_rule is None
+    assert check.request.directory_grants == [DirectoryGrant(str(outside), "read")]
+    assert str(target) in check.request.details
 
 
-@pytest.mark.parametrize("template", [
-    'Get-Content "{outside}"', 'Write-Output hello > "{outside}"',
-    'Remove-Item -LiteralPath "{outside}"', 'Set-Location "{outside}"; Get-Content data.txt',
-])
-@pytest.mark.parametrize("policy", ["default", "bypass"])
-def test_command_body_paths_and_redirections_respect_project_root(tmp_path: Path, template: str, policy: str) -> None:
-    outside = (tmp_path.parent / "outside").as_posix()
-    command = template.format(outside=outside)
-
-    check = _command_check(PermissionEngine(), tmp_path, command, policy=policy)
-
-    assert check.decision == "deny"
-    assert check.reason_code == "path_outside_project"
+def test_delete_project_symlink_only_deletes_link_without_external_approval(tmp_path: Path) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    target = outside / "data.txt"
+    target.write_text("data", encoding="utf-8")
+    link = project / "link.txt"
+    _symlink(link, target)
+    check = _check(project, "delete_file", {"path": str(link)})
+    assert check.decision == "allow"
+    assert check.metadata["path_accesses"][0]["path"] == str(link)
 
 
-def test_changed_command_directory_updates_relative_path_resolution(tmp_path: Path) -> None:
-    (tmp_path / "nested").mkdir()
-
-    check = _command_check(PermissionEngine(), tmp_path, "Set-Location ..; Get-Content ../outside.txt", cwd="nested")
-
-    assert check.decision == "deny" and check.reason_code == "path_outside_project"
-
-
-def test_long_command_is_analyzed_beyond_display_prefix(tmp_path: Path) -> None:
-    command = 'Write-Output "' + "ordinary " * 700 + '"; Get-Content ../outside.txt'
-
-    check = _command_check(PermissionEngine(), tmp_path, command)
-
-    assert check.decision == "deny" and check.reason_code == "path_outside_project"
-
-
-def test_saved_shell_approval_preserves_context_and_exact_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / "nested").mkdir()
-    path = tmp_path / ".lancher" / "permissions.yaml"
-    storage = PermissionStorage(project_rules_path=path)
-    engine = PermissionEngine(storage)
-    command = "Write-Output 'a  B'"
-    check = _command_check(engine, tmp_path, command, cwd="nested")
-    assert check.request is not None
-    assert check.request.metadata["cwd"] == str((tmp_path / "nested").resolve())
-    engine.apply_resolution(check.request, PermissionResolution(check.request.request_id, "allow_project"))
-
-    restored = PermissionStorage(project_rules_path=path)
-    rule = restored.rules_for_scope("project")[0]
-    assert rule.command_cwd == str((tmp_path / "nested").resolve())
-    assert rule.command_shell
-    engine = PermissionEngine(restored)
-    assert _command_check(engine, tmp_path, command, cwd="nested").decision == "allow"
-    assert _command_check(engine, tmp_path, command, cwd=".").decision == "ask"
-    assert _command_check(engine, tmp_path, "Write-Output 'a b'", cwd="nested").decision == "ask"
-    monkeypatch.setattr("lancher_code.permissions.rules.current_command_shell", lambda: "other-shell")
-    assert _command_check(engine, tmp_path, command, cwd="nested").decision == "ask"
-
-
-def test_legacy_exact_shell_allow_does_not_reuse_unbound_approval(tmp_path: Path) -> None:
+def test_directory_grant_restoration_does_not_follow_redirected_grant_root(tmp_path: Path) -> None:
+    project, authorized, other = tmp_path / "project", tmp_path / "authorized", tmp_path / "other"
+    project.mkdir(); authorized.mkdir(); other.mkdir()
+    grant = DirectoryGrant(str(authorized), "write")
+    authorized.rmdir()
+    _symlink(authorized, other, directory=True)
     storage = PermissionStorage()
-    storage.replace_session_rules([PermissionRule("RunCommand(git status)", "allow", "session")])
-
-    assert _command_check(PermissionEngine(storage), tmp_path, "git status").decision == "ask"
+    storage.replace_session_grants([grant])
+    check = _check(project, "write_file", {"path": str(authorized / "file.txt"), "content": "data"}, storage=storage)
+    assert check.decision == "ask"
+    assert storage.session_grants == [grant]
 
 
 @pytest.mark.asyncio
-async def test_approved_single_file_delete_executes(tmp_path: Path) -> None:
-    target = tmp_path / "temporary.txt"
-    target.write_text("temporary", encoding="utf-8")
+@pytest.mark.parametrize("outcome", ["allow_once", "allow_session"])
+async def test_approved_external_write_executes_and_only_session_option_retains_grant(tmp_path: Path, outcome: str) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    storage = PermissionStorage()
     requests = []
-
     async def approve(request):
         requests.append(request)
-        return PermissionResolution(request.request_id, "allow_once")
-
-    result = await ToolExecutor(create_default_tool_registry(), cwd=tmp_path).execute_calls(
-        [_call("delete_file", {"path": "temporary.txt"})], permission_resolver=approve,
-    )
-
-    assert len(requests) == 1
-    assert not result[0].is_error
-    assert not target.exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["allow_session", "allow_project"])
-async def test_changed_delete_target_does_not_delete_or_save_approval(tmp_path: Path, outcome: str) -> None:
-    target = tmp_path / "temporary.txt"
-    target.write_text("old", encoding="utf-8")
-    storage = PermissionStorage(project_rules_path=tmp_path / ".lancher" / "permissions.yaml")
-
-    async def approve(request):
-        target.write_text("replacement is a different version", encoding="utf-8")
         return PermissionResolution(request.request_id, outcome)
-
-    result = await ToolExecutor(create_default_tool_registry(), cwd=tmp_path, permission_engine=PermissionEngine(storage)).execute_calls(
-        [_call("delete_file", {"path": "temporary.txt"})], permission_resolver=approve,
-    )
-
-    assert result[0].is_error
-    assert result[0].error_code in {"permission_target_changed", "delete_target_changed", "resource_target_changed"}
-    assert target.read_text(encoding="utf-8") == "replacement is a different version"
-    assert storage.rules_for_scope("session") == [] and storage.rules_for_scope("project") == []
-    assert not (tmp_path / ".lancher" / "permissions.yaml").exists()
+    result = (await ToolExecutor(create_default_tool_registry(), cwd=project, permission_engine=PermissionEngine(storage)).execute_calls(
+        [_call("write_file", {"path": str(outside / "created.txt"), "content": "created"})], permission_resolver=approve))[0]
+    assert not result.is_error and len(requests) == 1
+    assert (outside / "created.txt").read_text(encoding="utf-8") == "created"
+    assert storage.session_grants == ([DirectoryGrant(str(outside), "write")] if outcome == "allow_session" else [])
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop", ["cancel", "supersede"])
-async def test_stop_during_delete_approval_keeps_target_and_rules(tmp_path: Path, stop: str) -> None:
-    target = tmp_path / "temporary.txt"
-    target.write_text("keep", encoding="utf-8")
-    storage = PermissionStorage()
-    token = CancellationToken()
-    interrupted = False
-
-    async def approve(request):
-        nonlocal interrupted
-        if stop == "cancel":
-            token.cancel()
-        else:
-            interrupted = True
-        return PermissionResolution(request.request_id, "allow_session")
-
-    operation = ToolExecutor(create_default_tool_registry(), cwd=tmp_path, permission_engine=PermissionEngine(storage)).execute_calls(
-        [_call("delete_file", {"path": "temporary.txt"})], permission_resolver=approve,
-        cancellation_token=token, should_interrupt=lambda: interrupted,
-    )
-    if stop == "cancel":
-        with pytest.raises(asyncio.CancelledError):
-            await operation
-    else:
-        assert (await operation)[0].error_code == "steering_superseded"
-    assert target.read_text(encoding="utf-8") == "keep"
-    assert storage.rules_for_scope("session") == []
+async def test_project_recursive_delete_executes_without_resolver(tmp_path: Path) -> None:
+    target = tmp_path / "temporary"
+    target.mkdir()
+    (target / "data.txt").write_text("data", encoding="utf-8")
+    result = (await ToolExecutor(create_default_tool_registry(), cwd=tmp_path).execute_calls(
+        [_call("delete_file", {"path": str(target), "recursive": True})]))[0]
+    assert not result.is_error and not target.exists()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["replace_target", "cancel"])
-async def test_delete_rechecks_after_started_callback_without_saving_stale_grant(tmp_path: Path, change: str) -> None:
-    target = tmp_path / "temporary.txt"
-    target.write_text("keep", encoding="utf-8")
+async def test_external_delete_changed_during_approval_stops_without_storing_grant(tmp_path: Path) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    target = outside / "temporary.txt"
+    target.write_text("old", encoding="utf-8")
     storage = PermissionStorage()
-    token = CancellationToken()
-
     async def approve(request):
+        target.write_text("replacement version", encoding="utf-8")
         return PermissionResolution(request.request_id, "allow_session")
+    result = (await ToolExecutor(create_default_tool_registry(), cwd=project, permission_engine=PermissionEngine(storage)).execute_calls(
+        [_call("delete_file", {"path": str(target)})], permission_resolver=approve))[0]
+    assert result.is_error and result.error_code in {"permission_target_changed", "delete_target_changed", "resource_target_changed"}
+    assert target.read_text(encoding="utf-8") == "replacement version"
+    assert storage.session_grants == []
 
-    async def started(call):
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["cancel", "supersede"])
+async def test_external_approval_interrupted_keeps_target_and_does_not_grant(tmp_path: Path, change: str) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    target = outside / "temporary.txt"
+    target.write_text("keep", encoding="utf-8")
+    storage, token = PermissionStorage(), CancellationToken()
+    superseded = False
+    async def approve(request):
+        nonlocal superseded
         if change == "cancel":
             token.cancel()
         else:
-            target.write_text("new replacement", encoding="utf-8")
-
-    operation = ToolExecutor(create_default_tool_registry(), cwd=tmp_path, permission_engine=PermissionEngine(storage)).execute_calls(
-        [_call("delete_file", {"path": "temporary.txt"})], permission_resolver=approve,
-        cancellation_token=token, on_call_started=started,
-    )
+            superseded = True
+        return PermissionResolution(request.request_id, "allow_session")
+    operation = ToolExecutor(create_default_tool_registry(), cwd=project, permission_engine=PermissionEngine(storage)).execute_calls(
+        [_call("delete_file", {"path": str(target)})], permission_resolver=approve,
+        cancellation_token=token, should_interrupt=lambda: superseded)
     if change == "cancel":
         with pytest.raises(asyncio.CancelledError):
             await operation
     else:
-        result = (await operation)[0]
-        assert result.is_error
-        assert result.error_code in {"permission_target_changed", "delete_target_changed", "resource_target_changed"}
-    assert target.exists()
-    assert storage.rules_for_scope("session") == []
+        assert (await operation)[0].error_code == "steering_superseded"
+    assert target.read_text(encoding="utf-8") == "keep" and storage.session_grants == []
+
+
+@pytest.mark.asyncio
+async def test_approval_callback_cannot_redirect_link_to_a_new_outside_target(tmp_path: Path) -> None:
+    project, first, second = tmp_path / "project", tmp_path / "first", tmp_path / "second"
+    project.mkdir(); first.mkdir(); second.mkdir()
+    (first / "file.txt").write_text("first", encoding="utf-8")
+    (second / "file.txt").write_text("second", encoding="utf-8")
+    link = project / "link.txt"
+    _symlink(link, first / "file.txt")
+    storage = PermissionStorage()
+    async def approve(request):
+        link.unlink()
+        link.symlink_to(second / "file.txt")
+        return PermissionResolution(request.request_id, "allow_session")
+    result = (await ToolExecutor(create_default_tool_registry(), cwd=project, permission_engine=PermissionEngine(storage)).execute_calls(
+        [_call("read_file", {"path": str(link)})], permission_resolver=approve))[0]
+    assert result.is_error and result.error_code in {"permission_target_changed", "resource_target_changed"}
+    assert storage.session_grants == []
+
+
+@pytest.mark.asyncio
+async def test_project_write_argument_changed_after_started_callback_is_stopped(tmp_path: Path) -> None:
+    async def change_target(call):
+        call.arguments["path"] = "replacement.txt"
+    result = (await ToolExecutor(create_default_tool_registry(), cwd=tmp_path).execute_calls(
+        [_call("write_file", {"path": "original.txt", "content": "must not write"})], on_call_started=change_target))[0]
+    assert result.error_code in {"resource_target_changed", "permission_target_changed"}
+    assert not (tmp_path / "original.txt").exists() and not (tmp_path / "replacement.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -305,11 +299,8 @@ async def test_cancelled_tool_cleanup_result_preserves_partial_effects(tmp_path:
     token = CancellationToken()
     context = _context(tmp_path)
     context.cancellation_token = token
-    expected = ToolExecutionResult(
-        "partial-call", "delete_file", is_error=True, error_code="delete_interrupted",
-        metadata={"partial": True, "deleted_count": 1, "automatic_retry": False},
-    )
-
+    expected = ToolExecutionResult("partial-call", "delete_file", is_error=True, error_code="delete_interrupted",
+        metadata={"partial": True, "deleted_count": 1, "automatic_retry": False})
     async def cleanup_after_partial_commit():
         if stop == "token":
             token.cancel()
@@ -317,111 +308,131 @@ async def test_cancelled_tool_cleanup_result_preserves_partial_effects(tmp_path:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             return expected
-
-    actual = await ToolExecutor._await_cancelable(cleanup_after_partial_commit(), context,
-                                                 timeout=0.01 if stop == "timeout" else None)
-
-    assert actual is expected
-    assert actual.metadata["partial"] is True
+    actual = await ToolExecutor._await_cancelable(cleanup_after_partial_commit(), context, timeout=0.01 if stop == "timeout" else None)
+    assert actual is expected and actual.metadata["partial"] is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["token", "task"])
-async def test_recursive_delete_cancel_reports_deleted_files_through_executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str) -> None:
+async def test_recursive_delete_cancel_reports_partial_paths_through_executor(tmp_path: Path, monkeypatch, stop: str) -> None:
     from lancher_code.filesystem import deletion
-
-    directory = tmp_path / "temporary"
-    directory.mkdir()
-    (directory / "first.txt").write_text("first", encoding="utf-8")
-    (directory / "second.txt").write_text("second", encoding="utf-8")
-    token = CancellationToken()
-    storage = PermissionStorage()
-    reported = []
-    original_unlink = Path.unlink
-    original_sleep = asyncio.sleep
+    target = tmp_path / "temporary"
+    target.mkdir()
+    (target / "first.txt").write_text("first", encoding="utf-8")
+    (target / "second.txt").write_text("second", encoding="utf-8")
+    token, reported = CancellationToken(), []
+    original_unlink, original_sleep = Path.unlink, asyncio.sleep
     parent_task = None
-
     def cancel_after_unlink(path, *args, **kwargs):
         original_unlink(path, *args, **kwargs)
-        if path.parent == directory:
+        if path.parent == target:
             token.cancel()
             if stop == "task":
                 parent_task.cancel()
-
     async def pause_at_next_commit(delay, *args, **kwargs):
         if token.is_cancelled:
-            # 让执行器的停止监听先醒来，确保覆盖取消收尾结果的返回路径。
             await asyncio.Event().wait()
         else:
             await original_sleep(delay, *args, **kwargs)
-
     monkeypatch.setattr(Path, "unlink", cancel_after_unlink)
     monkeypatch.setattr(deletion.asyncio, "sleep", pause_at_next_commit)
-
-    async def approve(request):
-        return PermissionResolution(request.request_id, "allow_session")
-
     async def report(result):
         reported.append(result)
-
-    parent_task = asyncio.create_task(ToolExecutor(create_default_tool_registry(), cwd=tmp_path,
-                                 permission_engine=PermissionEngine(storage)).execute_calls(
-        [_call("delete_file", {"path": "temporary", "recursive": True})],
-        permission_resolver=approve, cancellation_token=token, on_result=report,
-    ))
+    parent_task = asyncio.create_task(ToolExecutor(create_default_tool_registry(), cwd=tmp_path).execute_calls(
+        [_call("delete_file", {"path": str(target), "recursive": True})], cancellation_token=token, on_result=report))
     if stop == "task":
         with pytest.raises(asyncio.CancelledError):
             await parent_task
         results = reported
     else:
         results = await parent_task
-
     result = results[0]
-    assert result.error_code == "delete_interrupted"
-    assert result.metadata["partial"] is True
-    assert result.metadata["deleted_count"] == 1
-    assert result.metadata["automatic_retry"] is False
-    assert len(list(directory.iterdir())) == 1
-    assert all(not Path(path).exists() for path in result.metadata["deleted_paths"])
-    assert reported == [result]
-    assert storage.rules_for_scope("session") == []
+    assert result.error_code == "delete_interrupted" and result.metadata["partial"] is True
+    assert result.metadata["deleted_count"] == 1 and result.metadata["automatic_retry"] is False
+    assert len(list(target.iterdir())) == 1 and reported == [result]
 
 
 @pytest.mark.asyncio
-async def test_successful_tool_retains_success_when_saving_grant_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    storage = PermissionStorage(project_rules_path=tmp_path / ".lancher" / "permissions.yaml")
-
-    def fail_to_save(path, rules):
-        raise PermissionRuleFileError("模拟授权记录保存失败")
-
-    monkeypatch.setattr(storage, "_write_rules", fail_to_save)
-
-    async def approve(request):
-        return PermissionResolution(request.request_id, "allow_project")
-
-    result = (await ToolExecutor(create_default_tool_registry(), cwd=tmp_path,
-                                permission_engine=PermissionEngine(storage)).execute_calls(
-        [_call("write_file", {"path": "created.txt", "content": "committed"})],
-        permission_resolver=approve,
-    ))[0]
-
+@pytest.mark.parametrize("name", ["glob", "grep"])
+async def test_project_search_skips_outside_junction_but_direct_link_path_requests_permission(tmp_path: Path, name: str) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    (project / "local.txt").write_text("local data", encoding="utf-8")
+    secret = outside / "secret.txt"
+    secret.write_text("private-secret-marker never-on-project", encoding="utf-8")
+    link = project / "linked-outside"
+    _directory_link(link, outside)
+    args = {"pattern": "private-secret-marker" if name == "grep" else "**/*.txt"}
+    result = (await ToolExecutor(create_default_tool_registry(), cwd=project).execute_calls([_call(name, args)]))[0]
     assert not result.is_error
-    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "committed"
-    assert "模拟授权记录保存失败" in result.metadata["permission_rule_save_error"]
-    assert "操作已完成" in result.content
-    assert storage.rules_for_scope("project") == []
+    assert "private-secret-marker never-on-project" not in result.content and "secret.txt" not in result.content
+    if name == "grep":
+        assert result.metadata["matches"] == []
+    direct = _check(project, name, {**args, "path": str(link)})
+    assert direct.decision == "ask" and direct.request is not None
+    assert direct.request.directory_grants == [DirectoryGrant(str(outside), "read")]
 
 
 @pytest.mark.asyncio
-async def test_accept_edits_rechecks_resource_path_after_started_callback(tmp_path: Path) -> None:
-    async def change_target(call):
-        call.arguments["path"] = "replacement.txt"
+async def test_directory_junction_retargeted_during_approval_stops_without_grant(tmp_path: Path) -> None:
+    project, first, second = tmp_path / "project", tmp_path / "first", tmp_path / "second"
+    project.mkdir(); first.mkdir(); second.mkdir()
+    (first / "data.txt").write_text("first", encoding="utf-8")
+    (second / "data.txt").write_text("second", encoding="utf-8")
+    link = project / "linked"
+    _directory_link(link, first)
+    storage = PermissionStorage()
+    async def approve(request):
+        link.rmdir() if os.name == "nt" else link.unlink()
+        _directory_link(link, second)
+        return PermissionResolution(request.request_id, "allow_session")
+    result = (await ToolExecutor(create_default_tool_registry(), cwd=project, permission_engine=PermissionEngine(storage)).execute_calls(
+        [_call("read_file", {"path": str(link / "data.txt")})], permission_resolver=approve))[0]
+    assert result.is_error and result.error_code in {"permission_target_changed", "resource_target_changed"}
+    assert storage.session_grants == []
+    assert (first / "data.txt").read_text(encoding="utf-8") == "first"
+    assert (second / "data.txt").read_text(encoding="utf-8") == "second"
 
-    result = (await ToolExecutor(create_default_tool_registry(), cwd=tmp_path).execute_calls(
-        [_call("write_file", {"path": "original.txt", "content": "must not write"})],
-        permission_policy="acceptEdits", on_call_started=change_target,
-    ))[0]
 
-    assert result.error_code == "resource_target_changed"
-    assert not (tmp_path / "original.txt").exists()
-    assert not (tmp_path / "replacement.txt").exists()
+def test_recursive_shell_delete_junction_requires_outside_target_scope(tmp_path: Path) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    project.mkdir(); outside.mkdir()
+    (outside / "data.txt").write_text("data", encoding="utf-8")
+    link = project / "linked"
+    _directory_link(link, outside)
+    structured = _check(project, "delete_file", {"path": str(link), "recursive": True})
+    assert structured.decision == "allow"
+    shell = _check(project, "run_command", {"command": _shell_delete(link)})
+    assert shell.decision == "ask" and shell.request is not None
+    assert shell.request.directory_grants == [DirectoryGrant(str(outside), "write")]
+    assert any(item["operation"] == "delete_link_target" for item in shell.metadata["path_accesses"])
+
+
+@pytest.mark.parametrize("pattern", ["?*", "*?", "*?*", "?**"])
+@pytest.mark.parametrize("protected", ["project", "volume", "home"])
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_equivalent_all_name_patterns_cannot_recursively_delete_protected_roots(tmp_path: Path, pattern: str, protected: str, access: str) -> None:
+    target = {"project": tmp_path, "volume": Path(tmp_path.anchor), "home": Path.home().resolve()}[protected]
+    wildcard = target / pattern
+    command = f'Remove-Item "{wildcard.as_posix()}" -Recurse' if os.name == "nt" else f'rm -r "{wildcard.as_posix()}"'
+    check = _check(tmp_path, "run_command", {"command": command}, access=access)
+    assert check.decision == "deny"
+    assert check.reason_code in {"delete_root_protected", "delete_volume_root_protected", "delete_home_protected"}
+
+
+@pytest.mark.parametrize("pattern", ["*.txt", "?abc*"])
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_targeted_name_patterns_are_allowed_in_project_root(tmp_path: Path, pattern: str, access: str) -> None:
+    wildcard = tmp_path / pattern
+    command = f'Remove-Item "{wildcard.as_posix()}" -Recurse' if os.name == "nt" else f'rm -r "{wildcard.as_posix()}"'
+    assert _check(tmp_path, "run_command", {"command": command}, access=access).decision == "allow"
+
+
+@pytest.mark.parametrize("pattern", ["?*", "*?", "*?*", "?**"])
+@pytest.mark.parametrize("access", ["project", "full"])
+def test_equivalent_all_name_patterns_are_allowed_for_normal_subdirectories(tmp_path: Path, pattern: str, access: str) -> None:
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    wildcard = ordinary / pattern
+    command = f'Remove-Item "{wildcard.as_posix()}" -Recurse' if os.name == "nt" else f'rm -r "{wildcard.as_posix()}"'
+    assert _check(tmp_path, "run_command", {"command": command}, access=access).decision == "allow"

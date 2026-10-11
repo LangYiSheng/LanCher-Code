@@ -7,7 +7,14 @@ import asyncio
 WorkPhase = Literal["discuss", "plan", "execute"]
 
 
-PermissionPolicy = Literal["default", "acceptEdits", "bypass"]
+ExecutionAccess = Literal["project", "full"]
+AccessMode = Literal["read_only", "project", "full"]
+
+
+def effective_access_mode(work_phase: WorkPhase, execution_access: ExecutionAccess) -> AccessMode:
+    """讨论和计划强制只读，执行权限单独保存，返回执行时恢复。"""
+    validate_runtime_axes(work_phase, execution_access)
+    return "read_only" if work_phase in {"discuss", "plan"} else execution_access
 
 
 class CancellationToken:
@@ -25,10 +32,10 @@ class CancellationToken:
         await self._event.wait()
 
 
-def validate_runtime_axes(work_phase: WorkPhase, permission_policy: PermissionPolicy) -> tuple[WorkPhase, PermissionPolicy]:
-    """校验独立的工作阶段与权限策略。"""
+def validate_runtime_axes(work_phase: WorkPhase, execution_access: ExecutionAccess) -> tuple[WorkPhase, ExecutionAccess]:
+    """校验工作阶段和返回执行阶段时使用的访问范围。"""
     if work_phase not in {"discuss", "plan", "execute"}:
         raise ValueError("工作阶段无效。")
-    if permission_policy not in {"default", "acceptEdits", "bypass"}:
-        raise ValueError("权限策略无效。")
-    return work_phase, permission_policy
+    if execution_access not in {"project", "full"}:
+        raise ValueError("执行访问范围必须为 project 或 full。旧权限策略不再支持。")
+    return work_phase, execution_access

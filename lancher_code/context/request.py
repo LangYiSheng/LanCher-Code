@@ -51,7 +51,7 @@ def prepare_request(*, config: ProviderConfig, context: PromptContext,
     messages = project_historical_tool_exchanges(projected, protocol=config.protocol, model=config.model)
     request = ChatRequest(model=config.model, system=system, messages=messages, tools=emitted_tools,
                        allow_tool_calls=allow_tool_calls, thinking=thinking, work_phase=context.work_phase,
-                       permission_policy=context.permission_policy, session_id=context.session_id,
+                       execution_access=context.execution_access, session_id=context.session_id,
                         max_output_tokens=output_tokens, experimental_mcp_tool_append=experimental,
                         tool_updates=updates, prompt_cache_enabled=(experimental or config.protocol == 'claude'
                         and urlsplit(config.base_url).hostname == 'api.anthropic.com'))

@@ -75,7 +75,7 @@ def unique_json_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-EVENT_FORMAT_VERSION = 2
+EVENT_FORMAT_VERSION = 3
 
 
 class UnsupportedSessionFormatError(SessionRepositoryError):

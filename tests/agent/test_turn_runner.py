@@ -847,7 +847,7 @@ async def test_remote_cancel_uses_invocation_fact_instead_of_running_label(
         StreamEvent(response_complete=True, kind="message_end")]])
     registry = ToolRegistry()
     registry.register(RemoteWriter())
-    session = SessionController(openai_provider_config, cwd=tmp_path, initial_permission_policy="bypass")
+    session = SessionController(openai_provider_config, cwd=tmp_path, initial_execution_access="full")
     runner = TurnRunner(provider, session, registry, ToolExecutor(registry, cwd=tmp_path))
     emit = runner._emit
 

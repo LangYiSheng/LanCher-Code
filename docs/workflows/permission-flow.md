@@ -1,98 +1,74 @@
-# 流程：工作阶段、权限判定与确认
+# 工作流：权限审批
 
-每次工具调用先受工作阶段限制，再使用权限策略和规则判断是否需要确认。切换阶段不会改变权限策略；`bypass` 和任何已保存的允许规则都不能突破阶段限制。
+权限分为三个有效模式：`read_only`（只读）、`project`（项目访问）、`full`（完全访问）。`runtime.execution_access` 只保存执行阶段选择 `project` 或 `full`；讨论和计划阶段强制只读，回到执行阶段恢复原选择。
 
-## 两个独立维度
-
-| 工作阶段 `work_phase` | 可用能力 |
-|---|---|
-| `discuss`（讨论） | 原生只读调查工具、当前 Session workspace 文件读写，以及明确声明 `readOnlyHint=true` 的 MCP 工具 |
-| `plan`（计划） | 讨论阶段的能力，加 `write_plan_file` 写入专用计划文件 |
-| `execute`（执行） | 已注册且在执行阶段可用的工具；实际调用仍受权限判定约束 |
-
-讨论和计划阶段都禁止通用 Shell，包括看似只读的 `git status`、`git diff` 等命令。MCP 的只读边界依赖服务端声明；未声明或声明为 `false` 的工具在这两个阶段不可用。`write_plan_file` 只在计划阶段可用，正文必须非空。
-
-| 权限策略 `permission_policy` | 原生读工具 / 只读 MCP | 原生写工具 | Shell / 其他 MCP |
+| 操作 | 只读 | 项目访问 | 完全访问 |
 |---|---|---|---|
-| `default` | allow | ask | ask |
-| `acceptEdits` | allow | allow | ask |
-| `bypass` | allow | allow | allow |
+| 项目内读取和搜索 | 自动允许 | 自动允许 | 自动允许 |
+| 项目外读取和搜索 | 审批 | 审批 | 自动允许 |
+| 普通写入和删除 | 拒绝 | 项目内自动，项目外审批 | 自动允许 |
+| 计划文件 | 仅计划阶段的专用 write_plan_file | 由工具阶段限制 | 由工具阶段限制 |
+| 明确只读的 Shell | 按读取范围检查 | 项目内自动，识别到外部访问则审批 | 自动允许 |
+| 其他 Shell、脚本、进程输入 | 拒绝 | 项目内自动，识别到外部访问则审批 | 自动允许 |
+| 声明只读的 MCP | 自动允许 | 自动允许 | 自动允许 |
+| 其他 MCP | 拒绝 | 本次审批 | 自动允许 |
+| 已识别的极危险操作 / 显式拒绝规则 | 拒绝 | 拒绝 | 拒绝 |
 
-此表只作用于已经通过阶段、路径、危险命令黑名单和规则判定的调用。当前 Session 的 `workspace/` 已批准内置文件工具读写，讨论和计划阶段也可写入此目录；普通源码和 Shell 仍按阶段与策略判断。显式规则按 session → project → user 的作用域优先级匹配，同一作用域取最后一条命中规则。
+## 决策和执行
 
-## 判定链
+`PermissionEngine.evaluate(call, tool, context)` 先检查阶段，再解析真实路径、Shell AST 和风险；极危险操作与拒绝规则优先，随后判断当前访问范围及会话目录授权。`ToolContext` 带有 `work_phase`、`execution_access`、`project_root`、`cwd`、会话目录和冻结审批目标。
 
 ```mermaid
 flowchart TD
-    A[工具调用 ToolCall] --> B{阶段允许此工具?}
-    B -->|否| D[拒绝 phase_disallowed]
-    B -->|是| C[构造匹配目标]
-    C -->|路径越界| E[拒绝 path_outside_project]
-    C --> F{命中 Shell 危险命令黑名单?}
-    F -->|是| G[拒绝 permission_blacklist_denied]
-    F -->|否| H{匹配权限规则}
-    H -->|allow| K[允许]
-    H -->|deny| I[拒绝 permission_rule_deny]
-    H -->|未命中| W{当前 Session workspace 文件写入?}
-    W -->|是| K
-    W -->|否| J{权限策略}
-    J -->|allow| K
-    J -->|ask| L[生成 PermissionRequest]
-    L --> M[聊天内联权限面板]
-    M --> N{等待决议}
-    N -->|用户拒绝| O[拒绝 permission_user_denied]
-    N -->|任务补充撤销审批| P[跳过 steering_superseded]
-    N -->|用户允许| Q{执行前仍有效?}
-    Q -->|否| P
-    Q -->|是| R[重检目标并执行，成功后保存精确规则]
+    A[工具调用] --> B{阶段允许且参数合法?}
+    B -->|否| X[拒绝]
+    B -->|是| C[解析真实路径和命令 AST]
+    C --> D{极危险或匹配拒绝规则?}
+    D -->|是| X
+    D -->|否| E{只读阶段写操作?}
+    E -->|是| X
+    E -->|否| M{非只读 MCP 且项目访问?}
+    M -->|是| O[用户仅本次审批]
+    O -->|拒绝| X
+    O -->|允许本次| P
+    M -->|否| F{完全访问 / 项目内 / 已有会话授权?}
+    F -->|是| P[获准]
+    F -->|否| Q[用户审批外部访问范围]
+    Q -->|拒绝| X
+    Q -->|允许本次或会话目录| P
+    P --> R[取得资源并复核目标/版本/取消状态]
+    R --> S[执行并记录实际结果]
+    S --> T[成功且选择会话范围时保存目录授权]
 ```
 
-工具搜索、执行器和权限引擎共享阶段边界。请求可以保留已发布的工具定义，模型请求当前阶段不可用的工具仍会被执行器拒绝。执行器在每组工具开始前及审批返回后检查取消或补充消息；已经启动的并行组收齐结果，尚未启动的后续组返回 `steering_superseded`。
+审批可选择 `allow_once`（精确绑定本次调用）、`allow_session`（请求明确列出的真实绝对目录范围）或 `deny`。目录范围显示读或读写、是否包含子目录；写授权包含读，但进入只读阶段仍不能写。远端 MCP 等没有目录范围的请求仅提供本次批准。授权保存在会话状态中，新会话清空，不写项目或用户配置。未来的模型自动审批本次没有实现。
 
-## 匹配目标与授权范围
+调用参数冻结后，执行器在审批后、资源等待后及开始执行前重新检查。删除清单逐项验证；目标变更、取消、失败均不保存新授权。已经产生的部分效果会记录，不自动重试。
 
-| 工具 | 新确认产生的精确规则 |
-|---|---|
-| `run_command` | 完整命令，例如 `RunCommand(git status --short)`；保留大小写及命令内部空白，绑定 command_cwd / command_shell |
-| `delete_file` | 精确项目相对路径；目录须 recursive=true，清单与版本绑定本次批准 |
-| `read_file` / `write_file` / `edit_file` | 解析符号链接后的项目相对路径，按现有路径规范化规则比较 |
-| `write_plan_file` | 专用计划文件的项目相对路径 |
-| `glob` / `grep` | 分别为搜索模式、搜索范围 |
-| MCP 工具 | 完整可见名，例如 `mcp__github__get_issue`；授权该工具，不绑定某组参数 |
+## 路径、删除和 Shell
 
-新确认保存 `match_kind: exact`，字符 `*`、`?`、`[` 不会被当作授权通配符。不会把 `git status` 自动扩成 `RunCommand(git *)`。人工维护的 `match_kind: glob` 支持通配符；未带 `match_kind` 或使用 `legacy` 的规则被拒绝，并提示重新配置，原文件不改写。
+项目范围用规范化绝对路径和解析后的链接目标判断，避免字符串前缀误判。外部路径经批准或处于完全访问模式时，专用文件工具、查询与 Shell cwd 才能实际访问。硬链接、控制文件和变化中的目标仍受文件一致性守卫保护。
 
-## 确认与关闭
+项目内单文件及目录删除自动执行；目录必须显式 `recursive: true`。项目外删除按访问模式审批。项目根、磁盘根、系统关键目录、用户主目录和会话控制记录不能整体删除。`.git`、Git reset --hard / clean -fd、普通递归删除不再因名称永久拒绝。删除使用最多 10000 项的完整清单，链接只删除本体，不遍历其目标；超限不静默截断。取消或部分失败返回已删除项和 `automatic_retry=false`。
 
-`PermissionRequest` 包含 `request_id`、工具调用、`work_phase`、`permission_policy`、命令或文件差异预览、`session_rule` / `project_rule` 以及 `match_kind`。
+PowerShell 使用与执行一致的固定解析器，用户命令通过 stdin 传入解析辅助脚本；Bash/sh 使用 tree-sitter-bash。分析识别读、写、删除、cwd 与程序位置；可确定的外部数据访问参与审批，项目外安装的解释器位置不会单独触发审批。格式化、擦除磁盘、删除分区以及可确定的整体危险删除被拒绝。引号中的文字不是实际命令。
 
-```text
-ToolExecutor → PermissionEngine.evaluate → ask
-→ TurnRunner._request_permission 创建 Future
-→ permission_request_created → 聊天内联权限面板
-→ 用户选择 → resolve_permission_request 唤醒 Future
-→ 执行器重新检查取消、补充、资源、目标版本 → 执行工具成功 → apply_resolution
+无法完整分析的 Python、Node、npm、变量、循环、嵌套解释器以及超预算命令，在项目访问/完全访问模式下不因未知本身要求批准；已识别的外部范围和极危险操作仍生效。只读模式仅允许已经确认只读的 Shell。
+
+这是应用层检测式权限，未增加操作系统沙箱。项目内脚本动态访问外部目录可能无法提前识别；所有实际执行的进程均使用本机账号权限。MCP 的只读声明由服务器提供，目录边界不能约束远端行为。
+
+## 额外拒绝规则
+
+`PermissionStorage` 读取会话、项目和用户的额外拒绝规则。所有规则仅接受 `deny`，精确或 glob 匹配；可选 `command_cwd` / `command_shell` 必须成对填写。命令规则同时检查整体命令与各子命令。设置页没有永久允许选项。
+
+项目：`./.lancher/permissions.yaml`；用户：`~/.lancher/permissions.yaml`。
+
+```yaml
+format_version: 2
+rules:
+  - match: RunCommand(danger-tool *)
+    result: deny
+    match_kind: glob
 ```
 
-| 决议 | 本次调用 | 后续影响 |
-|---|---|---|
-| `allow_once` | 放行 | 不保存规则 |
-| `allow_session` | 放行 | 成功后保存会话精确规则，随 UUID Session 自动持久化 |
-| `allow_project` | 放行 | 成功后精确规则写入 `./.lancher/permissions.yaml` |
-| `deny` | 拒绝 | 返回 `permission_user_denied`，模型可调整策略 |
-| `superseded`（内部状态） | 跳过 | 不保存规则，返回 `steering_superseded` |
-
-提交“补充当前任务”立即撤销仍在等待的审批。`superseded` 不是用户可选按钮，也不表示用户拒绝；即使随后删除该补充，已撤销的审批仍不会执行或保存允许规则。旧面板的迟到决议返回 `False`。
-
-进程输入和转后台请求仅提供允许本次与拒绝，不生成 Session 或项目永久输入授权。任务窗口中用户实际点击和发送的控制操作则直接交给有归属检查的 Runtime；模型请求仍经过这条权限判定链。管理进程的停止、查询和等待不因切到讨论或计划阶段失去入口。
-
-目录删除、批量 Shell 删除和无法完整分析的 Shell 调用也只提供本次允许与拒绝，bypass 仍需确认。普通 Shell 删除可以批准；审批完整展示可确定目标，超长命令只折叠界面显示，按 D 查看完整原文。解析超预算时不会把已分析前缀当成完整授权。旧 Shell exact allow 若缺少 cwd/Shell 上下文不会自动复用，原规则文件保持不变。
-
-每个审批退出时发 `permission_request_closed`，用于移除内联面板；撤销的审批不发 `permission_request_resolved`。正常等待审批时输入区仍可用于补充或排队。
-
-## 中断与恢复
-
-- 取消任务会取消挂起的审批并暂停待处理队列；没有权限处理器时返回 `permission_confirmation_unavailable`。
-- 尚未启动的取消明确记录未执行；已开始的本地操作说明可能部分执行；已开始的远端写操作记录结果未知，先检查实际状态，不自动重试。
-- 当前 Session 事件格式 2 恢复时，所有待处理输入均为 `paused`。尚在生成的消息收拢为已取消；缺少结果的工具调用按批次补齐未知错误结果，不自动重放工具。
-- 恢复会话不会读取项目旧 `plan.md` 并把它当成已确认计划。执行计划使用当前会话的快照正文与摘要，阶段切换不附带权限升级。
+旧 `permission_policy` / `permission_mode`、旧执行策略值、旧权限文件和版本 2 会话均明确拒绝，报告文件位置并保留原文件，不迁移、映射或覆盖。当前会话事件版本为 3；上下文子格式仍为 2。

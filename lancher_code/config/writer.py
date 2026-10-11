@@ -54,7 +54,7 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
             "tool_loop_limit": config.runtime.tool_loop_limit,
             "unknown_tool_streak_limit": config.runtime.unknown_tool_streak_limit,
             "work_phase": config.runtime.work_phase,
-            "permission_policy": config.runtime.permission_policy,
+            "execution_access": config.runtime.execution_access,
             "experimental_mcp_tool_append": config.runtime.experimental_mcp_tool_append,
         },
         "execution": {

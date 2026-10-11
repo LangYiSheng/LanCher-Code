@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from lancher_code.contracts.control import CancellationToken
-from lancher_code.contracts.control import PermissionPolicy, WorkPhase
+from lancher_code.contracts.control import ExecutionAccess, WorkPhase
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.providers.models import ProviderProtocol
@@ -93,7 +93,7 @@ class ChatRequest:
     thinking: ThinkingConfig | None = None
     cancellation_token: CancellationToken | None = None
     work_phase: WorkPhase = "execute"
-    permission_policy: PermissionPolicy = "default"
+    execution_access: ExecutionAccess = "project"
     session_id: str | None = None
     turn_id: str | None = None
     message_id: str | None = None

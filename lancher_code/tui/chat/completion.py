@@ -72,7 +72,7 @@ class CompletionController:
                     mcp_choices=tuple((str(item["name"]), f'{item["name"]} · {item.get("state", "未知")}') for item in servers),
                     active_model_ref=self.runner.model_ref,
                     default_model_ref=self.runner.model_config.default_model if self.runner.model_config is not None else None,
-                    permission_policy=self.session.permission_policy,
+                    execution_access=self.session.execution_access,
                 )
             )
             if cursor_at_end and not composer.should_suppress_slash_menu()

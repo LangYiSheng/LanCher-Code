@@ -255,7 +255,7 @@ async def test_started_remote_write_stays_unknown_after_server_removed_and_cance
         call_index=0, provider_call_id='write-call', name_delta='mcp__demo__write', arguments_delta='{}')),
         StreamEvent(kind='message_end', response_complete=True)]
     runner, session, _provider = make_runner(tmp_path, openai_provider_config, [calls])
-    runner.set_permission_policy('bypass')
+    runner.set_execution_access('full')
     registry = runner._tool_registry
     registry.replace_deferred_server('demo', [RemoteWrite()], title='demo', description=None)
     task = asyncio.create_task(collect(runner, '执行远端写入'))

@@ -56,6 +56,9 @@ class ProcessTool:
         return ()
 
     async def execute(self, arguments: dict, context: ToolContext) -> ToolExecutionResult:
+        if self.name in {"process_write", "process_background"} and context.work_phase in {"discuss", "plan"}:
+            return build_tool_error(summary="进程操作失败", error_code="phase_disallowed",
+                                    error_message="只读阶段不能写入进程或转交后台运行。", tool_name=self.name)
         try:
             if context.execution_runtime is None or context.session_id is None:
                 raise ValueError("进程工具需要活动 Session。")

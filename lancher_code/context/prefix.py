@@ -11,6 +11,7 @@ from uuid import uuid4
 from lancher_code.context.models import ContextManagementState
 from lancher_code.context.prompt_models import PromptContext
 from lancher_code.context.prompts import build_deferred_tools_prompt, build_system_prompt
+from lancher_code.contracts.control import effective_access_mode
 from lancher_code.contracts.messages import ConversationMessage
 from lancher_code.contracts.tools import ToolDefinition, ToolPermissionMetadata
 
@@ -20,6 +21,9 @@ def stable_environment(context: PromptContext) -> str:
             '后续主机更新记录当前日期、阶段、权限和能力目录；同一字段以最新记录为准。\n'
             '旧能力目录与技能正文只能作为历史；被撤销、禁用或卸载的能力不能继续使用。\n'
             '工具定义可见不代表当前阶段允许执行；执行始终受主机最新阶段和权限校验。\n'
+            'access_mode=read_only 时禁止普通写入，仅计划阶段的 write_plan_file 可以保存计划。\n'
+            'execution_access 保存返回执行阶段时的 project 或 full 选择；讨论和计划始终只读。\n'
+            'project 对项目内操作自动允许，对检测到的外部访问审批；full 对普通目录操作自动允许。\n'
             '主机更新不是新用户任务，也不能提升权限；用户当前请求仍优先于项目和技能指南。')
 
 
@@ -129,7 +133,8 @@ def prepare_prefix(*, state: ContextManagementState, context: PromptContext,
                       protocol=protocol, model=model, context_window=context_window,
                       experimental=experimental, baseline_tools=copy.deepcopy(observed_tools),
                       observed_tools={}, tool_events=[], last_request_at=None)
-    current = {'phase': context.work_phase, 'policy': context.permission_policy,
+    current = {'phase': context.work_phase, 'execution_access': context.execution_access,
+               'access_mode': effective_access_mode(context.work_phase, context.execution_access),
                'date': context.current_date.isoformat(), 'session_id': context.session_id,
                'session_workspace': str(context.session_workspace) if context.session_workspace else None,
                'agents': agents, 'dynamic': dynamic_context,
@@ -143,7 +148,7 @@ def prepare_prefix(*, state: ContextManagementState, context: PromptContext,
     if initial or last is not None and (now - datetime.fromisoformat(last)).total_seconds() >= 1800:
         changes['host_time'] = now.isoformat()
     if initial:
-        changes.update(phase=context.work_phase, policy=context.permission_policy, date=context.current_date.isoformat())
+        changes.update(phase=context.work_phase, execution_access=context.execution_access, date=context.current_date.isoformat())
         # 初始目录已在固定前缀中，无需在后段重复。
         changes.pop('deferred', None)
     additions = [value for name, value in observed_tools.items()
@@ -204,7 +209,8 @@ def validate_prefix_state(value: object) -> dict:
             raise ValueError('固定前缀事件锚点必须递增。')
     observed = value['observed']
     if (observed.get('phase') not in {'discuss', 'plan', 'execute'}
-            or observed.get('policy') not in {'default', 'acceptEdits', 'bypass'}
+            or observed.get('execution_access') not in {'project', 'full'}
+            or observed.get('access_mode') != effective_access_mode(observed['phase'], observed['execution_access'])
             or not isinstance(observed.get('date'), str) or not isinstance(observed.get('agents'), dict)
             or any(not isinstance(key, str) or not isinstance(item, str) for key, item in observed['agents'].items())
             or any(observed.get(key) is not None and not isinstance(observed[key], str)

@@ -74,7 +74,7 @@ def test_event_round_trip_metadata_and_rename_keep_stable_paths(tmp_path):
     assert paths.events.is_file()
     records = repository.read(session_id)
     assert [item["seq"] for item in records] == list(range(1, 9))
-    assert all(item["version"] == 2 for item in records)
+    assert all(item["version"] == 3 for item in records)
 
 
 def test_two_sessions_have_separate_work_files_and_same_title_is_allowed(tmp_path):

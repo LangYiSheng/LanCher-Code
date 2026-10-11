@@ -10,7 +10,7 @@ from lancher_code.errors import ToolNotFoundError
 from lancher_code.execution.contracts import InvocationInfo, ResourceClaim, ResourceOwner
 from lancher_code.execution.scheduler import ResourceScheduler, claims_conflict, get_project_scheduler, normalize_claim, path_claim, project_claim
 from lancher_code.logging_system import get_logger
-from lancher_code.contracts.control import CancellationToken, WorkPhase, PermissionPolicy
+from lancher_code.contracts.control import CancellationToken, WorkPhase, ExecutionAccess
 from lancher_code.permissions.models import PermissionRequest, PermissionResolution
 from lancher_code.contracts.tools import ToolCall, ToolExecutionResult, tool_available_in_phase
 from lancher_code.tools.context import ToolContext
@@ -18,7 +18,7 @@ from lancher_code.permissions.models import PermissionCheck
 from lancher_code.permissions.engine import PermissionEngine
 from lancher_code.permissions.storage import PermissionRuleFileError
 from lancher_code.sessions.storage import SessionRepositoryError
-from lancher_code.filesystem.access import resolve_path_in_root
+from lancher_code.filesystem.access import resolve_access_path
 from lancher_code.tools.core.file_state_cache import FileStateCache
 from lancher_code.tools.core.registry import ToolRegistry
 from lancher_code.tools.core.base import Tool
@@ -51,7 +51,7 @@ class ToolExecutor:
 
     async def execute_calls(
         self, calls: list[ToolCall], *,
-        work_phase: WorkPhase = "execute", permission_policy: PermissionPolicy = "default",
+        work_phase: WorkPhase = "execute", execution_access: ExecutionAccess = "project",
         plan_file_path: Path | None = None, session_id: str | None = None,
         session_workspace: Path | None = None, session_root: Path | None = None,
         turn_id: str | None = None, generation: int | None = None,
@@ -65,7 +65,7 @@ class ToolExecutor:
     ) -> list[ToolExecutionResult]:
         context = ToolContext(
             cwd=self._cwd, timeout_seconds=self._timeout_seconds,
-            work_phase=work_phase, permission_policy=permission_policy,
+            work_phase=work_phase, execution_access=execution_access,
             project_root=self._cwd, plan_file_path=plan_file_path, session_id=session_id,
             session_workspace=session_workspace, session_root=session_root,
             cancellation_token=cancellation_token,
@@ -77,7 +77,15 @@ class ToolExecutor:
         # 冻结参数，防止审批期间调用方修改实际执行内容。
         frozen_calls = [replace(call, arguments=deepcopy(call.arguments)) for call in calls]
         expected_bindings = dict(expected_tool_bindings) if expected_tool_bindings is not None else None
-        claims = [self._resource_claims(call, context) if self._argument_error(call) is None else () for call in frozen_calls]
+        claims = []
+        for call in frozen_calls:
+            if self._argument_error(call) is not None:
+                claims.append(())
+            elif call.tool_name == "run_command":
+                claims.append(await self._await_cancelable(
+                    asyncio.to_thread(self._resource_claims, call, context), context))
+            else:
+                claims.append(self._resource_claims(call, context))
         completed = [asyncio.Event() for _ in calls]
         invocations = [self.execution_runtime.begin_invocation(call, context) for call in frozen_calls]
         tasks = []
@@ -129,17 +137,17 @@ class ToolExecutor:
                 return (project_claim(root),)
             name = call.tool_name
             if name in {"read_file", "write_file", "edit_file"}:
-                path = resolve_path_in_root(context.cwd, str(call.arguments.get("path", "")), root)
+                path = resolve_access_path(context.cwd, str(call.arguments.get("path", "")), context)
                 return (path_claim(path, write=name != "read_file"),)
             if name == "write_plan_file" and context.plan_file_path is not None:
                 return (path_claim(context.plan_file_path, write=True),)
             if name in {"glob", "grep"}:
                 raw = call.arguments.get("path")
-                path = resolve_path_in_root(context.cwd, raw, root) if isinstance(raw, str) and raw.strip() else root
+                path = resolve_access_path(context.cwd, raw, context) if isinstance(raw, str) and raw.strip() else root
                 return (path_claim(path, recursive=True),)
             if name == "run_command":
                 raw = call.arguments.get("cwd")
-                cwd = resolve_path_in_root(context.cwd, raw, root) if isinstance(raw, str) and raw.strip() else context.cwd
+                cwd = resolve_access_path(context.cwd, raw, context) if isinstance(raw, str) and raw.strip() else context.cwd
                 return tuple(normalize_claim(claim) for claim in self.execution_runtime.command_claims(str(call.arguments.get("command", "")), cwd))
             if name in {"process_write", "process_background"}:
                 return (ResourceClaim("process", f"{call.arguments.get('process_id', '')}:stdin", "exclusive"),)
@@ -327,6 +335,14 @@ class ToolExecutor:
                 return self._changed_tool_result(call)
             result = await self._await_cancelable(tool.execute(call.arguments, context), context, timeout=timeout)
             result.call_id, result.tool_name = call.call_id, call.tool_name
+            # 保存最终执行前的分析事实，自动允许未知脚本也保留明确的审计边界。
+            facts = final_check.metadata or {}
+            if facts.get("access_mode") is not None:
+                result.metadata["access_mode"] = facts["access_mode"]
+            if facts.get("analysis_unknown"):
+                result.metadata["analysis_unknown"] = deepcopy(facts["analysis_unknown"])
+            if facts.get("execution_signature"):
+                result.metadata["execution_signature"] = facts["execution_signature"]
             # 操作失败、目标变更或停止不留下永久授权；仅成功调用落实保存选择。
             if (not result.is_error and context.pending_permission_request is not None
                     and context.pending_permission_resolution is not None
@@ -384,7 +400,9 @@ class ToolExecutor:
         request = permission_check.request
         if request is None or permission_resolver is None:
             return self._error(call, "permission_confirmation_unavailable", "当前工具调用需要用户授权，但没有可用的授权处理器。")
-        resolution = await self._await_cancelable(permission_resolver(request), context)
+        # 审批界面只能决定结果，不能改写实际授权路径或扩大目录范围。
+        request = deepcopy(request)
+        resolution = deepcopy(await self._await_cancelable(permission_resolver(deepcopy(request)), context))
         if context is not None:
             self._raise_if_cancelled(context)
             if self._superseded_now(context, should_interrupt):
@@ -393,7 +411,9 @@ class ToolExecutor:
             return self._superseded(call)
         if resolution.request_id != request.request_id:
             return self._error(call, "permission_resolution_mismatch", "授权结果与当前请求不匹配。")
-        if resolution.outcome in {"allow_once", "allow_session", "allow_project"}:
+        if resolution.outcome in {"allow_once", "allow_session"}:
+            if resolution.outcome == "allow_session" and not request.directory_grants:
+                return self._error(call, "permission_resolution_invalid", "本会话授权需要明确的外部目录范围。")
             if context is not None:
                 context.pending_permission_request = request
                 context.pending_permission_resolution = resolution
@@ -460,7 +480,8 @@ class ToolExecutor:
         if request is None:
             return (check.decision,)
         return (request.tool_name, request.kind, request.command, request.details,
-                tuple(request.file_paths), request.work_phase, request.permission_policy,
+                tuple(request.file_paths), request.work_phase, request.execution_access,
+                tuple(request.directory_grants),
                 ToolExecutor._target_signature(check))
 
     @staticmethod

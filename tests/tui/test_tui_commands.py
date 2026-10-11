@@ -181,12 +181,12 @@ async def test_permissions_and_models_execute_in_command_menu(tmp_path):
     app, runner, session, config, _ = build_model_app(tmp_path)
     async with app.run_test() as pilot:
         runner.set_phase("discuss")
-        composer = await type_command(app, pilot, "/permissions b")
+        composer = await type_command(app, pilot, "/access f")
         await pilot.press("tab")
-        assert composer.text == "/permissions bypass"
-        assert session.permission_policy == "default"
+        assert composer.text == "/access full"
+        assert session.execution_access == "project"
         await pilot.press("enter")
-        assert session.permission_policy == "bypass" and session.work_phase == "discuss"
+        assert session.execution_access == "full" and session.work_phase == "discuss"
         await type_command(app, pilot, "/model other")
         await pilot.press("tab", "enter")
         assert runner.model_ref == "other/chat"
@@ -238,9 +238,9 @@ async def test_unknown_command_and_busy_command_are_not_sent(openai_provider_con
         await provider.started.wait()
         assert not app._details_open
         app.action_toggle_details()
-        await type_command(app, pilot, "/permissions bypass")
+        await type_command(app, pilot, "/access full")
         await pilot.press("enter")
-        assert composer.text == "/permissions bypass" and app._details_open
+        assert composer.text == "/access full" and app._details_open
         assert "草稿已保留" in str(app.query_one(CommandHintBar).render())
         await type_command(app, pilot, "下一轮")
         await pilot.press("enter")

@@ -13,7 +13,7 @@ from lancher_code.sessions.models import TraceEntry
 from lancher_code.agent.events import TurnEvent
 from lancher_code.config.models import UIConfig
 from lancher_code.tui.chat_controls import (
-    ChatAction, PendingInputEditor, PendingQueue, PermissionPolicyScreen,
+    ChatAction, PendingInputEditor, PendingQueue, ExecutionAccessScreen,
     PlanReviewScreen, ReadOnlyDetailsScreen,
 )
 from lancher_code.tui.composer import ComposerSubmitted, ComposerTextArea
@@ -232,7 +232,7 @@ async def test_narrow_permission_and_queue_leave_editor_and_hud_visible(openai_p
     app, _ = permission_app(FakeProvider(_permission_request_responses()), openai_provider_config, UIConfig(), tmp_path)
     async with app.run_test(size=(32, 16)) as pilot:
         await _submit_message(app, pilot, "检查保存和取消行为")
-        await pilot.pause(0.1)
+        await _wait_permission(app, pilot)
         panel = app.query_one(InlinePermissionPanel)
         command = "python -m pytest tests/test_settings.py tests/test_config_bootstrap.py -q"
         panel.request.command = command
@@ -265,15 +265,15 @@ async def test_narrow_permission_and_queue_leave_editor_and_hud_visible(openai_p
         await pilot.pause()
         assert isinstance(app.screen, ReadOnlyDetailsScreen)
         assert command in app.screen.text
-        assert str(tmp_path) in app.screen.text
+        assert panel.request.metadata['cwd'] in app.screen.text
         assert app.screen.query_one("#read-only-close").region.bottom <= 16
         await pilot.press("escape")
         panel.focus()
         await pilot.press("m")
         await pilot.pause()
         assert isinstance(app.screen, PermissionScopesScreen)
-        assert panel.request.session_rule in str(app.screen.query_one("#scope-session-rule").render())
-        project_button = app.screen.query_one("#scope-project", Button)
+        assert panel.request.directory_grants[0].path in str(app.screen.query_one("#scope-session-grants").render())
+        project_button = app.screen.query_one("#scope-session", Button)
         for _ in range(8):
             if app.focused is project_button:
                 break
@@ -301,8 +301,8 @@ async def test_narrow_dialog_actions_are_keyboard_reachable(openai_provider_conf
             screen = PlanReviewScreen(session.session_id, snapshot, can_execute=True)
             target = "#review-execute"
         elif kind == "policy":
-            screen = PermissionPolicyScreen()
-            target = "#policy-bypass"
+            screen = ExecutionAccessScreen()
+            target = "#access-full"
         else:
             screen = PendingInputEditor("草稿\n" * 40)
             target = "#queue-editor-save"
@@ -371,7 +371,7 @@ async def test_long_model_hud_keeps_phase_and_policy_when_status_width_changes(o
             await pilot.pause()
             label = app.query_one("#status-left", Static)
             text = label.render().plain
-            assert "计划 · 逐次确认" in text
+            assert "计划 · 只读" in text
             assert cell_len(text) <= label.region.width
 
 

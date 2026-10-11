@@ -80,7 +80,7 @@
 
 | 方向 | 说明 |
 |---|---|
-| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / work_phase / permission_policy / cancellation_token / max_output_tokens / 请求归属） |
+| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / work_phase / execution_access / cancellation_token / max_output_tokens / 请求归属） |
 | 输出 | `StreamEvent` 异步迭代器 |
 
 正常结束事件必须显式携带 `response_complete=True` 和非空缺的 `assistant_blocks`；未设置完成标记默认不完整，不从文本增量补造终态。`assistant_blocks` 是单次完整助手响应，包含原始思考、签名或加密数据、正文和真实工具调用。`response_complete` 区分完整结束与提前 EOF。Claude 兼容协议按内容块顺序回传；OpenAI 兼容协议保留 `reasoning_content`／`reasoning` 的字段来源，避免把展示思考误当完整协议。

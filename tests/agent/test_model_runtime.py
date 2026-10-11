@@ -335,7 +335,7 @@ def test_switch_autosaves_reference_without_credentials(tmp_path: Path) -> None:
     session.create_user_message("已保存的历史")
     runner.switch_model("anthropic/sonnet")
     raw = session.paths.events.read_text(encoding="utf-8")
-    assert json.loads(raw.splitlines()[0])["version"] == 2
+    assert json.loads(raw.splitlines()[0])["version"] == 3
     assert session.list_sessions().items[0].model_ref == "anthropic/sonnet"
     assert "secret-key" not in raw
     assert "base_url" not in raw

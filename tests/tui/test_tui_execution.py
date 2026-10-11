@@ -103,13 +103,15 @@ async def wait_http_ready(client, url, pilot):
 
 
 async def grant_command(app, pilot):
-    await until(pilot, lambda: bool(app.query(InlinePermissionPanel)))
-    panel = app.query_one(InlinePermissionPanel)
+    await until(pilot, lambda: bool(app.query(InlinePermissionPanel)) or not app._is_streaming
+                or any(item.state == 'waiting_resources' for item in app.query(ToolCallWidget)))
+    panels = list(app.query(InlinePermissionPanel))
+    if not panels:
+        return None
+    panel = panels[0]
     assert panel.request.tool_name == "run_command"
-    assert panel.request.permission_policy == "default"
-    # Python 的脚本影响无法静态预测；必须在真实界面批准本次，资源配置不能放行。
-    assert panel.request.metadata["allow_once_only"] is True
-    assert panel.request.session_rule is None and panel.request.project_rule is None
+    assert panel.request.execution_access == "project"
+    assert panel.request.directory_grants
     request_id = panel.request.request_id
     panel.focus()
     await pilot.press("enter")
@@ -166,7 +168,7 @@ async def test_run_async_default_approval_starts_commands_after_completed_turn(t
             assert info["origin_turn_id"]
             owners.append(info["origin_turn_id"])
         assert owners[0] != owners[1]
-        assert len(set(approvals)) == 2
+        assert approvals == [None, None]
         assert not storage.rules_for_scope("session")
         app.exit(0)
 
@@ -240,7 +242,7 @@ async def test_run_async_background_http_survives_turns_then_session_stop_allows
         result = last_result(session)
         assert result.ok, result.text
         assert process_info(runner, result)["origin_turn_id"]
-        assert len(set(approvals)) == 3
+        assert approvals == [None, None, None]
         assert not storage.rules_for_scope("session")
         app.exit(0)
 
@@ -300,7 +302,7 @@ async def test_run_async_approved_command_names_actual_blocker_then_runs_after_t
         assert "Python " in result.metadata["content"]
         assert "waiting" not in waiting.call.metadata
         assert len(runner.list_processes()) == 2
-        assert len(set(approvals)) == 2 and not storage.rules_for_scope("session")
+        assert approvals == [None, None] and not storage.rules_for_scope("session")
         app.exit(0)
 
     await run_real_app(app, drive)

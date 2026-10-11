@@ -67,7 +67,7 @@ async def run_app() -> int:
         active_config,
         cwd=cwd,
         initial_work_phase=config.runtime.work_phase,
-        initial_permission_policy=config.runtime.permission_policy,
+        initial_execution_access=config.runtime.execution_access,
         permission_storage=permission_storage,
         usage_tracker=usage_tracker,
     )

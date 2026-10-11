@@ -97,7 +97,7 @@ def _permission_request_responses() -> list[list[StreamEvent]]:
                 kind="tool_call_delta",
                 tool_call_chunk=ToolCallChunk(
                     call_index=0,
-                    arguments_delta='{"description":"查看 git 状态","command":"git status"}',
+                    arguments_delta='{"description":"查看 git 状态","command":"git status","cwd":".."}',
                 ),
             ),
             StreamEvent(kind="message_end", response_complete=True),
@@ -122,7 +122,7 @@ def _file_permission_request_responses() -> list[list[StreamEvent]]:
                 kind="tool_call_delta",
                 tool_call_chunk=ToolCallChunk(
                     call_index=0,
-                    arguments_delta='{"path":"demo.txt","content":"hello"}',
+                    arguments_delta='{"path":"../demo.txt","content":"hello"}',
                 ),
             ),
             StreamEvent(kind="message_end", response_complete=True),
@@ -169,7 +169,7 @@ async def test_file_edit_permission_uses_inline_panel(
         panel = app.query_one(InlinePermissionPanel)
         assert panel.request.kind == "file_edit"
         assert "demo.txt" in panel.query_one("#permission-details").render().plain
-        assert len(list(panel.query(PermissionOption))) == 2
+        assert len(list(panel.query(PermissionOption))) == 3
 
         await pilot.press("escape")
         await _wait_completed_turn(app, pilot)
@@ -198,10 +198,10 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
         assert options[0].has_class("-active")
         assert not options[2].display
         await pilot.press("m")
-        await _until(pilot, lambda: len(panel._options()) == 4)
-        assert len(panel._options()) == 4
-        assert "RunCommand(git status)" in options[2].render().plain
-        assert "RunCommand(git status)" in options[3].render().plain
+        await _until(pilot, lambda: len(panel._options()) == 3)
+        assert len(panel._options()) == 3
+        assert "只读" in options[2].render().plain
+        assert str(tmp_path.parent) in options[2].render().plain
 
         await pilot.press("tab")
         await _until(pilot, lambda: options[1].has_class("-active"))
@@ -212,8 +212,8 @@ async def test_command_permission_panel_supports_keyboard_navigation_and_shows_r
         assert options[0].has_class("-active")
 
         await pilot.press("up")
-        await _until(pilot, lambda: options[3].has_class("-active"))
-        assert options[3].has_class("-active")
+        await _until(pilot, lambda: options[2].has_class("-active"))
+        assert options[2].has_class("-active")
 
         await pilot.press("escape")
         await _wait_completed_turn(app, pilot)
@@ -248,7 +248,6 @@ async def test_process_input_permission_never_offers_permanent_scope(openai_prov
     [
         ([], "allow_once"),
         (["m", "down", "down"], "allow_session"),
-        (["m", "down", "down", "down"], "allow_project"),
         (["up"], "deny"),
     ],
 )
@@ -290,7 +289,7 @@ async def test_allow_session_resolution_is_persisted_with_automatic_session(
     command = "Write-Output ready" if os.name == "nt" else "printf ready"
     responses = _permission_request_responses()
     responses[0][2].tool_call_chunk.arguments_delta = json.dumps({
-        "description": "执行成功后保存本次会话的命令批准", "command": command,
+        "description": "执行成功后保存本次会话的目录批准", "command": command, "cwd": "..",
     })
     provider = FakeProvider(responses=responses)
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
@@ -307,12 +306,11 @@ async def test_allow_session_resolution_is_persisted_with_automatic_session(
     session.close()
     restored = SessionController(openai_provider_config, cwd=tmp_path)
     try:
-        assert restored.resume_session(saved_id) == 1
-        rule = restored._permission_storage.rules_for_scope("session")[0]
-        assert rule.match == f"RunCommand({command})"
-        assert rule.match_kind == "exact"
-        assert rule.command_cwd == str(tmp_path.resolve())
-        assert rule.command_shell == ("powershell" if os.name == "nt" else "sh")
+        assert restored.resume_session(saved_id) == 0
+        grants = restored._permission_storage.session_grants
+        assert len(grants) == 1
+        assert grants[0].path == str(tmp_path.parent.resolve())
+        assert grants[0].access == "read" and grants[0].recursive
     finally:
         restored.close()
 
@@ -325,7 +323,7 @@ async def test_closing_ui_waits_for_running_command_cleanup(openai_provider_conf
         "description": "界面退出收尾测试", "command": "Start-Sleep -Seconds 30",
     })
     app, _ = _build_app(FakeProvider(responses), openai_provider_config, ui_config, tmp_path)
-    app._turn_runner.set_permission_policy("bypass")
+    app._turn_runner.set_execution_access("full")
     original_spawn = process_module.spawn_backend
     started = asyncio.Event()
     processes = []

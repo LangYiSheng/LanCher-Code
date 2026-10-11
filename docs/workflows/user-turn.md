@@ -75,7 +75,7 @@ sequenceDiagram
 
 ### 4. 工具执行（`ToolExecutor.execute_calls`）
 
-- 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、阶段不可用（`phase_disallowed`）。讨论／计划禁止源码写入与通用 Shell，但当前 Session workspace 的文件读写已批准
+- 先做集合级检查：未加载工具（`tool_not_found`，提示 tool_search）、阶段不可用（`phase_disallowed`）。讨论／计划强制只读，计划仅允许专用计划文件写入；明确只读 Shell 可以调查代码
 - 参数复制冻结，按标准 JSON Schema 校验；离线解析局部与内嵌引用，无效参数或 Schema 在审批与资源申请前失败
 - 按资源声明判断冲突，无冲突工具并行，同资源操作按请求顺序执行
 - 每个调用：`PermissionEngine.evaluate()` → deny 直接返回错误；ask 通过非阻塞内联审批面板等待结果

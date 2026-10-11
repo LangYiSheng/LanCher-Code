@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from lancher_code.context.models import CompactionActivity
-from lancher_code.contracts.control import PermissionPolicy, WorkPhase
+from lancher_code.contracts.control import ExecutionAccess, WorkPhase
 from lancher_code.contracts.tools import ToolCall
 from lancher_code.contracts.tools import ToolExecutionResult
 from lancher_code.permissions.models import PermissionRequest
@@ -26,7 +26,7 @@ TurnEventKind = Literal[
     "assistant_message_completed",
     "turn_failed",
     "phase_changed",
-    "policy_changed",
+    "access_changed",
     "pending_input_changed",
     "steering_applied",
     "permission_request_closed",
@@ -48,7 +48,7 @@ class TurnEvent:
     permission_request: PermissionRequest | None = None
     permission_resolution: PermissionResolution | None = None
     work_phase: WorkPhase | None = None
-    permission_policy: PermissionPolicy | None = None
+    execution_access: ExecutionAccess | None = None
     task_id: str | None = None
     pending_input_id: str | None = None
     compaction: CompactionActivity | None = None

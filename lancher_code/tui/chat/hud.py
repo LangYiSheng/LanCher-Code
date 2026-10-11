@@ -122,6 +122,7 @@ class HudPresenter:
         details = (
             f"本次模型：{self.status_left_text()}\n"
             f"工作目录：{self.session.project_root}\n"
+            f"执行访问范围：{'项目访问' if self.session.execution_access == 'project' else '完全访问'} · 讨论和计划只读\n"
             f"会话：{self.session.session_title or '新对话'} · {self.session.session_id or '首条消息后创建'}\n"
             f"会话工作目录：{self.session.paths.workspace if self.session.paths else '尚未创建'}\n"
             f"模型引用：{ref or self.provider_model}\n"
@@ -150,7 +151,7 @@ class HudPresenter:
             model = model_display_name(config.providers, self.runner.model_ref)
         else:
             model = self.provider_model
-        policy = {"default": "逐次确认", "acceptEdits": "自动编辑", "bypass": "跳过询问"}[self.session.permission_policy]
+        policy = "只读" if self.session.work_phase in {"discuss", "plan"} else {"project": "项目访问", "full": "完全访问"}[self.session.execution_access]
         phase = {"discuss": "讨论", "plan": "计划", "execute": "执行"}[self.session.work_phase]
         return f"{model} · {phase} · {policy}"
 

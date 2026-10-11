@@ -11,7 +11,7 @@ from lancher_code.tools.core.common import atomic_write_text
 WRITE_FILE_DESCRIPTION = (
     "写入完整文本文件。适合创建新文件，或在已经完整阅读过旧文件且确认没有外部变更后整体重写文件。"
     "不要用它做局部修改；局部修改应该使用 edit_file。"
-    "讨论和计划阶段只能写入当前会话的 workspace 工作目录。"
+    "仅执行阶段可用；项目外路径由访问权限决定是否需要批准。"
 )
 
 
@@ -37,7 +37,7 @@ class WriteFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            allowed_phases=("discuss", "plan", "execute"),
+            allowed_phases=("execute",),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

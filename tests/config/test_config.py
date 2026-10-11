@@ -72,21 +72,30 @@ def test_load_config_reads_thinking_defaults() -> None:
 
 def test_load_config_reads_runtime_axes_and_tool_loop_limit() -> None:
     raw = _data()
-    raw["runtime"] = {"tool_loop_limit": 123, "work_phase": "plan", "permission_policy": "acceptEdits"}
+    raw["runtime"] = {"tool_loop_limit": 123, "work_phase": "plan", "execution_access": "project"}
     config = load_config_data(raw)
     assert config.runtime.tool_loop_limit == 123
     assert config.runtime.work_phase == "plan"
-    assert config.runtime.permission_policy == "acceptEdits"
+    assert config.runtime.execution_access == "project"
 
 
 @pytest.mark.parametrize("runtime", [
-    {"permission_mode": "acceptEdits"},
-    {"permission_mode": "plan", "work_phase": "execute", "permission_policy": "default"},
+    {"permission_mode": "project"},
+    {"permission_mode": "plan", "work_phase": "execute", "execution_access": "project"},
+    {"permission_policy": "bypass", "execution_access": "full"},
 ])
 def test_old_runtime_mode_is_rejected_even_with_current_axes(runtime) -> None:
     raw = _data()
     raw["runtime"] = runtime
     with pytest.raises(ConfigError, match="重新配置"):
+        load_config_data(raw)
+
+
+@pytest.mark.parametrize("value", ["default", "acceptEdits", "bypass", "read_only"])
+def test_execution_access_rejects_removed_values(value) -> None:
+    raw = _data()
+    raw['runtime'] = {'execution_access': value}
+    with pytest.raises(ConfigError, match='execution_access'):
         load_config_data(raw)
 
 

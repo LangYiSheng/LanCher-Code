@@ -134,17 +134,9 @@ graph TD
 
 ## 阶段边界与权限系统
 
-`tool_available_in_phase()` 先限定阶段工具范围：讨论与计划的源码只读，但当前 Session workspace 允许内置文件读写；计划另可保存计划正文；执行允许常规工具。讨论/计划阶段不开放 run_command；MCP 仅在服务端明确标记只读时进入只读范围。随后 `PermissionEngine.evaluate()` 处理以下检查：
+`tool_available_in_phase()` 限定阶段工具资格，权限引擎进一步检查实际操作。讨论和计划有效只读，只有计划专用工具可以写计划；Shell 仅在完整分析为只读时允许。执行阶段保存 `execution_access=project|full`：项目内操作自动，外部访问在 project 下审批，full 下自动。极危险操作与显式拒绝先于自动允许。
 
-```text
-① 文件路径边界 —— 项目根、当前 Session workspace 和内部控制文件边界
-② 危险命令黑名单（run_command 工具）—— 命中即 deny，不可绕过
-③ 规则引擎 —— session > project > user 三层规则，格式 ToolLabel(value)
-④ 权限策略 —— default / acceptEdits / bypass
-⑤ 人在回路 —— 仍未放行时生成 PermissionRequest，TUI 弹窗由用户决定
-```
-
-阶段边界、文件路径边界与黑名单均不可被允许规则或 `bypass` 覆盖。当前 Session workspace 的文件工具写入已批准，但显式拒绝仍生效；普通路径按 **规则 > 权限策略 > 用户确认** 判定，同层规则最后匹配者生效。新权限授权使用 `exact` 精确匹配，设置中可显式维护 `glob` 通配，文件规则必须指定 `exact` 或 `glob`。文件工具边界不构成操作系统沙箱。详见 [modules/permission-engine.md](modules/permission-engine.md)。
+外部审批只绑定本次调用或当前会话明确的目录范围；执行前复核目标、版本和取消状态，成功后保存会话目录授权。永久规则仅 deny。权限是检测式应用层判断，不能保证识别任意脚本动态外部访问，未增加操作系统沙箱。详见 [权限模块](modules/permission-engine.md)。
 
 ## 关键对象生命周期
 

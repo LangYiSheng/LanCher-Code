@@ -4,7 +4,7 @@ from lancher_code.tools.context import ToolContext
 from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
 from lancher_code.tools.core.common import MODEL_PATH_LIMIT, MODEL_TEXT_CHAR_LIMIT, UI_PATH_LIMIT, is_skipped_path
-from lancher_code.filesystem.access import relative_display_path, resolve_path_in_root
+from lancher_code.filesystem.access import relative_display_path, resolve_access_path
 
 GLOB_DESCRIPTION = (
     "按 glob 模式查找文件，支持 ** 递归匹配。"
@@ -52,11 +52,11 @@ class GlobTool:
         search_root = context.project_root or context.cwd
         if isinstance(raw_path, str) and raw_path.strip():
             try:
-                search_root = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+                search_root = resolve_access_path(context.cwd, raw_path, context)
             except ValueError as exc:
                 return build_tool_error(
                     summary="查找文件失败",
-                    error_code="path_outside_project",
+                    error_code="invalid_path",
                     error_message=str(exc),
                     tool_name=self.definition.name,
                 )

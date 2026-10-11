@@ -100,7 +100,7 @@ async def test_running_remote_write_keeps_unknown_outcome_after_catalog_change(
         return await original(awaitable, context, timeout=0.05 if timeout is not None else None)
     if ending == 'timeout':
         monkeypatch.setattr(executor, '_await_cancelable', shorter_tool_deadline)
-    task = asyncio.create_task(executor.execute_calls([call()], permission_policy='bypass',
+    task = asyncio.create_task(executor.execute_calls([call()], execution_access='full',
         expected_tool_bindings={tool.definition.name: tool}))
     try:
         await asyncio.wait_for(connection.started.wait(), 2)

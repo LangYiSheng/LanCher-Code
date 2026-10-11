@@ -36,17 +36,14 @@ def _call(name: str, arguments: dict[str, object] | None = None, index: int = 0)
 
 
 @pytest.mark.parametrize("phase", ["discuss", "plan"])
-@pytest.mark.parametrize("policy", ["default", "acceptEdits", "bypass"])
+@pytest.mark.parametrize("policy", ["project", "full"])
 def test_phase_boundaries_override_even_explicit_permission_rules(tmp_path, phase, policy):
     storage = PermissionStorage()
-    storage.add_session_rule("RunCommand(*)", "allow", match_kind="glob")
-    storage.add_session_rule("WriteFile(*)", "allow", match_kind="glob")
-    storage.add_session_rule("mcp__demo__*", "allow", match_kind="glob")
     engine = PermissionEngine(storage)
-    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1, work_phase=phase, permission_policy=policy)
+    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1, work_phase=phase, execution_access=policy)
     remote = MCPToolAdapter("demo", mcp_types.Tool(name="write", inputSchema={}), None)
     for definition, call in [
-        (RunCommandTool().definition, _call("run_command", {"command": "git status", "description": "状态"})),
+        (RunCommandTool().definition, _call("run_command", {"command": "python -c 'print(1)'", "description": "运行脚本"})),
         (WriteFileTool().definition, _call("write_file", {"path": "a.py", "content": "x"})),
         (remote.definition, _call(remote.definition.name)),
     ]:
@@ -68,7 +65,7 @@ def test_mcp_discovery_and_permission_share_explicit_readonly_boundary(tmp_path,
     assert bool(registry.list_deferred_index(work_phase=phase)) is expected
     check = PermissionEngine().evaluate(
         call=_call(tool.definition.name), tool=tool.definition,
-        context=ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1, work_phase=phase, permission_policy="bypass"),
+        context=ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1, work_phase=phase, execution_access="full"),
     )
     assert (check.decision == "allow") is expected
 
@@ -76,12 +73,12 @@ def test_mcp_discovery_and_permission_share_explicit_readonly_boundary(tmp_path,
 def test_phase_changes_keep_tool_schema_prefix_and_filter_discovery(openai_provider_config, tmp_path):
     session = SessionController(openai_provider_config, cwd=tmp_path)
     registry = create_default_tool_registry()
-    session.set_permission_policy("bypass")
+    session.set_execution_access("full")
     session.set_work_phase("discuss")
     definitions = registry.list_definitions()
     request = session.build_request(definitions, allow_tool_calls=True)
     assert request.work_phase == "discuss"
-    assert request.permission_policy == "bypass"
+    assert request.execution_access == "full"
     assert request.tools == definitions
     discuss_tools = registry.list_definitions(work_phase='discuss')
     session.set_work_phase("plan")
@@ -93,43 +90,38 @@ def test_phase_changes_keep_tool_schema_prefix_and_filter_discovery(openai_provi
     plan_tools = registry.list_definitions(work_phase=session.work_phase)
     assert {tool.name for tool in plan_tools} == {tool.name for tool in discuss_tools} | {"write_plan_file"}
     session.set_work_phase("execute")
-    assert session.permission_policy == "bypass"
+    assert session.execution_access == "full"
 
 
-def test_exact_command_grant_keeps_wildcards_case_and_quoted_whitespace_literal(tmp_path):
+def test_project_commands_do_not_need_stored_allow_rules(tmp_path):
+    engine = PermissionEngine()
+    context = ToolContext(cwd=tmp_path, timeout_seconds=1)
+    for command in ['Write-Output "A *  B"', 'python task.py', 'npm run build']:
+        check = engine.evaluate(call=_call("run_command", {"command": command}), tool=RunCommandTool().definition, context=context)
+        assert check.decision == "allow"
+
+
+def test_external_file_approval_grants_real_directory(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
     storage = PermissionStorage()
     engine = PermissionEngine(storage)
-    definition = RunCommandTool().definition
-    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1)
-    command = 'Write-Output "A *  B"'
-    request = engine.evaluate(call=_call("run_command", {"command": command}), tool=definition, context=context).request
-    assert request is not None and request.match_kind == "exact"
+    context = ToolContext(cwd=project, timeout_seconds=1)
+    call = _call("write_file", {"path": str(external / "[x].txt"), "content": "x"})
+    request = engine.evaluate(call=call, tool=WriteFileTool().definition, context=context).request
+    assert request is not None and request.directory_grants[0].access == "write"
     engine.apply_resolution(request, PermissionResolution(request.request_id, "allow_session"))
-    for candidate, expected in [
-        (command, "allow"), ('Write-Output "A Z  B"', "ask"),
-        ('Write-Output "A * B"', "ask"), ('Write-Output "a *  B"', "ask"),
-        ('Write-Output "A *  B" -NoNewline', "ask"),
-    ]:
-        assert engine.evaluate(call=_call("run_command", {"command": candidate}), tool=definition, context=context).decision == expected
-
-
-def test_exact_file_grant_does_not_treat_brackets_as_glob(tmp_path):
-    storage = PermissionStorage()
-    engine = PermissionEngine(storage)
-    context = ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1)
-    definition = WriteFileTool().definition
-    request = engine.evaluate(call=_call("write_file", {"path": "[x].txt", "content": "x"}), tool=definition, context=context).request
-    assert request is not None
-    assert request.session_rule == "WriteFile([x].txt)"
-    engine.apply_resolution(request, PermissionResolution(request.request_id, "allow_session"))
-    assert engine.evaluate(call=_call("write_file", {"path": "[x].txt"}), tool=definition, context=context).decision == "allow"
-    assert engine.evaluate(call=_call("write_file", {"path": "x.txt"}), tool=definition, context=context).decision == "ask"
+    assert engine.evaluate(call=call, tool=WriteFileTool().definition, context=context).decision == "allow"
+    session_readonly = replace(context, work_phase="plan")
+    assert engine.evaluate(call=call, tool=WriteFileTool().definition, context=session_readonly).decision == "deny"
 
 
 def test_session_restores_stable_identity_plan_and_only_paused_pending_inputs(openai_provider_config, tmp_path):
     session = SessionController(openai_provider_config, cwd=tmp_path)
     session.set_work_phase("plan")
-    session.set_permission_policy("acceptEdits")
+    session.set_execution_access("project")
     session.create_user_message("制定计划")
     plan = session.set_plan_snapshot("# 本会话计划", source_message_id="assistant-plan", ready=True)
     session.update_pending_inputs([
@@ -142,7 +134,7 @@ def test_session_restores_stable_identity_plan_and_only_paused_pending_inputs(op
     restored.resume_session(saved_id)
     assert restored.session_id == session.session_id
     assert restored.plan_snapshot == plan
-    assert restored.work_phase == "plan" and restored.permission_policy == "acceptEdits"
+    assert restored.work_phase == "plan" and restored.execution_access == "project"
     assert [item.state for item in restored.pending_inputs] == ["paused", "paused"]
     restored.create_user_message("再修改计划")
     assert restored.plan_snapshot is not None and not restored.plan_snapshot.ready
@@ -154,10 +146,10 @@ def test_session_restores_stable_identity_plan_and_only_paused_pending_inputs(op
 
 def test_ui_config_and_plan_axes_roundtrip(openai_provider_config):
     data = serialize_config(app_config_for(provider=openai_provider_config))
-    data["runtime"] = {"work_phase": "plan", "permission_policy": "default"}
+    data["runtime"] = {"work_phase": "plan", "execution_access": "project"}
     data["ui"] = {"theme": "dark", "busy_enter_action": "steer"}
     config = load_config_data(data)
-    assert config.runtime.work_phase == "plan" and config.runtime.permission_policy == "default"
+    assert config.runtime.work_phase == "plan" and config.runtime.execution_access == "project"
     saved = serialize_config(config)
     assert "permission_mode" not in saved["runtime"]
     assert saved["ui"]["busy_enter_action"] == "steer"
@@ -169,11 +161,11 @@ def test_ui_config_and_plan_axes_roundtrip(openai_provider_config):
 
 def test_independent_axes_and_light_theme_roundtrip(openai_provider_config):
     data = serialize_config(app_config_for(provider=openai_provider_config))
-    data["runtime"].update(work_phase="discuss", permission_policy="acceptEdits")
+    data["runtime"].update(work_phase="discuss", execution_access="project")
     data["ui"].update(theme="light", busy_enter_action="draft")
     config = load_config_data(data)
     assert config.runtime.work_phase == "discuss"
-    assert config.runtime.permission_policy == "acceptEdits"
+    assert config.runtime.execution_access == "project"
     assert config.ui.theme == "light"
     reloaded = load_config_data(serialize_config(config))
     assert reloaded.ui.theme == "light"
@@ -230,7 +222,7 @@ async def test_executor_finishes_started_parallel_group_then_skips_later_groups(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", ["allow_session", "allow_project", "superseded"])
+@pytest.mark.parametrize("outcome", ["allow_once", "allow_session", "superseded"])
 async def test_executor_interrupt_after_approval_does_not_execute_or_persist_grant(tmp_path, outcome):
     events, registry = [], ToolRegistry()
     registry.register(_RecordingTool("run_command", events, safe=False, category="command"))
@@ -244,7 +236,7 @@ async def test_executor_interrupt_after_approval_does_not_execute_or_persist_gra
         return PermissionResolution(request.request_id, outcome)
 
     results = await executor.execute_calls(
-        [_call("run_command", {"command": "git status", "description": "查看状态"})],
+        [_call("run_command", {"command": "git status", "cwd": str(tmp_path.parent), "description": "查看外部状态"})],
         permission_resolver=approve, should_interrupt=lambda: interrupted,
     )
     assert results[0].error_code == "steering_superseded"

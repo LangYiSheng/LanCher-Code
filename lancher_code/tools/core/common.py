@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from lancher_code.filesystem.access import PathSandboxError, PathWriteDeniedError, ensure_writable_path
+from lancher_code.filesystem.access import PathWriteDeniedError, ensure_writable_path
 
 if TYPE_CHECKING:
     from lancher_code.tools.context import ToolContext
@@ -41,6 +41,7 @@ MODEL_TEXT_CHAR_LIMIT = 24000
 def atomic_write_text(
     path: Path, content: str, context: ToolContext, *,
     expected_exists: bool | None = None, expected_mtime_ns: int | None = None,
+    allow_plan_file: bool = False,
 ) -> None:
     """替换是文件提交边界：取消和过期版本只在提交前阻止写入。"""
     original = path.resolve()
@@ -50,10 +51,7 @@ def atomic_write_text(
             raise asyncio.CancelledError
         if context.execution_runtime is not None and not context.execution_runtime.is_current(context.session_id, context.generation):
             raise asyncio.CancelledError
-        try:
-            writable = ensure_writable_path(path, context)
-        except PathSandboxError as exc:
-            raise PathWriteDeniedError("resource_target_changed", "写入期间文件路径已离开项目，未提交修改。") from exc
+        writable = ensure_writable_path(path, context, allow_plan_file=allow_plan_file)
         if writable != original:
             raise PathWriteDeniedError("resource_target_changed", "写入期间文件目标发生变化，未提交修改。")
         exists = path.exists()

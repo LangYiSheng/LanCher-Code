@@ -238,13 +238,13 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         raw_value.get("unknown_tool_streak_limit", 3),
         "runtime.unknown_tool_streak_limit",
     )
-    for key, choices in (("work_phase", {"discuss", "plan", "execute"}), ("permission_policy", {"default", "acceptEdits", "bypass"})):
+    for key, choices in (("work_phase", {"discuss", "plan", "execute"}), ("execution_access", {"project", "full"})):
         if key in raw_value and (not isinstance(raw_value[key], str) or raw_value[key] not in choices):
-            raise ConfigError(f"runtime.{key} 配置无效。")
-    if "permission_mode" in raw_value:
-        raise ConfigError("旧 runtime.permission_mode 已不再支持，请使用 work_phase 和 permission_policy 重新配置；原文件已保留。")
+            raise ConfigError(f"runtime.{key} 配置无效，请使用 {' / '.join(sorted(choices))} 重新配置；原文件已保留。")
+    if "permission_mode" in raw_value or "permission_policy" in raw_value:
+        raise ConfigError("旧 runtime.permission_mode / permission_policy 已不再支持，请使用 work_phase 和 execution_access 重新配置；原文件已保留。")
     work_phase = raw_value.get("work_phase", "execute")
-    permission_policy = raw_value.get("permission_policy", "default")
+    execution_access = raw_value.get("execution_access", "project")
     experimental_mcp_tool_append = raw_value.get("experimental_mcp_tool_append", False)
     if type(experimental_mcp_tool_append) is not bool:
         raise ConfigError("runtime.experimental_mcp_tool_append 必须是布尔值。")
@@ -252,7 +252,7 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         tool_loop_limit=tool_loop_limit,
         unknown_tool_streak_limit=unknown_tool_streak_limit,
         work_phase=work_phase,
-        permission_policy=permission_policy,
+        execution_access=execution_access,
         experimental_mcp_tool_append=experimental_mcp_tool_append,
     )
 

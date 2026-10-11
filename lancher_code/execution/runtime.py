@@ -220,7 +220,9 @@ class ExecutionRuntime:
                 return tuple(claims)
         # 未声明命令只在启动调用期间保守排序；后台句柄返回后不能锁住整个项目。
         # 明确配置的端口、输出目录等资源才随真实进程长期保留。
-        return (project_claim(self.project_root, lifetime='invocation'),)
+        claims = (project_claim(self.project_root, lifetime='invocation'),
+                  project_claim(cwd, lifetime='invocation'))
+        return tuple(dict.fromkeys(claims))
 
     def command_readiness(self, command: str):
         command = command.strip()

@@ -120,8 +120,8 @@ class ProcessSupervisor:
         if spec.lifetime not in {"turn", "session"} or spec.transport not in {"pipe", "pty"}:
             raise ValueError("进程归属或传输类型无效。")
         cwd = spec.cwd.resolve()
-        if not cwd.is_dir() or not cwd.is_relative_to(self.project_root):
-            raise ValueError("命令工作目录必须位于项目内的现存目录。")
+        if not cwd.is_dir():
+            raise ValueError("命令工作目录必须是现存目录。")
         if not 1 <= spec.columns <= 1000 or not 1 <= spec.rows <= 1000:
             raise ValueError("终端尺寸超出范围。")
         async with self._lock:

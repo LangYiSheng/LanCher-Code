@@ -8,14 +8,6 @@ from lancher_code.sessions.paths import validate_control_path, validate_session_
 if TYPE_CHECKING:
     from lancher_code.tools.context import ToolContext
 
-class PathSandboxError(ValueError):
-    def __init__(self, raw_path: str, resolved_path: Path, root: Path) -> None:
-        self.raw_path = raw_path
-        self.resolved_path = resolved_path
-        self.root = root
-        super().__init__(f"路径越界，禁止访问项目目录之外的路径: {resolved_path}")
-
-
 class PathWriteDeniedError(ValueError):
     def __init__(self, reason_code: str, message: str) -> None:
         self.reason_code = reason_code
@@ -29,19 +21,11 @@ def resolve_path(cwd: Path, raw_path: str) -> Path:
     return path.resolve()
 
 
-def ensure_path_in_root(path: Path, root: Path, *, raw_path: str | None = None) -> Path:
-    resolved_root = root.resolve()
-    resolved_path = path.resolve()
-    try:
-        resolved_path.relative_to(resolved_root)
-    except ValueError as exc:
-        raise PathSandboxError(raw_path or str(path), resolved_path, resolved_root) from exc
-    return resolved_path
-
-
-def resolve_path_in_root(cwd: Path, raw_path: str, root: Path) -> Path:
-    resolved = resolve_path(cwd, raw_path)
-    return ensure_path_in_root(resolved, root, raw_path=raw_path)
+def resolve_access_path(cwd: Path, raw_path: str, context: ToolContext) -> Path:
+    """解析真实路径；访问范围由统一权限引擎决定。"""
+    if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
+        raise ValueError("路径必须是非空字符串，且不能包含空字符。")
+    return resolve_path(cwd, raw_path)
 
 
 def is_session_workspace_path(path: Path, context: ToolContext) -> bool:
@@ -64,10 +48,10 @@ def is_session_workspace_path(path: Path, context: ToolContext) -> bool:
     return path.resolve().is_relative_to(expected_workspace)
 
 
-def ensure_writable_path(path: Path, context: ToolContext) -> Path:
+def ensure_writable_path(path: Path, context: ToolContext, *, allow_plan_file: bool = False) -> Path:
     """阶段与内部记录限制在权限确认前后都必须成立。"""
     project_root = (context.project_root or context.cwd).resolve()
-    resolved = ensure_path_in_root(path, project_root)
+    resolved = path.resolve()
     sessions_root = project_root / ".lancher" / "sessions"
     lexical_path = Path(os.path.abspath(path))
     for candidate in (lexical_path, resolved):
@@ -82,8 +66,13 @@ def ensure_writable_path(path: Path, context: ToolContext) -> Path:
                 workspace_path = False
             if not workspace_path:
                 raise PathWriteDeniedError("session_records_protected", "会话内部记录由应用管理，工具只能写入 workspace 工作目录。")
-    if context.work_phase in {"discuss", "plan"} and not is_session_workspace_path(resolved, context):
-        raise PathWriteDeniedError("phase_disallowed", "讨论和计划阶段只能写入当前会话的 workspace 工作目录。")
+    if context.work_phase in {"discuss", "plan"}:
+        dedicated_plan = (allow_plan_file and context.work_phase == "plan"
+                          and context.plan_file_path is not None
+                          and resolved == context.plan_file_path.resolve()
+                          and is_session_workspace_path(resolved, context))
+        if not dedicated_plan:
+            raise PathWriteDeniedError("phase_disallowed", "讨论和计划阶段只读；计划正文必须使用专用计划文件工具。")
     try:
         file_info = resolved.stat()
     except FileNotFoundError:

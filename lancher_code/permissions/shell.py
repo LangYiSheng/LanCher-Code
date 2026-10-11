@@ -1,4 +1,4 @@
-"""只解析命令，不执行模型提供的代码；不确定的语义必须交给审批。"""
+"""只解析命令并报告已知影响；分析不确定性与权限决策分开。"""
 from __future__ import annotations
 
 import base64
@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from urllib.parse import unquote, urlsplit
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -58,6 +59,13 @@ class CommandAnalysis:
     @property
     def complete(self) -> bool:
         return not self.unknown_reasons
+
+    @property
+    def read_only(self) -> bool:
+        """只有完整识别的查询可进入只读阶段，未知脚本不能冒充查询。"""
+        return (self.complete and bool(self.commands)
+                and all(item.operation in {"read", "cwd"} for item in self.path_accesses)
+                and all(item.name in _READ | _HARMLESS | {"git"} for item in self.commands))
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +312,10 @@ def canonical_command_name(value: str, shell: str) -> str:
 
 
 def _looks_like_path(value: str) -> bool:
+    if value.casefold().startswith("file://"):
+        return True
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]+://", value) or re.match(r"^[^/\\\s]+@[^/\\\s:]+:", value):
+        return False
     return value.startswith((".", "/", "\\", "~")) or "/" in value or "\\" in value or bool(re.match(r"^[A-Za-z]:", value))
 
 
@@ -348,22 +360,17 @@ def _arguments(argv: tuple[str, ...], shell: str, name: str) -> tuple[list[str],
 
 
 def _hard_denial(name: str, argv: tuple[str, ...]) -> str | None:
-    if name in {"format", "format-volume", "clear-disk", "initialize-disk", "remove-partition", "diskpart", "shutdown", "restart-computer", "stop-computer", "sudo", "runas", "mkfs", "mkswap", "fdisk", "parted"} or name.startswith("mkfs."):
+    # 嵌套 Bash 也可能启动 Windows 程序，系统风险不受外层 Shell 类型影响。
+    for suffix in (".exe", ".com"):
+        if name.casefold().endswith(suffix):
+            name = name[:-len(suffix)].casefold()
+            break
+    if name in {"format", "format-volume", "clear-disk", "initialize-disk", "remove-partition", "diskpart", "mkfs", "mkswap", "fdisk", "parted", "wipefs"} or name.startswith("mkfs."):
         return f"系统高风险操作 {name} 禁止执行。"
     if name == "cipher" and any(value.casefold().startswith("/w") for value in argv[1:]):
         return "禁止执行磁盘数据擦除操作。"
-    if name == "git":
-        args = [value.casefold() for value in argv[1:]]
-        # Git 全局参数可放在子命令前；不能仅检查 argv[1]。
-        while args and args[0].startswith("-"):
-            option = args.pop(0)
-            if option in {"-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"} and args:
-                args.pop(0)
-        if args and ((args[0] == "reset" and "--hard" in args) or
-                     (args[0] == "clean" and any(value == "--force" or (value.startswith("-") and not value.startswith("--") and "f" in value) for value in args[1:])) or
-                     (args[0] == "checkout" and "--" in args) or
-                     (args[0] == "restore" and any(value == "--source" or value.startswith("--source=") for value in args[1:]))):
-            return "禁止执行丢弃工作区内容的 Git 操作。"
+    if name == "dd" and any(value.startswith("of=/dev/") for value in argv[1:]):
+        return "禁止直接覆盖系统磁盘设备。"
     return None
 
 
@@ -389,7 +396,52 @@ def _git_branch_is_listing(argv: tuple[str, ...]) -> bool:
     return True
 
 
-def analyze_command(command: str, *, shell: str | None = None, cwd: Path, project_root: Path) -> CommandAnalysis:
+def _literal_nested_command(name: str, argv: tuple[str, ...], shell: str) -> tuple[str, str] | None:
+    """只展开字面量 Shell 正文及常见启动包装器，不求值变量或脚本。"""
+    nested_shell = ("bash" if name in {"bash", "sh", "zsh", "fish"} else
+                    "powershell" if name in {"powershell", "pwsh", "cmd"} else None)
+    if nested_shell is not None:
+        switches = {"-c", "-command", "/c", "/k"} if name == "cmd" else {"-c", "-command"}
+        for index, value in enumerate(argv[1:], 1):
+            if value.casefold() in switches and index + 1 < len(argv):
+                return argv[index + 1], nested_shell
+            if name in {"powershell", "pwsh"} and value.casefold() in {"-encodedcommand", "-enc", "-ec"} and index + 1 < len(argv):
+                try:
+                    encoded = argv[index + 1]
+                    if len(encoded) <= MAX_COMMAND_BYTES * 2:
+                        return base64.b64decode(encoded, validate=True).decode("utf-16-le"), "powershell"
+                except (ValueError, UnicodeError):
+                    pass
+        return None
+    if name in {"sudo", "doas", "command", "env", "nice", "nohup"}:
+        index = 1
+        while index < len(argv):
+            value = argv[index]
+            if value == "--":
+                index += 1
+                break
+            if name == "env" and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", value):
+                index += 1
+                continue
+            if not value.startswith("-"):
+                break
+            takes_value = (value in {"-u", "-g", "-h", "-p", "--user", "--group", "--host", "--prompt", "--adjustment"}
+                           or (name == "nice" and value == "-n"))
+            index += 2 if takes_value else 1
+        if index < len(argv):
+            tokens = argv[index:]
+            if shell == "powershell":
+                return "& " + " ".join("'" + token.replace("'", "''") + "'" for token in tokens), shell
+            return shlex.join(tokens), "bash"
+    if name == "runas":
+        # runas 的最终参数是完整命令，而不是新的参数数组。
+        if len(argv) > 1 and not argv[-1].startswith("/"):
+            return argv[-1], "powershell"
+    return None
+
+
+def analyze_command(command: str, *, shell: str | None = None, cwd: Path, project_root: Path,
+                    _depth: int = 0) -> CommandAnalysis:
     """对完整原文解析，对可确定路径实时 resolve；范围限制由权限引擎决定。"""
     selected = shell or default_shell()
     if selected in {"pwsh", "powershell.exe"}:
@@ -405,6 +457,7 @@ def analyze_command(command: str, *, shell: str | None = None, cwd: Path, projec
     deletes: list[DeleteTarget] = []
     denials: list[str] = []
     current_cwd = cwd.resolve()
+    possible_cwds: list[Path] = [current_cwd]
 
     def add_path(raw: str, operation: Operation, index: int, recursive: bool = False) -> Path | None:
         if not raw or "\x00" in raw:
@@ -413,16 +466,43 @@ def analyze_command(command: str, *, shell: str | None = None, cwd: Path, projec
         if raw.startswith("~") or any(char in raw for char in "*?[") or (selected == "powershell" and ":" in raw and not re.match(r"^[A-Za-z]:[\\/]", raw)):
             unknown.append(f"路径需要运行时展开或涉及非文件系统提供程序：{raw}")
         try:
-            target = Path(raw)
+            file_path = raw
+            if raw.casefold().startswith("file://"):
+                reference = urlsplit(raw)
+                file_path = unquote(reference.path)
+                if reference.netloc and reference.netloc.casefold() != "localhost":
+                    file_path = "//" + reference.netloc + file_path
+                elif os.name == "nt" and re.match(r"^/[A-Za-z]:", file_path):
+                    file_path = file_path[1:]
+            target = Path(file_path).expanduser()
+            relative = not target.is_absolute()
             if not target.is_absolute():
                 target = current_cwd / target
-            target = target.resolve()
+            if operation == "delete":
+                # 删除末级链接移除链接本身；父目录仍须实时解析。
+                target = Path(os.path.abspath(target))
+                target = target.parent.resolve() / target.name
+            else:
+                target = target.resolve()
         except (OSError, RuntimeError, ValueError):
             unknown.append(f"无法解析路径：{raw}")
             return None
         paths.append(PathAccess(raw, target, operation, index, recursive))
         if operation == "delete":
             deletes.append(DeleteTarget(raw, target, recursive, index))
+        if relative and operation != "cwd":
+            # cd/Set-Location 失败后命令仍可能继续，在已知候选 cwd 中同时筛查。
+            for fallback_cwd in possible_cwds:
+                if fallback_cwd == current_cwd:
+                    continue
+                alternate = fallback_cwd / Path(file_path).expanduser()
+                alternate = (Path(os.path.abspath(alternate)).parent.resolve() / alternate.name
+                             if operation == "delete" else alternate.resolve())
+                access = PathAccess(raw, alternate, operation, index, recursive)
+                if access not in paths:
+                    paths.append(access)
+                    if operation == "delete":
+                        deletes.append(DeleteTarget(raw, alternate, recursive, index))
         return target
 
     ordered = sorted(syntax.commands, key=lambda item: item.offset)
@@ -450,6 +530,8 @@ def analyze_command(command: str, *, shell: str | None = None, cwd: Path, projec
                 next_cwd = add_path(targets[0], "cwd", index)
                 if next_cwd is not None:
                     current_cwd = next_cwd
+                    if next_cwd not in possible_cwds and len(possible_cwds) < 16:
+                        possible_cwds.append(next_cwd)
         elif name in _DELETE:
             targets = list(dict.fromkeys(targets + positional))
             recursive = "recurse" in options if selected == "powershell" else any(
@@ -495,7 +577,7 @@ def analyze_command(command: str, *, shell: str | None = None, cwd: Path, projec
                 value in {"--recursive", "--archive"} or (selected != "powershell" and value.startswith("-") and not value.startswith("--") and any(char in value for char in "rRa"))
                 for value in item.argv[1:]
             ):
-                unknown.append("递归复制或移动的完整目标需要审批。")
+                unknown.append("递归复制或移动的完整目标无法静态确定。")
             if destination:
                 destination_path = add_path(destination, "write", index)
                 if destination_path is not None and destination_path.is_dir():
@@ -516,21 +598,64 @@ def analyze_command(command: str, *, shell: str | None = None, cwd: Path, projec
             if any(value in {"--ext-diff", "--textconv", "--output", "--delete", "-d", "-D", "-m", "-M", "-c", "-C"}
                    or value.startswith("--output=") for value in item.argv[1:]):
                 unknown.append("Git 参数可能执行外部程序、写入文件或修改引用。")
+            # 目录和输出参数是访问事实，不能仅记录成未知而遗漏外部目标。
+            git_cwd = current_cwd
+            previous_cwd = current_cwd
+            consumed: set[int] = set()
+            for argument_index, value in enumerate(item.argv[1:], 1):
+                if argument_index in consumed:
+                    continue
+                key, separator, inline_value = value.partition("=")
+                operation = {"-C": "cwd", "--git-dir": "write", "--work-tree": "write", "--output": "write"}.get(key)
+                if operation is None:
+                    continue
+                consumed.add(argument_index)
+                path_value = inline_value if separator else (item.argv[argument_index + 1] if argument_index + 1 < len(item.argv) else "")
+                if not separator:
+                    consumed.add(argument_index + 1)
+                current_cwd = git_cwd
+                target_path = add_path(path_value, operation, index)
+                if operation == "cwd" and target_path is not None:
+                    git_cwd = target_path
+            current_cwd = git_cwd
             # 分支名称、查询模式及 commit 是引用，不是文件路径。
-            git_path_values = () if len(item.argv) > 1 and item.argv[1].casefold() == "branch" else item.argv[1:]
+            git_path_values = () if len(item.argv) > 1 and item.argv[1].casefold() == "branch" else (
+                value for value_index, value in enumerate(item.argv[1:], 1) if value_index not in consumed)
             for value in git_path_values:
                 if not value.startswith("-") and _looks_like_path(value):
                     add_path(value, "read", index)
+            current_cwd = previous_cwd
         elif name not in _HARMLESS:
             unknown.append(f"{name or '命令'} 的文件影响不能静态确定。")
-            for value in item.argv[1:]:
+            skip_next = False
+            for argument_index, value in enumerate(item.argv[1:], 1):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if name in _INTERPRETERS and value.casefold() in {"-c", "-command", "-encodedcommand", "-e", "--eval", "/c", "/k"}:
+                    skip_next = True
+                    continue
+                if value.startswith("-") and "=" in value:
+                    value = value.partition("=")[2]
                 if not value.startswith("-") and _looks_like_path(value):
-                    add_path(value, "read", index)
+                    # 未知程序的路径参数可能被读写，不生成只读范围的推测授权。
+                    add_path(value, "write", index)
         if name in _INTERPRETERS or (item.argv and _looks_like_path(item.argv[0])):
-            unknown.append("命令运行解释器、脚本或显式路径程序，需要审批。")
+            unknown.append("命令运行解释器、脚本或显式路径程序，其内部影响无法静态确定。")
         if item.argv and _looks_like_path(item.argv[0]):
             # 系统解释器和程序可安装在项目外；这是执行位置，不是数据读写授权。
             add_path(item.argv[0], "execute", index)
+        nested = _literal_nested_command(name, item.argv, selected) if not item.dynamic else None
+        if nested is not None:
+            if _depth >= 4:
+                unknown.append("嵌套命令超出分析深度。")
+            else:
+                child = analyze_command(nested[0], shell=nested[1], cwd=command_cwds[index],
+                                        project_root=project_root, _depth=_depth + 1)
+                unknown.extend(child.unknown_reasons)
+                denials.extend(child.hard_denials)
+                paths.extend(PathAccess(value.raw, value.path, value.operation, index, value.recursive) for value in child.path_accesses)
+                deletes.extend(DeleteTarget(value.raw, value.path, value.recursive, index) for value in child.deletes)
 
     for redirect in syntax.redirects:
         if redirect.raw is None:

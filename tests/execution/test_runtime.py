@@ -34,7 +34,7 @@ def python_command(script: str) -> str:
 
 
 async def approve_once(request):
-    """生命周期测试显式批准解释器，不通过 bypass 跳过未知命令审批。"""
+    """生命周期测试在遇到项目外目标时明确批准本次访问。"""
     return PermissionResolution(request.request_id, 'allow_once')
 
 
@@ -62,7 +62,7 @@ class IdleProvider:
 def setup_runtime(tmp_path, provider_config, provider=None, *, execution_config=None):
     config = execution_config or ExecutionConfig(command_profiles=[CommandProfile('测试脚本', '*')])
     runtime = ExecutionRuntime(tmp_path, config)
-    session = SessionController(provider_config, cwd=tmp_path, initial_permission_policy='bypass')
+    session = SessionController(provider_config, cwd=tmp_path, initial_execution_access='full')
     registry = create_default_tool_registry()
     executor = ToolExecutor(registry, cwd=tmp_path, execution_runtime=runtime)
     runner = TurnRunner(provider or IdleProvider(), session, registry, executor)
@@ -73,10 +73,59 @@ async def launch(executor, session, script, *, lifetime='session', turn_id='orig
     arguments = {'description': '生命周期测试', 'command': python_command(script), 'yield_ms': 0, 'lifetime': lifetime}
     results = await executor.execute_calls([ToolCall(0, 'provider-call', 'run_command', arguments, json.dumps(arguments))],
         session_id=session.session_id, session_workspace=session.paths.workspace,
-        session_root=session.paths.root, permission_policy='bypass', turn_id=turn_id,
+        session_root=session.paths.root, execution_access='full', turn_id=turn_id,
         permission_resolver=approve_once)
     assert (not results[0].is_error), results[0].error_message
     return results[0].metadata['process_id']
+
+
+@pytest.mark.asyncio
+async def test_project_unknown_script_runs_without_approval_and_keeps_analysis_facts(tmp_path, openai_provider_config):
+    runtime, session, executor, runner = setup_runtime(tmp_path, openai_provider_config)
+    session.create_user_message('执行项目脚本')
+    try:
+        arguments = {'description': '运行项目脚本', 'command': python_command("print('script-ready')"), 'yield_ms': 5000}
+        result, = await executor.execute_calls([ToolCall(0, 'script-call', 'run_command', arguments, '{}')],
+            session_id=session.session_id, session_workspace=session.paths.workspace,
+            session_root=session.paths.root, execution_access='project', turn_id='script-turn')
+        assert not result.is_error, result.error_message
+        assert 'script-ready' in result.content
+        assert result.metadata['access_mode'] == 'project'
+        assert result.metadata['analysis_unknown']
+        assert len(result.metadata['execution_signature']) == 64
+    finally:
+        await runner.shutdown()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_project_external_command_cwd_is_approved_and_reaches_real_directory(tmp_path, openai_provider_config):
+    project, external = tmp_path / 'project', tmp_path / 'external'
+    project.mkdir()
+    external.mkdir()
+    runtime, session, executor, runner = setup_runtime(project, openai_provider_config)
+    session.create_user_message('检查项目外工作目录')
+    requests = []
+
+    async def approve(request):
+        requests.append(request)
+        return PermissionResolution(request.request_id, 'allow_once')
+
+    try:
+        arguments = {'description': '查看实际工作目录', 'command': python_command('from pathlib import Path;print(Path.cwd())'),
+                     'cwd': str(external), 'yield_ms': 5000}
+        result, = await executor.execute_calls([ToolCall(0, 'cwd-call', 'run_command', arguments, '{}')],
+            session_id=session.session_id, session_workspace=session.paths.workspace,
+            session_root=session.paths.root, execution_access='project', turn_id='cwd-turn', permission_resolver=approve)
+        assert not result.is_error, result.error_message
+        assert result.metadata['cwd'] == str(external.resolve())
+        assert str(external.resolve()) in result.metadata['stdout']
+        assert len(requests) == 1
+        assert requests[0].directory_grants[0].path == str(external.resolve())
+        assert requests[0].directory_grants[0].access == 'write'
+    finally:
+        await runner.shutdown()
+        session.close()
 
 
 @pytest.mark.asyncio
@@ -336,7 +385,7 @@ async def test_unknown_background_http_server_allows_approved_clients_and_file_t
         result, = await executor.execute_calls(
             [ToolCall(0, uuid4().hex, name, arguments, json.dumps(arguments))],
             session_id=session.session_id, session_workspace=session.paths.workspace,
-            session_root=session.paths.root, turn_id='http-check', permission_policy='default',
+            session_root=session.paths.root, turn_id='http-check', execution_access='project',
             permission_resolver=approve,
         )
         assert (not result.is_error), result.error_message
@@ -372,7 +421,7 @@ async def test_unknown_background_http_server_allows_approved_clients_and_file_t
         response = await asyncio.wait_for(execute('run_command', {
             'description': '已批准的 HTTP 客户端', 'command': client_command, 'yield_ms': 5000,
         }), 7)
-        assert client_command in approved_commands
+        assert approved_commands == []
         assert response.metadata['exit_code'] == 0 and 'HTTP-RESOURCE-SCOPE' in response.content
         assert runtime.processes.get(process_id, session.session_id).status == 'running'
         read = await asyncio.wait_for(execute('read_file', {'path': 'index.html'}), 2)
@@ -410,7 +459,7 @@ async def test_explicit_process_profile_blocks_until_real_exit_and_reports_proce
         result, = await executor.execute_calls(
             [ToolCall(0, call_id or uuid4().hex, name, arguments, json.dumps(arguments))],
             session_id=session.session_id, session_workspace=session.paths.workspace,
-            session_root=session.paths.root, turn_id='profile-turn', permission_policy='bypass',
+            session_root=session.paths.root, turn_id='profile-turn', execution_access='full',
             on_call_started=on_started, permission_resolver=approve_once,
         )
         assert (not result.is_error), result.error_message
@@ -676,7 +725,7 @@ async def test_session_stop_blocks_new_turn_and_file_calls_until_all_stops_finis
         result, = await executor.execute_calls(
             [ToolCall(0, 'late-file', 'write_file', args, json.dumps(args))],
             session_id=session.session_id, generation=runtime.generation(session.session_id),
-            permission_policy='bypass',
+            execution_access='full',
         )
         assert result.error_code == 'steering_superseded'
         assert not (tmp_path / 'new.txt').exists()

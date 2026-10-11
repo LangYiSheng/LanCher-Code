@@ -272,7 +272,7 @@ def test_estimator_ignores_internal_metadata_and_json_transport_escaping() -> No
     message.blocks[0].input = {"internal-only": "x" * 1000}
     tool.category = "command"
     tool.should_defer = True
-    request.permission_policy = "bypass"
+    request.execution_access = "full"
     assert estimate_request(request, ContextManagementState()).tokens == original
     assert estimate_text_tokens("你" * 300) == 200
     assert estimate_text_tokens("x" * 300) == 100

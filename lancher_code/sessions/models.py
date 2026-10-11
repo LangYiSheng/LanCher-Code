@@ -6,7 +6,8 @@ from datetime import datetime
 from typing import Literal
 
 from lancher_code.context.models import CompactionActivity, ContextManagementState
-from lancher_code.contracts.control import PermissionPolicy, WorkPhase
+from lancher_code.contracts.control import ExecutionAccess, WorkPhase
+from lancher_code.permissions.models import DirectoryGrant
 from lancher_code.usage.models import MessageUsage
 
 
@@ -72,7 +73,8 @@ class PendingInput:
 class SessionState:
     messages: list[SessionMessage] = field(default_factory=list)
     work_phase: WorkPhase = "execute"
-    permission_policy: PermissionPolicy = "default"
+    execution_access: ExecutionAccess = "project"
+    directory_grants: list[DirectoryGrant] = field(default_factory=list)
     session_id: str | None = None
     plan_snapshot: PlanSnapshot | None = None
     pending_inputs: list[PendingInput] = field(default_factory=list)

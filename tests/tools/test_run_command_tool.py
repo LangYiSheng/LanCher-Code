@@ -110,7 +110,7 @@ async def test_run_command_invalid_arguments(tmp_path, arguments):
 
 
 @pytest.mark.asyncio
-async def test_run_command_requires_session_and_execute_phase(tmp_path):
+async def test_run_command_requires_session_and_obeys_readonly_phase(tmp_path):
     result = await RunCommandTool().execute({"description": "x", "command": "x"},
                                            ToolContext(file_state_cache=FileStateCache(), cwd=tmp_path, timeout_seconds=1))
     assert not (not result.is_error)
@@ -119,6 +119,64 @@ async def test_run_command_requires_session_and_execute_phase(tmp_path):
     result = await RunCommandTool().execute({"description": "x", "command": "x"}, ctx)
     assert not (not result.is_error) and not ctx.execution_runtime.processes.active_session(ctx.session_id)
     await ctx.execution_runtime.processes.close()
+
+
+@pytest.mark.asyncio
+async def test_authorized_command_uses_external_cwd(tmp_path):
+    project, external = tmp_path / "project", tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    ctx = context(project)
+    try:
+        result = await RunCommandTool().execute({
+            "description": "核对实际工作目录", "command": command("from pathlib import Path;print(Path.cwd())"),
+            "cwd": str(external), "yield_ms": 5000}, ctx)
+        assert not result.is_error, result.content
+        assert result.metadata["cwd"] == str(external.resolve())
+        assert str(external.resolve()) in result.metadata["stdout"]
+    finally:
+        await ctx.execution_runtime.processes.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["discuss", "plan"])
+async def test_readonly_command_runs_but_unknown_script_is_refused(tmp_path, phase):
+    ctx = context(tmp_path)
+    ctx.work_phase = phase
+    try:
+        result = await RunCommandTool().execute({"description": "查看目录", "command": (
+            "Get-Location" if os.name == "nt" else "pwd"), "yield_ms": 5000}, ctx)
+        assert not result.is_error, result.content
+        unknown = await RunCommandTool().execute({"description": "运行脚本", "command": command("print('query')")}, ctx)
+        assert unknown.error_code == "phase_disallowed"
+    finally:
+        await ctx.execution_runtime.processes.close()
+
+
+def test_command_resource_claims_cover_known_external_file(tmp_path):
+    project, external = tmp_path / "project", tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    file = external / "note.txt"
+    file.write_text("note", encoding="utf-8")
+    ctx = context(project)
+    quoted = "'" + str(file).replace("'", "''") + "'" if os.name == "nt" else shlex.quote(str(file))
+    command_text = ("Get-Content " if os.name == "nt" else "cat ") + quoted
+    claims = RunCommandTool().resource_claims({"command": command_text}, ctx)
+    assert any(claim.kind == "path" and __import__("pathlib").Path(claim.key).resolve() == file.resolve()
+               and claim.mode == "shared" for claim in claims)
+
+
+def test_empty_command_profile_cannot_remove_actual_external_cwd_claim(tmp_path):
+    project, external = tmp_path / "project", tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    ctx = context(project)
+    ctx.execution_runtime.command_claims = lambda command_text, cwd: ()
+    claims = RunCommandTool().resource_claims({"command": "Get-Location" if os.name == "nt" else "pwd",
+                                              "cwd": str(external)}, ctx)
+    assert any(claim.kind == "path" and __import__("pathlib").Path(claim.key).resolve() == external.resolve()
+               and claim.recursive and claim.mode == "shared" and claim.lifetime == "invocation" for claim in claims)
 
 
 @pytest.mark.asyncio

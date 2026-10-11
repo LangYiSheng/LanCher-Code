@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from lancher_code.permissions.models import PermissionMatchKind
 from lancher_code.contracts.tools import ToolCall, ToolDefinition
 from lancher_code.tools.context import ToolContext
-from lancher_code.filesystem.access import PathWriteDeniedError, ensure_path_in_root, relative_display_path, resolve_path_in_root
+from lancher_code.filesystem.access import PathWriteDeniedError, relative_display_path, resolve_access_path
 
 
 TOOL_LABELS: dict[str, str] = {
@@ -46,8 +46,7 @@ def current_command_shell() -> str:
 
 def rule_context_matches(rule, target: MatchTarget) -> bool:
     if rule.command_cwd is None:
-        # 旧精确允许缺少 cwd/Shell 绑定；保留记录但要求重新批准。
-        return not (target.tool_name == "run_command" and rule.result == "allow" and rule.match_kind == "exact")
+        return True
     if target.command_cwd is None or target.command_shell != rule.command_shell:
         return False
     return os.path.normcase(os.path.normpath(rule.command_cwd)) == os.path.normcase(os.path.normpath(target.command_cwd))
@@ -124,11 +123,11 @@ def build_match_target(call: ToolCall, tool: ToolDefinition, context: ToolContex
     if tool.name == "run_command":
         command = str(call.arguments.get("command", "")).strip()
         raw_cwd = call.arguments.get("cwd")
-        command_cwd = resolve_path_in_root(context.cwd, ".", context.project_root or context.cwd)
+        command_cwd = resolve_access_path(context.cwd, ".", context)
         if raw_cwd is not None:
             if not isinstance(raw_cwd, str) or not raw_cwd.strip():
-                raise ValueError("cwd 必须是项目内的非空路径字符串。")
-            command_cwd = resolve_path_in_root(context.cwd, raw_cwd, context.project_root or context.cwd)
+                raise ValueError("cwd 必须是非空路径字符串。")
+            command_cwd = resolve_access_path(context.cwd, raw_cwd, context)
         return MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=command, exact_value=command,
                            command_cwd=str(command_cwd), command_shell=current_command_shell())
     if tool.name in {"process_write", "process_background"}:
@@ -138,17 +137,20 @@ def build_match_target(call: ToolCall, tool: ToolDefinition, context: ToolContex
         if context.plan_file_path is None:
             raise PathWriteDeniedError("missing_plan_file_path", "当前上下文没有会话计划文件路径。")
         else:
-            plan_path = ensure_path_in_root(context.plan_file_path, context.project_root or context.cwd)
+            plan_path = context.plan_file_path.resolve()
             relative_path = relative_display_path(plan_path, context.project_root or context.cwd)
         return MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=_normalize_path(relative_path),)
     if tool.name == "delete_file":
-        from lancher_code.filesystem.deletion import plan_delete
-        plan = plan_delete(call.arguments, context)
-        relative_path = str(plan.target.relative_to((context.project_root or context.cwd).resolve()))
+        from lancher_code.filesystem.deletion import resolve_delete_target
+        path = resolve_delete_target(str(call.arguments.get("path", "")), context)
+        try:
+            relative_path = str(path.relative_to((context.project_root or context.cwd).resolve()))
+        except ValueError:
+            relative_path = str(path)
         return MatchTarget(tool.name, TOOL_LABELS[tool.name], _normalize_path(relative_path))
     if tool.name in {"read_file", "write_file", "edit_file"}:
         raw_path = str(call.arguments.get("path", "")).strip()
-        resolved = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+        resolved = resolve_access_path(context.cwd, raw_path, context)
         relative_path = relative_display_path(resolved, context.project_root or context.cwd)
         return MatchTarget(tool_name=tool.name, tool_label=TOOL_LABELS[tool.name], value=_normalize_path(relative_path),)
     if tool.name == "glob":
@@ -157,7 +159,7 @@ def build_match_target(call: ToolCall, tool: ToolDefinition, context: ToolContex
     if tool.name == "grep":
         raw_path = call.arguments.get("path")
         if isinstance(raw_path, str) and raw_path.strip():
-            resolved = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+            resolved = resolve_access_path(context.cwd, raw_path, context)
             relative_path = relative_display_path(resolved, context.project_root or context.cwd)
         else:
             relative_path = "."

@@ -15,8 +15,8 @@
 | 名称 | 含义 |
 |---|---|
 | `WorkPhase` | 工作阶段：`discuss`（讨论）/ `plan`（计划）/ `execute`（执行），限定工具范围 |
-| `PermissionPolicy` | 权限策略：`default`（逐次确认）/ `acceptEdits`（自动编辑）/ `bypass`（跳过询问），不能突破阶段边界 |
-| Plan Mode | 计划阶段：只读探索 + 专用计划写入，权限策略保持不变 |
+| `ExecutionAccess` | 执行访问范围：`project`（项目内自动，外部审批）/ `full`（任意目录自动），讨论和计划有效只读 |
+| Plan Mode | 计划阶段：只读探索 + 专用计划写入，保留执行阶段的访问选择 |
 | `PermissionRule` | 权限规则：`{match, result, match_kind}`，match 形如 `RunCommand(git *)` |
 | Invocation | 一次工具请求的应用身份与状态；保留模型的调用 ID，和真实进程生命周期分开 |
 | Process | 所属 Session 托管的真实进程，以应用 UUID 标识；PID 仅作诊断信息 |
@@ -25,9 +25,9 @@
 | generation | Session 执行代次；停止后拒绝旧审批、旧执行请求和迟到回调 |
 | 输出游标 | 累计 UTF-8 解码字符位置；模型与界面各自续读，不消费另一观察者的数据 |
 | 收件箱 | 后台完成事件在 Session 的投影；下次正常请求才交给模型，不自动开轮 |
-| `match_kind` | 必须为 `exact` 精确匹配或 `glob` 显式通配；新授权默认精确匹配 |
+| `match_kind` | 额外拒绝规则的匹配方式，必须为 `exact` 精确匹配或 `glob` 显式通配 |
 | Rule scope | 规则作用域：`session`（随 Session 持久化）/ `project`（`./.lancher/permissions.yaml`）/ `user`（`~/.lancher/permissions.yaml`） |
-| PermissionResolution | 用户对权限请求的决议：`allow_once` / `allow_session` / `allow_project` / `deny` |
+| PermissionResolution | 用户对外部访问请求的决议：`allow_once` / `allow_session` / `deny` |
 | Human-in-the-loop | 人在回路：阶段允许且规则与权限策略未放行时，由界面中的权限提示请用户决定 |
 
 ## 工具
@@ -47,7 +47,7 @@
 | 名称 | 含义 |
 |---|---|
 | JSONL | 每行一个 JSON 对象的文本格式，Session 事件使用（`.lancher/sessions/<UUID>/events.jsonl`） |
-| 会话格式版本 | `EVENT_FORMAT_VERSION = 2`，事件、列表缓存与 checkpoint 使用当前版本；旧格式原样保留，拒绝恢复并提示新建会话 |
+| 会话格式版本 | `EVENT_FORMAT_VERSION = 3`，事件、列表缓存与 checkpoint 使用当前版本；旧格式原样保留，拒绝恢复并提示新建会话 |
 | `PlanSnapshot` | 绑定当前会话的计划正文、内容摘要、来源消息与就绪标记；执行确认的来源 |
 | `PendingInput` | 工作中投递的输入：`follow_up` 排到下一轮或 `steer` 补充当前任务；恢复会话后均暂停 |
 | `ContextUsageAnchor` | 可靠输入 usage 与请求发出前的匹配快照边界，用于只估新增内容 |

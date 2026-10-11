@@ -44,7 +44,7 @@ def test_changes_append_without_rewriting_previous_system_or_messages(session):
     blocks[0] = '<project_instructions>新约定</project_instructions>'
     blocks.append('<active_skill id="project/check">技能正文</active_skill>')
     session.set_work_phase('plan')
-    session.set_permission_policy('acceptEdits')
+    session.set_execution_access('project')
     session.create_user_message('计划一下')
     second = session.build_request([tool('read'), tool('mcp_data')], allow_tool_calls=True)
     assert second.system == first.system
@@ -53,7 +53,7 @@ def test_changes_append_without_rewriting_previous_system_or_messages(session):
     assert session.transcript[0].blocks == [ContentBlock.text_block('先查看')]
     latest = second.messages[-1].blocks[0].text
     assert '新约定' in latest and '技能正文' in latest
-    assert '用户刚进入 Plan Mode' in latest and 'acceptEdits' in latest
+    assert '用户刚进入 Plan Mode' in latest and 'project' in latest
     assert list(session.context_state.prefix_state['observed_tools']) == ['read', 'mcp_data']
 
 

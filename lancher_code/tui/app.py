@@ -53,7 +53,7 @@ from lancher_code.tui.theme import apply_theme
 from lancher_code.tui.exit_flow import ExitFlow
 from lancher_code.tui.chat_controls import (
     ChatAction, StageBar, PendingQueue, PendingInputEditor, PlanPanel,
-    PlanReviewScreen, PermissionPolicyScreen, ReadOnlyDetailsScreen,
+    PlanReviewScreen, ExecutionAccessScreen, ReadOnlyDetailsScreen,
 )
 from lancher_code.agent.runner import TurnRunner
 
@@ -178,7 +178,7 @@ class LanCherTextualApp(App[int]):
                 with Horizontal(id="composer-actions"):
                     yield Static("Enter 发送 · Shift+Enter 换行", id="composer-help", markup=False)
                     yield Button("模型", id="chat-model", classes="quiet-action")
-                    yield Button("审批", id="chat-policy", classes="quiet-action")
+                    yield Button("访问", id="chat-access", classes="quiet-action")
                     yield Button("详情", id="chat-details", classes="quiet-action")
                     yield Button("补充", id="chat-steer", classes="quiet-action")
                     yield Button("排队", id="chat-queue", classes="quiet-action")
@@ -556,7 +556,7 @@ class LanCherTextualApp(App[int]):
             right=self.query_one("#status-right", Static), banner=self.query_one(BannerWidget),
             composer=self.query_one(ComposerTextArea), stage=self.query_one(StageBar),
             details=self.query_one("#status-details", Static),
-            model=self.query_one("#chat-model", Button), policy=self.query_one("#chat-policy", Button),
+            model=self.query_one("#chat-model", Button), policy=self.query_one("#chat-access", Button),
             steer=self.query_one("#chat-steer", Button), queue=self.query_one("#chat-queue", Button),
             actions=self.query_one("#composer-actions"), help=self.query_one("#composer-help", Static),
         )
@@ -659,7 +659,7 @@ class LanCherTextualApp(App[int]):
             self.query_one(ComposerTextArea).focus()
 
     def _apply_turn_event(self, event: TurnEvent) -> None:
-        if event.kind in {"phase_changed", "policy_changed"}:
+        if event.kind in {"phase_changed", "access_changed"}:
             self._status_hint = event.progress_message or "阶段已更新"
             self._refresh_phase_chrome()
             self._refresh_composer_placeholder()
@@ -692,8 +692,8 @@ class LanCherTextualApp(App[int]):
 
     def _refresh_phase_chrome(self) -> None:
         phase = self._session_controller.work_phase
-        policy = self._session_controller.permission_policy
-        glyph = "#" if phase == "plan" else {"default": ">", "acceptEdits": "+", "bypass": "!"}[policy]
+        policy = self._session_controller.execution_access
+        glyph = "#" if phase in {"discuss", "plan"} else {"project": ">", "full": "!"}[policy]
         self.query_one("#prompt-glyph", Static).update(glyph)
 
     def _refresh_composer_placeholder(self) -> None:
@@ -760,8 +760,8 @@ class LanCherTextualApp(App[int]):
             config = self._turn_runner.model_config
             if config is not None and not self._is_streaming:
                 self.push_screen(ModelPickerScreen(config, self._turn_runner.model_ref), self._handle_model_selected)
-        elif button_id == "chat-policy":
-            self.push_screen(PermissionPolicyScreen(), self._handle_policy_selected)
+        elif button_id == "chat-access":
+            self.push_screen(ExecutionAccessScreen(), self._handle_access_selected)
         elif button_id == "chat-details":
             self.action_toggle_details()
         elif button_id in {"chat-steer", "chat-queue"}:
@@ -830,10 +830,10 @@ class LanCherTextualApp(App[int]):
         self._refresh_phase_chrome()
         self._begin_turn(text)
 
-    def _handle_policy_selected(self, policy: str | None) -> None:
+    def _handle_access_selected(self, policy: str | None) -> None:
         if policy is not None:
             try:
-                self._apply_turn_event(self._turn_runner.set_permission_policy(policy))
+                self._apply_turn_event(self._turn_runner.set_execution_access(policy))
             except (LanCherError, ValueError, RuntimeError) as exc:
                 self.notify(str(exc), severity="warning")
         self._refresh_status_bar()
@@ -871,7 +871,7 @@ class LanCherTextualApp(App[int]):
             if (self._is_streaming or self._turn_runner.has_active_turn) and not self._completion.allowed_while_busy(command_name, arguments_text):
                 raise ValueError("当前任务结束后可执行命令；草稿已保留。")
             self._slash_command_registry.validate(command_name, arguments_text)
-            if command_name in {"session", "model", "permissions", "settings"} and not arguments_text.strip():
+            if command_name in {"session", "model", "access", "settings"} and not arguments_text.strip():
                 composer = self.query_one(ComposerTextArea)
                 composer.text = f"/{command_name} "
                 composer.cursor_location = composer.document.end
@@ -913,10 +913,10 @@ class LanCherTextualApp(App[int]):
             self.action_toggle_details()
             return None
 
-        if command_name == "permissions":
-            self._apply_turn_event(self._turn_runner.set_permission_policy(arguments_text.strip()))
+        if command_name == "access":
+            self._apply_turn_event(self._turn_runner.set_execution_access(arguments_text.strip()))
             self._refresh_status_bar()
-            self.notify("本次审批策略已更新；工作阶段保持不变。", title="审批策略")
+            self.notify("本次访问范围已更新；工作阶段保持不变。", title="访问范围")
             return None
 
         if command_name == "model":

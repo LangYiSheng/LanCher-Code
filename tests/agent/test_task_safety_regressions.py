@@ -28,7 +28,7 @@ async def test_confirmed_plan_reaches_execution_request_with_frozen_content(open
     ])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WritePlanFileTool())
     runner.set_phase("plan")
-    runner.set_permission_policy("bypass")
+    runner.set_execution_access("full")
     await collect(runner, "制定计划")
     snapshot = session.plan_snapshot
     assert snapshot is not None and snapshot.ready
@@ -39,7 +39,7 @@ async def test_confirmed_plan_reaches_execution_request_with_frozen_content(open
     assert len(provider.requests) == 3
     request = provider.requests[-1]
     assert request.work_phase == "execute"
-    assert request.permission_policy == "bypass"
+    assert request.execution_access == "full"
     sent_text = "\n".join(block.text for message in request.messages for block in message.blocks)
     assert snapshot.content in sent_text
     assert snapshot.digest in sent_text
@@ -50,8 +50,10 @@ async def test_confirmed_plan_reaches_execution_request_with_frozen_content(open
 
 @pytest.mark.asyncio
 async def test_steering_after_approval_before_execution_does_not_persist_grant(openai_provider_config, tmp_path):
+    tmp_path = tmp_path / "project"
+    tmp_path.mkdir()
     provider = Provider([
-        calls(("write_file", {"path": "new.txt", "content": "不应写入"})),
+        calls(("write_file", {"path": "../new.txt", "content": "不应写入"})),
         reply("已按补充调整"),
     ])
     runner, _ = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
@@ -64,7 +66,7 @@ async def test_steering_after_approval_before_execution_does_not_persist_grant(o
             runner.enqueue_input("不要写入", "steer")
 
     events = await asyncio.wait_for(collect(runner, "修改文件", handle), INTERACTION_TIMEOUT)
-    assert not (tmp_path / "new.txt").exists()
+    assert not (tmp_path.parent / "new.txt").exists()
     assert not runner._tool_executor._permission_engine.storage.rules_for_scope("session")
     assert any(event.tool_result and event.tool_result.error_code == "steering_superseded" for event in events)
 
@@ -79,7 +81,7 @@ async def test_empty_plan_is_a_recoverable_tool_error(openai_provider_config, tm
     ])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WritePlanFileTool())
     runner.set_phase("plan")
-    runner.set_permission_policy("bypass")
+    runner.set_execution_access("full")
 
     events = await asyncio.wait_for(collect(runner, "制定计划"), INTERACTION_TIMEOUT)
 
@@ -106,7 +108,9 @@ async def test_queued_turn_honors_queue_pause_when_later_item_is_paused(openai_p
 
 @pytest.mark.asyncio
 async def test_restore_queue_saved_during_approval_closes_interrupted_tool_pair(openai_provider_config, tmp_path):
-    provider = Provider([calls(("write_file", {"path": "new.txt", "content": "未批准"}))])
+    tmp_path = tmp_path / "project"
+    tmp_path.mkdir()
+    provider = Provider([calls(("write_file", {"path": "../new.txt", "content": "未批准"}))])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
     restored = SessionController(openai_provider_config, cwd=tmp_path)
 
@@ -133,7 +137,7 @@ async def test_restore_queue_saved_during_approval_closes_interrupted_tool_pair(
     assert [block.call_id for block in outputs] == uses
     assert outputs[-1].is_error
     assert "可能已部分执行" in outputs[-1].text
-    assert not (tmp_path / "new.txt").exists()
+    assert not (tmp_path.parent / "new.txt").exists()
 
 
 def test_interrupted_restore_pairs_reused_call_ids_within_each_batch(openai_provider_config, tmp_path):

@@ -13,7 +13,7 @@ from lancher_code.context.models import (
 )
 from lancher_code.context.prefix import validate_prefix_state, validate_prefix_transcript
 from lancher_code.contracts.messages import ContentBlock, ConversationMessage
-from lancher_code.permissions.models import PermissionRule
+from lancher_code.permissions.models import DirectoryGrant, PermissionRule
 from lancher_code.sessions.models import (
     PendingInput,
     PlanSnapshot,
@@ -34,7 +34,8 @@ class SessionCodec:
     @classmethod
     def encode(cls, state, transcript, rules, model_ref):
         state_data = {
-            'work_phase': state.work_phase, 'permission_policy': state.permission_policy,
+            'work_phase': state.work_phase, 'execution_access': state.execution_access,
+            'directory_grants': [asdict(grant) for grant in state.directory_grants],
             'plan_mode_turn_count': state.plan_mode_turn_count,
             'pending_plan_exit_notice': state.pending_plan_exit_notice,
             'pending_plan_entry_kind': state.pending_plan_entry_kind,
@@ -62,15 +63,18 @@ class SessionCodec:
             raw = data['state']
             if 'request_usage' not in raw:
                 raise ValueError('会话缺少请求用量账本，旧计量格式不兼容，请创建新会话。')
-            phase, policy = raw["work_phase"], raw["permission_policy"]
-            if phase not in {"discuss", "plan", "execute"} or policy not in {"default", "acceptEdits", "bypass"}:
-                raise ValueError("工作阶段或权限策略无效。")
+            phase, policy = raw["work_phase"], raw["execution_access"]
+            if 'permission_policy' in raw or 'permission_mode' in raw:
+                raise ValueError('旧权限格式不兼容，请创建新会话；原文件已保留。')
+            if phase not in {"discuss", "plan", "execute"} or policy not in {"project", "full"}:
+                raise ValueError("工作阶段或执行访问范围无效。")
             if raw['pending_plan_entry_kind'] not in {None, 'initial', 'reentry'}:
                 raise ValueError('计划提示状态无效。')
             if type(raw['plan_mode_turn_count']) is not int or raw['plan_mode_turn_count'] < 0 or type(raw['pending_plan_exit_notice']) is not bool:
                 raise ValueError('计划回合状态无效。')
             state = SessionState(
-                session_id=session_id, work_phase=phase, permission_policy=policy,
+                session_id=session_id, work_phase=phase, execution_access=policy,
+                directory_grants=cls._decode_directory_grants(raw['directory_grants']),
                 messages=[cls._decode_message(item) for item in data['messages']],
                 plan_snapshot=cls.decode_plan_snapshot(raw['plan_snapshot']),
                 pending_inputs=cls.decode_pending_inputs(raw['pending_inputs']),
@@ -361,6 +365,18 @@ class SessionCodec:
         )
 
     @staticmethod
+    def _decode_directory_grants(value: object) -> list[DirectoryGrant]:
+        from lancher_code.permissions.storage import validate_directory_grant
+        if not isinstance(value, list):
+            raise ValueError('会话目录授权必须为数组。')
+        grants = []
+        for item in value:
+            if not isinstance(item, dict) or set(item) != {'path', 'access', 'recursive'}:
+                raise ValueError('会话目录授权格式无效。')
+            grants.append(validate_directory_grant(DirectoryGrant(**item)))
+        return grants
+
+    @staticmethod
     def _decode_permission_rules(value: object) -> list[PermissionRule]:
         from lancher_code.permissions.storage import validate_command_context
         if not isinstance(value, dict) or not isinstance(value.get("rules"), list):
@@ -373,7 +389,7 @@ class SessionCodec:
             result = item.get("result")
             if not isinstance(match, str) or not match.strip():
                 raise ValueError("权限规则 match 无效。")
-            if result not in {"allow", "deny"}:
+            if result != "deny":
                 raise ValueError("权限规则 result 无效。")
             match_kind = item["match_kind"]
             if match_kind not in {"exact", "glob"}:

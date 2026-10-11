@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from lancher_code.execution.contracts import ProcessSpec, ResourceClaim
@@ -7,7 +8,9 @@ from lancher_code.tools.context import ToolContext
 from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.sessions.storage import SessionRepositoryError
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.filesystem.access import resolve_path_in_root
+from lancher_code.filesystem.access import resolve_access_path
+from lancher_code.permissions.shell import analyze_command
+from lancher_code.execution.scheduler import path_claim
 
 
 def _integer(arguments: dict, name: str, default: int, minimum: int, maximum: int) -> int:
@@ -29,32 +32,37 @@ class RunCommandTool:
             input_schema={"type": "object", "properties": {
                 "description": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "一句话说明命令用途。"},
                 "command": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "Windows 使用 PowerShell，POSIX 使用 /bin/sh。"},
-                "cwd": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "可选，项目内的现存工作目录。"},
+                "cwd": {"type": "string", "minLength": 1, "pattern": r"\S", "description": "可选，现存工作目录；项目外路径由访问权限决定。"},
                 "transport": {"type": "string", "enum": ["pipe", "pty"], "default": "pipe"},
                 "lifetime": {"type": "string", "enum": ["turn", "session"], "default": "turn"},
                 "yield_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "default": 1000},
                 "max_runtime_ms": {"type": ["integer", "null"], "minimum": 1},
             }, "required": ["description", "command"], "additionalProperties": False},
             category="command", is_system_tool=True,
-            allowed_phases=("execute",))
+            allowed_phases=("discuss", "plan", "execute"))
 
     def resource_claims(self, arguments: dict, context: ToolContext) -> tuple[ResourceClaim, ...]:
         cwd = self._cwd(arguments, context)
         if context.execution_runtime is None:
             return (ResourceClaim("project", str(context.project_root)),)
-        return context.execution_runtime.command_claims(str(arguments.get("command", "")), cwd)
+        command = str(arguments.get("command", ""))
+        declared = context.execution_runtime.command_claims(command, cwd)
+        analysis = analyze_command(command, cwd=cwd, project_root=context.project_root or context.cwd)
+        startup = path_claim(cwd, write=not analysis.read_only, recursive=True, lifetime="invocation")
+        inferred = tuple(path_claim(item.path, write=item.operation != "read", recursive=item.recursive,
+                                    lifetime="invocation")
+                         for item in analysis.path_accesses if item.operation != "execute")
+        return tuple(dict.fromkeys((*declared, startup, *inferred)))
 
     def _cwd(self, arguments: dict, context: ToolContext) -> Path:
         raw = arguments.get("cwd")
         if raw is not None and (not isinstance(raw, str) or not raw.strip()):
             raise ValueError("cwd 必须是非空路径字符串。")
-        return resolve_path_in_root(context.cwd, raw or ".", context.project_root or context.cwd)
+        return resolve_access_path(context.cwd, raw or ".", context)
 
     async def execute(self, arguments: dict, context: ToolContext) -> ToolExecutionResult:
         name = self.definition.name
         try:
-            if context.work_phase != "execute":
-                raise ValueError("执行命令需要 execute 阶段。")
             for key in ("command", "description"):
                 if not isinstance(arguments.get(key), str) or not arguments[key].strip():
                     raise ValueError(f"{key} 必须是非空字符串。")
@@ -70,6 +78,12 @@ class RunCommandTool:
             if runtime is None or context.session_id is None or context.invocation_id is None:
                 raise ValueError("进程执行需要已注册的 Session 和工具调用身份。")
             command = arguments["command"].strip()
+            if context.work_phase in {"discuss", "plan"}:
+                analysis = await asyncio.to_thread(analyze_command, command, cwd=self._cwd(arguments, context),
+                                                  project_root=context.project_root or context.cwd)
+                if not analysis.read_only or analysis.hard_denials:
+                    return build_tool_error(summary="执行命令失败", error_code="phase_disallowed",
+                                            error_message="只读阶段只能执行完整识别的查询命令。", tool_name=name)
             spec = ProcessSpec(command, arguments["description"].strip(), self._cwd(arguments, context),
                                transport=transport, lifetime=lifetime, yield_ms=yield_ms,
                                max_runtime_ms=runtime_ms, readiness=runtime.command_readiness(command))

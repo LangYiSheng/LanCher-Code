@@ -3,7 +3,7 @@ from __future__ import annotations
 from lancher_code.tools.context import ToolContext
 from lancher_code.contracts.tools import ToolDefinition, ToolExecutionResult
 from lancher_code.tools.core.base import build_tool_error, build_tool_success
-from lancher_code.filesystem.access import relative_display_path, resolve_path_in_root
+from lancher_code.filesystem.access import relative_display_path, resolve_access_path
 
 DEFAULT_MAX_INLINE_LINES = 400
 MAX_CHUNK_LINES = 400
@@ -75,11 +75,11 @@ class ReadFileTool:
             )
 
         try:
-            path = resolve_path_in_root(context.cwd, raw_path, context.project_root or context.cwd)
+            path = resolve_access_path(context.cwd, raw_path, context)
         except ValueError as exc:
             return build_tool_error(
                 summary="读取文件失败",
-                error_code="path_outside_project",
+                error_code="invalid_path",
                 error_message=str(exc),
                 tool_name=self.definition.name,
             )

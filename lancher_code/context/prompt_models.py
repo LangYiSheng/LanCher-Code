@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from lancher_code.contracts.control import PermissionPolicy, WorkPhase
+from lancher_code.contracts.control import ExecutionAccess, WorkPhase
 from lancher_code.contracts.messages import ConversationMessage
 from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.sessions.models import PlanModeEntryKind, PlanSnapshot
@@ -21,7 +21,7 @@ class PromptContext:
     pending_plan_exit_notice: bool = False
     plan_exists: bool = False
     work_phase: WorkPhase = "execute"
-    permission_policy: PermissionPolicy = "default"
+    execution_access: ExecutionAccess = "project"
     plan_snapshot: PlanSnapshot | None = None
     session_id: str | None = None
     session_workspace: Path | None = None

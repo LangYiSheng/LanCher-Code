@@ -44,7 +44,7 @@ class PermissionSettingsEditor(SettingsDomainEditor):
     def compose(self) -> ComposeResult:
         with Vertical(id="rules-list", classes="list-region"):
             yield Select((("当前项目", "project"), ("全局", "user")), value="project", allow_blank=False, id="rule-scope")
-            yield Static("会话规则优先于项目，项目优先于全局；同层最后匹配的规则生效。", classes="scope-note")
+            yield Static("仅配置额外拒绝规则；匹配后在任何访问模式都拒绝。目录授权只保存在本会话。", classes="scope-note")
             yield DataTable(id="rules-table", cursor_type="row")
             yield Button("＋ 添加权限规则", id="rule-new", classes="link-button")
         with Vertical(id="rule-editor", classes="form"):
@@ -54,8 +54,8 @@ class PermissionSettingsEditor(SettingsDomainEditor):
             yield from field("命令工作目录（可选，绝对路径）", Input(id="rule-command-cwd"))
             yield from field("命令 Shell（与工作目录成对填写）", Input(placeholder="powershell / sh / bash", id="rule-command-shell"))
             yield from field("匹配方式", Select((("精确匹配", "exact"), ("通配规则（glob）", "glob")), value="exact", allow_blank=False, id="rule-match-kind"))
-            yield Static("精确匹配只授权完整目标；Shell 精确允许需同时填写工作目录与 Shell。通配规则逐个检查子命令。", classes="scope-note")
-            yield from field("处理方式", Select((("允许", "allow"), ("拒绝", "deny")), value="allow", allow_blank=False, id="rule-result"))
+            yield Static("精确匹配完整目标；通配规则同时检查各个子命令。工作目录与 Shell 可进一步限制命令规则。", classes="scope-note")
+            yield from field("处理方式", Select((("拒绝", "deny"),), value="deny", allow_blank=False, id="rule-result"))
             with Horizontal(classes="row-actions"):
                 yield Button("上移", id="rule-up")
                 yield Button("下移", id="rule-down")
@@ -85,7 +85,7 @@ class PermissionSettingsEditor(SettingsDomainEditor):
 
     def edit_rule(self, index: int | None = None) -> None:
         self._editing_rule_index = index
-        rule = self._rules()[index] if index is not None else PermissionRule("", "allow", self._rule_scope, match_kind="exact")
+        rule = self._rules()[index] if index is not None else PermissionRule("", "deny", self._rule_scope, match_kind="exact")
         self.query_one("#rules-list").display = False
         self.query_one("#rule-editor").display = True
         self.query_one("#rule-editor-scope", Static).update(("当前项目" if self._rule_scope == "project" else "全局") + " · 保存后立即生效")

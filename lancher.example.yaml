@@ -1,5 +1,5 @@
-# 当前开发版只接受 providers/default_model 与独立的工作阶段、权限策略。
-# 旧 provider、permission_mode 不自动迁移；请按此结构重新配置。
+# 当前开发版只接受 providers/default_model 与独立的工作阶段、执行访问范围。
+# 旧 provider、permission_mode、permission_policy 不自动迁移；请按此结构重新配置。
 # 供应商和模型的 ID 创建后保持稳定，显示名称可以随时修改。
 providers:
   deepseek:
@@ -52,7 +52,7 @@ runtime:
   tool_loop_limit: 50
   unknown_tool_streak_limit: 3
   work_phase: execute # discuss | plan | execute
-  permission_policy: default # default | acceptEdits | bypass，独立于工作阶段
+  execution_access: project # project | full；讨论和计划始终只读
 
 # 调度额度和进程额度分别控制；日志写到各自 Session 的 processes 目录。
 execution:

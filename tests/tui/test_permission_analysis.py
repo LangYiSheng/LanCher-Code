@@ -44,6 +44,8 @@ def _chat_app(config, ui, project: Path):
 
 
 def _request(project: Path, tool, arguments):
+    if tool.definition.name == "run_command":
+        arguments = {**arguments, "cwd": str(project.parent)}
     check = PermissionEngine().evaluate(
         call=ToolCall(0, "ui-permission", tool.definition.name, arguments, "{}"),
         tool=tool.definition, context=ToolContext(cwd=project, timeout_seconds=2),
@@ -161,11 +163,11 @@ async def test_short_terminal_keeps_complete_command_details_reachable(openai_pr
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("width", "height"), [(32, 14), (48, 20)])
 async def test_narrow_recursive_delete_has_only_reachable_once_approval(openai_provider_config, ui_config, tmp_path: Path, width: int, height: int) -> None:
-    target = tmp_path / "temporary"
+    target = tmp_path.parent / (tmp_path.name + "-temporary")
     target.mkdir()
     for name in ("first.txt", "last.txt"):
         (target / name).write_text(name, encoding="utf-8")
-    request = _request(tmp_path, DeleteFileTool(), {"path": "temporary", "recursive": True})
+    request = _request(tmp_path, DeleteFileTool(), {"path": str(target), "recursive": True})
     app, session = _chat_app(openai_provider_config, ui_config, tmp_path)
     outcomes = []
     app._turn_runner.resolve_permission_request = lambda resolution: outcomes.append(resolution.outcome) or True
@@ -176,12 +178,14 @@ async def test_narrow_recursive_delete_has_only_reachable_once_approval(openai_p
             panel = app.query_one(InlinePermissionPanel)
             options = list(panel.query(PermissionOption))
             assert panel.has_class("-compact")
-            assert [option.outcome for option in options] == ["allow_once", "deny"]
-            assert all(_visible(option, app) for option in options)
+            assert [option.outcome for option in options] == ["allow_once", "deny", "allow_session"]
+            assert all(_visible(option, app) for option in panel._options())
             assert _visible(panel.query_one("#permission-show-details", Button), app)
             await pilot.press("m")
             await pilot.pause()
-            assert len(app.screen_stack) == 1
+            assert len(app.screen_stack) == 2
+            assert target.parent.as_posix() in app.screen.query_one("#scope-session-grants", Static).render().plain.replace("\\", "/")
+            await pilot.press("escape")
             _export(app, tmp_path, f"permission-delete-once-{width}x{height}")
 
             await pilot.press("d")
@@ -219,10 +223,10 @@ def _settings_service(project: Path) -> SettingsService:
 async def test_permission_settings_save_and_reorder_preserve_shell_context(tmp_path: Path) -> None:
     service = _settings_service(tmp_path)
     rule = PermissionRule(
-        "RunCommand(git status)", "allow", "project", "exact",
+        "RunCommand(git status)", "deny", "project", "exact",
         command_cwd=str(tmp_path.resolve()), command_shell="powershell",
     )
-    service.save_rules("project", [PermissionRule("ReadFile(*)", "allow", "project", "glob"), rule])
+    service.save_rules("project", [PermissionRule("ReadFile(*)", "deny", "project", "glob"), rule])
 
     class SettingsApp(App):
         def on_mount(self):

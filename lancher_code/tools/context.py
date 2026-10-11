@@ -4,7 +4,7 @@ from lancher_code.contracts.control import validate_runtime_axes
 
 from dataclasses import dataclass
 from lancher_code.contracts.control import CancellationToken
-from lancher_code.contracts.control import PermissionPolicy
+from lancher_code.contracts.control import ExecutionAccess
 from lancher_code.contracts.control import WorkPhase
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,7 +29,7 @@ class ToolContext:
     cancellation_token: CancellationToken | None = None
     file_state_cache: "FileStateCache | None" = None
     work_phase: WorkPhase = "execute"
-    permission_policy: PermissionPolicy = "default"
+    execution_access: ExecutionAccess = "project"
     execution_runtime: "ExecutionRuntime | None" = None
     turn_id: str | None = None
     invocation_id: str | None = None
@@ -40,6 +40,6 @@ class ToolContext:
     pending_permission_resolution: "PermissionResolution | None" = None
 
     def __post_init__(self) -> None:
-        validate_runtime_axes(self.work_phase, self.permission_policy)
+        validate_runtime_axes(self.work_phase, self.execution_access)
         if self.project_root is None:
             self.project_root = self.cwd.resolve()

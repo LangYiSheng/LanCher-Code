@@ -90,10 +90,10 @@ default_model: deepseek/chat
 | `runtime.tool_loop_limit` | int | `50` | 否 | 单轮对话最大工具循环次数 |
 | `runtime.unknown_tool_streak_limit` | int | `3` | 否 | 连续请求未知工具达到该次数即停止本轮 |
 | `runtime.work_phase` | str | `execute` | 否 | 初始工作阶段：`discuss` / `plan` / `execute` |
-| `runtime.permission_policy` | str | `default` | 否 | 权限策略：`default` / `acceptEdits` / `bypass`，不改变阶段 |
+| `runtime.execution_access` | str | `project` | 否 | 执行访问范围：`project` / `full`；讨论和计划强制只读 |
 | `runtime.experimental_mcp_tool_append` | bool | `false` | 否 | 系统实验项：支持端点的原生 MCP 工具追加；严格布尔值 |
 
-`runtime.permission_mode` 已移除，必须使用独立的 `work_phase` 与 `permission_policy`。工具记录与思考显示开关独立；关闭思考显示不会隐藏工具活动。
+旧 `runtime.permission_mode` / `runtime.permission_policy` 和旧策略值已移除，必须使用 `work_phase` 与 `execution_access`。工具记录与思考显示开关独立；关闭思考显示不会隐藏工具活动。
 
 ### 系统设置：原生 MCP 工具追加（实验）
 
@@ -153,28 +153,10 @@ execution:
 
 ## 权限规则文件
 
-`permissions.yaml` 顶层为 `rules` 数组，每项包含 `match`、`result`、`match_kind`。`match_kind` 必须明确填写 `exact` 或 `glob`；缺少该字段或使用 `legacy` 会提示重新配置并保留原文件。新的命令授权默认 `exact`，保留完整原文，同时保存绝对 `command_cwd` 与 `command_shell`（Windows 为 `powershell`，其他平台为 `sh`），不把 `*` 等字符当通配符：
+`permissions.yaml` 必须声明 `format_version: 2`，`rules` 数组中的规则仅接受 `result: deny`；`match_kind` 明确为 `exact` 或 `glob`。可选 `command_cwd` 与 `command_shell` 必须成对填写。旧版本、允许规则和缺失字段明确拒绝并保留原文件。外部批准仅绑定本次调用或本会话明确的真实目录，不写永久允许规则。
 
-```yaml
-rules:
-  - match: "RunCommand(git status --short)"
-    match_kind: exact
-    result: allow
-    command_cwd: "D:/projects/demo"
-    command_shell: powershell
-  - match: "RunCommand(git *)"
-    match_kind: glob
-    result: allow
-  - match: "WriteFile(.env)"
-    match_kind: exact
-    result: deny
-```
 
-三层规则优先级：**session > project > user**（session 规则随当前 UUID Session 自动持久化，project / user 规则写入 YAML）。
-
-`command_cwd` 与 `command_shell` 必须同时填写或同时省略。新 Shell exact allow 授权绑定这两项；旧的无上下文 exact allow 记录不自动复用，旧拒绝规则继续生效。手工 glob 规则逐个匹配 AST 子命令；变量、嵌套解释器、未知程序或解析超预算只支持本次确认。目录和批量删除也只支持本次确认。
-
-阶段硬限制先于三层规则；讨论和计划阶段不开放通用 Shell 和源码修改，MCP 必须明确声明只读。当前 Session 的 `workspace/` 在所有阶段支持已批准的内置文件工具读写，计划路径由 Session 管理，不再使用 `runtime.plan_file_path`。此路径批准不构成操作系统沙箱。
+讨论和计划有效只读，普通 workspace 写入也禁止；仅专用计划工具可保存计划。项目访问允许项目内操作、审批外部范围；完全访问允许任意目录，极危险和显式拒绝始终生效。此检测式批准不构成操作系统沙箱。
 
 ### 匹配格式
 
@@ -184,13 +166,13 @@ rules:
 | `read_file` | `ReadFile(<路径>)` | 项目相对路径（正斜杠、小写） |
 | `write_file` | `WriteFile(<路径>)` | 同上 |
 | `edit_file` | `EditFile(<路径>)` | 同上 |
-| `delete_file` | `DeleteFile(<路径>)` | 项目相对的精确删除目标，链接匹配本体；目录只支持本次确认 |
+| `delete_file` | `DeleteFile(<路径>)` | 项目相对的精确删除目标，链接匹配本体；目录删除按访问范围判定 |
 | `glob` | `Glob(<模式>)` | glob 模式本身（小写） |
 | `grep` | `Grep(<路径>)` | 搜索范围路径 |
 | `write_plan_file` | `WritePlanFile(<路径>)` | 计划文件相对路径 |
 | MCP 工具 | `mcp__<server>__<tool>`（裸名称或 glob） | 工具可见名，如 `mcp__github__create_issue`、`mcp__github__*` |
 
-规则书写示例见仓库根 `README.md` 与 `tests/permissions/test_permission_engine.py`、`tests/mcp/test_permission.py`。
+规则示例见 [权限引擎](modules/permission-engine.md)，真实行为测试位于 `tests/permissions/test_permission_engine.py` 与 `tests/mcp/test_permission.py`。
 
 ## MCP 配置
 

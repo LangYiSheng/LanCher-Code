@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from lancher_code.filesystem.access import PathSandboxError, PathWriteDeniedError, is_session_workspace_path
+from lancher_code.filesystem.access import PathWriteDeniedError
 from lancher_code.sessions.paths import validate_session_id
 
 if TYPE_CHECKING:
@@ -73,15 +73,29 @@ def _entry(path: Path) -> DeleteEntry:
     return DeleteEntry(path, kind, _fingerprint(info))
 
 
-def _validate_target(path: Path, context: ToolContext) -> None:
+def protected_delete_reason(path: Path, context: ToolContext, recursive: bool = True) -> str | None:
+    """结构化删除和 Shell 共用的整体删除硬限制，不限制普通外部目录。"""
     root = (context.project_root or context.cwd).resolve()
-    if not path.is_relative_to(root):
-        raise PathSandboxError(str(path), path, root)
-    if path == root:
-        raise PathWriteDeniedError("delete_root_protected", "不能删除项目根目录。")
-    if any(part.casefold() == ".git" for part in path.relative_to(root).parts):
-        raise PathWriteDeniedError("git_metadata_protected", "不能删除 .git 元数据目录或其中的文件。")
+    path = Path(os.path.abspath(path))
+    if path == Path(path.anchor):
+        return "delete_volume_root_protected"
+    if path == root or (recursive and root.is_relative_to(path)):
+        return "delete_root_protected"
+    if recursive and path == Path.home().resolve():
+        return "delete_home_protected"
+    if os.name == "nt":
+        windows_root = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+        protected = {windows_root, windows_root / "System32", windows_root / "SysWOW64"}
+        protected.update(Path(value).resolve() for name in ("ProgramFiles", "ProgramFiles(x86)", "ProgramData")
+                         if (value := os.environ.get(name)))
+    else:
+        protected = {Path(value).resolve() for value in (
+            "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/System", "/Library")}
+    if recursive and any(path == item or item.is_relative_to(path) for item in protected):
+        return "delete_system_directory_protected"
     sessions = root / ".lancher" / "sessions"
+    if recursive and sessions.is_relative_to(path):
+        return "session_records_protected"
     if path.is_relative_to(sessions):
         parts = path.relative_to(sessions).parts
         workspace_name = parts[1].casefold() if len(parts) >= 2 and os.name == "nt" else (parts[1] if len(parts) >= 2 else "")
@@ -91,9 +105,16 @@ def _validate_target(path: Path, context: ToolContext) -> None:
         except ValueError:
             workspace_path = False
         if not workspace_path:
-            raise PathWriteDeniedError("session_records_protected", "会话内部记录由应用管理，不能删除。")
-    if context.work_phase in {"discuss", "plan"} and not is_session_workspace_path(path.parent, context):
-        raise PathWriteDeniedError("phase_disallowed", "讨论和计划阶段只能删除当前会话 workspace 中的文件。")
+            return "session_records_protected"
+    return None
+
+
+def _validate_target(path: Path, context: ToolContext, *, recursive: bool = True) -> None:
+    reason = protected_delete_reason(path, context, recursive)
+    if reason:
+        raise PathWriteDeniedError(reason, "不能整体删除项目、磁盘根目录、系统关键目录、用户主目录或会话内部记录。")
+    if context.work_phase in {"discuss", "plan"}:
+        raise PathWriteDeniedError("phase_disallowed", "讨论和计划阶段只读，不能删除文件或目录。")
 
 
 def resolve_delete_target(raw_path: str, context: ToolContext) -> Path:

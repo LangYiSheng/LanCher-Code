@@ -28,7 +28,7 @@ from lancher_code.errors import (
 )
 from lancher_code.logging_system import get_logger
 from lancher_code.config.models import AppConfig, RuntimeConfig
-from lancher_code.contracts.control import CancellationToken, PermissionPolicy, WorkPhase
+from lancher_code.contracts.control import CancellationToken, ExecutionAccess, WorkPhase
 from lancher_code.context.models import CompactionActivity, CompactionTrigger, ContextCompactionResult
 from lancher_code.usage.models import MessageUsage
 from lancher_code.sessions.models import PendingInput
@@ -187,12 +187,12 @@ class TurnRunner:
         self._ensure_model_idle()
         self._session.set_work_phase(phase)
         label = {"discuss": "讨论", "plan": "计划", "execute": "执行"}[phase]
-        return TurnEvent(kind="phase_changed", work_phase=phase, progress_message=f"已切换到{label}阶段，权限策略不变")
+        return TurnEvent(kind="phase_changed", work_phase=phase, progress_message=f"已切换到{label}阶段，执行访问范围已保留")
 
-    def set_permission_policy(self, policy: PermissionPolicy) -> TurnEvent:
+    def set_execution_access(self, policy: ExecutionAccess) -> TurnEvent:
         self._ensure_model_idle()
-        self._session.set_permission_policy(policy)
-        return TurnEvent(kind="policy_changed", permission_policy=policy, progress_message="权限策略已更新，工作阶段不变")
+        self._session.set_execution_access(policy)
+        return TurnEvent(kind="access_changed", execution_access=policy, progress_message="执行访问范围已更新；讨论和计划仍然只读")
 
     @property
     def pending_inputs(self) -> list[PendingInput]:
@@ -558,7 +558,7 @@ class TurnRunner:
         discovered_tool_names = set(self._session.context_state.prefix_state.get('observed_tools', {}))
         pending_tool_calls: list[ToolCall] = []
         phase = self._session.work_phase
-        policy = self._session.permission_policy
+        policy = self._session.execution_access
         completed = False
         written_plan_digest: str | None = None
         turn_id = active_turn.task_id
@@ -605,7 +605,7 @@ class TurnRunner:
                     visible_tools,
                     allow_tool_calls=True,
                     work_phase=phase,
-                    permission_policy=policy,
+                    execution_access=policy,
                     deferred_tool_groups=deferred_tool_groups,
                 )
                 request.cancellation_token = cancellation_token
@@ -655,7 +655,7 @@ class TurnRunner:
                             visible_tools,
                             allow_tool_calls=True,
                             work_phase=phase,
-                            permission_policy=policy,
+                            execution_access=policy,
                             deferred_tool_groups=deferred_tool_groups,
                         )
                         request.cancellation_token = cancellation_token
@@ -714,7 +714,7 @@ class TurnRunner:
                             visible_tools,
                             allow_tool_calls=True,
                             work_phase=phase,
-                            permission_policy=policy,
+                            execution_access=policy,
                             deferred_tool_groups=deferred_tool_groups,
                         )
                         request.cancellation_token = cancellation_token

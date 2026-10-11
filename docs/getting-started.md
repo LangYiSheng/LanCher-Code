@@ -103,7 +103,7 @@ runtime:
   tool_loop_limit: 50
   unknown_tool_streak_limit: 3
   work_phase: execute
-  permission_policy: default
+  execution_access: project
 ```
 
 完整配置项说明见 [configuration.md](configuration.md)。用 `/settings open` 增加供应商及模型，用 `/model` 在命令菜单中切换本次模型；`/settings` 可直接修改界面偏好及新对话默认模型。旧单 `provider` 或 `runtime.permission_mode` 配置会提示重新配置，原文件保留，不自动升级；请参照当前示例重新填写。
@@ -125,7 +125,7 @@ LanCher: （先调用 glob / read_file 工具，再给出答案）
 
 ```text
 /plan 帮我梳理这个项目的启动流程    ← 进入规划模式并提交任务
-/permissions acceptEdits          ← 允许自动编辑，不改变工作阶段
+/access full                 ← 完全访问，讨论和计划仍只读
 /exit                             ← 退出程序
 ```
 

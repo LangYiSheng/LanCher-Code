@@ -10,7 +10,7 @@
 |---|---|
 | `state` / `transcript` | 界面状态与发给模型的协议无关上下文 |
 | `session_id` / `session_title` / `paths` | 当前 UUID、显示标题和 `SessionPaths` |
-| `work_phase` / `permission_policy` | 独立的工作阶段与审批策略 |
+| `work_phase` / `execution_access` | 工作阶段与执行访问范围 |
 | `plan_snapshot` / `set_plan_snapshot(...)` | 当前会话的计划正文、摘要、来源和就绪状态 |
 | `plan_file_path` | 当前 Session 的 `workspace/plan.md`；草稿尚无路径 |
 | `pending_inputs` / `update_pending_inputs(...)` | 保存待处理消息与暂停状态 |
@@ -47,7 +47,7 @@
 | `sessions/messages.py`、`compaction.py`、`recovery.py` | 消息与轨迹更新、压缩状态协调、中断恢复 |
 | `sessions/service.py` | 协调会话创建、恢复、增量持久化与写入者切换 |
 
-`events.jsonl` 使用事件版本 `2`，是持久化事实来源；`meta.json` 和 `checkpoint.json` 也使用版本 `2`，属于可重建摘要及状态快照。上下文子格式沿用版本 `2`。旧事件版本与旧 `.lancher/session/*.jsonl` 保留原文件，不迁移、不自动删除；列表以 `issues` 报告问题，其他有效会话仍可使用，恢复旧格式时明确提示新建。具体布局和生命周期见 [session-lifecycle.md](../workflows/session-lifecycle.md)。
+`events.jsonl` 使用事件版本 `3`，是持久化事实来源；`meta.json` 和 `checkpoint.json` 也使用版本 `3`，属于可重建摘要及状态快照。上下文子格式沿用版本 `2`。旧事件版本与旧 `.lancher/session/*.jsonl` 保留原文件，不迁移、不自动删除；列表以 `issues` 报告问题，其他有效会话仍可使用，恢复旧格式时明确提示新建。具体布局和生命周期见 [session-lifecycle.md](../workflows/session-lifecycle.md)。
 
 请求账本通过单条 `usage.request_updated` 增量写入，普通 `state.changed` 只保存其余状态，投影时保留已经重建的账本。这样阶段或锚点变化不会反复复制累计请求。`persist()` 也检查账本差异，负责把恢复中的 `running → incomplete` 修复写回事实日志；常规回调已经同步保存快照，后续刷新不会重复写。已保存记录不能被删除，取消和异常只更新状态并保留已上报数字。
 
@@ -67,7 +67,7 @@ Checkpoint 仍保存完整账本，恢复时读取快照并重放尾部；缺少
 
 请求开始、累计用量快照和结束状态都写入所属 Session。普通回答与压缩共享这条记录路径；失败或取消前已经上报的用量仍可恢复。`MessageUsage` 使用 `None` 表示未知、`0` 表示明确上报零，同时保存最终确认、部分字段与数据异常信息。会话累计与退出时本次启动累计使用相同的 `RunUsageSummary` 聚合逻辑；恢复历史不会导入本次启动账本。详见 [Token 与上下文](../workflows/token-accounting.md)。
 
-当前 `workspace/` 在全部阶段允许内置文件工具读写，日志和控制文件不在此批准范围；源码、Shell 与外部 MCP 继续遵守阶段和权限判定。这不构成操作系统沙箱。
+只读阶段不允许普通 workspace 写入；仅计划阶段的 write_plan_file 可以保存计划。执行阶段文件、Shell 与 MCP 按项目访问或完全访问判定。这不构成操作系统沙箱。
 
 
 ## 执行投影与后台写入

@@ -19,15 +19,15 @@
 - 核心保存固定请求前缀，新增技能与主机状态通过尾部事件提供；MCP 常规工具定义跨用户轮保留。“系统设置”提供默认关闭的原生 MCP 工具追加实验项，仅用于支持端点。
 - 按资源调度并行工具；每段对话可同时托管多个 Pipe / PTY 进程，支持后台、增量日志、输入和进程树停止。
 - 支持 ReAct 式多轮工具循环、工具轨迹展示、Token 用量展示。
-- 讨论、计划、执行三个工作阶段与审批策略独立；计划支持确认正文后开始执行。
+- 讨论和计划强制只读；执行阶段可选择项目访问或完全访问，阶段切换保留执行访问选择，计划支持确认正文后开始执行。
 - 工作时可继续输入，将消息排到下一轮或补充当前任务；停止后保留草稿并暂停队列。
 - 首条消息自动建立 UUID Session，增量保存 JSONL；每段对话有独立计划、临时文件和产物目录。
-- 内置五层权限系统：
-  - Shell AST 分析与系统高风险命令拦截
-  - 文件工具与可确定 Shell 路径的项目边界
-  - 用户级 / 项目级 / 会话级规则
-  - 三种权限策略，以及优先于规则的工作阶段限制
-  - 非阻塞的内联审批面板
+- 内置访问权限系统：
+  - 只读、项目访问、完全访问三种有效模式
+  - Shell AST 分析、真实路径范围与已识别极危险操作拦截
+  - 用户级 / 项目级 / 会话级额外拒绝规则
+  - 外部访问的本次批准或本会话目录授权
+  - 非阻塞内联审批与执行前目标、版本和取消状态复核
 
 ## 安装与启动
 
@@ -72,64 +72,28 @@ lancher.example.yaml
 
 ### 运行时配置
 
-`runtime.work_phase` 支持 `discuss`、`plan`、`execute`，默认执行。讨论与计划允许内置读取、查找、搜索和明确声明只读的 MCP 工具；当前 Session 的 `workspace/` 在所有阶段允许文件写入，计划工具写入该会话的 `workspace/plan.md`。普通源码修改与通用 Shell 仍遵守阶段限制，跳过询问不能突破这些限制。路径批准属于内置工具权限判定，不是操作系统沙箱；MCP 只读信息来自服务器声明。
+`runtime.work_phase` 支持 `discuss`、`plan`、`execute`，默认执行。讨论和计划强制只读；计划阶段仅 `write_plan_file` 能保存当前会话计划，普通文件工具不能写草稿或源码。
 
-`runtime.permission_policy` 独立控制审批，支持三种策略：
+`runtime.execution_access` 默认 `project`：项目内读写、递归删除、命令和脚本自动执行，检测到项目外读取、写入或工作目录时审批。设为 `full` 后任意目录自动执行；已识别极危险操作和显式拒绝规则仍生效。运行中用 `/access project|full` 切换；返回执行时恢复之前的选择。
 
-- `default`
-  读工具自动放行；文件写入和命令执行需要确认。
-- `acceptEdits`
-  读工具和文件写工具自动放行；命令执行需要确认。
-- `bypass`
-  跳过常规询问；阶段限制、路径边界、显式拒绝与系统高风险操作拦截仍生效。目录删除、批量删除与无法完整分析的 Shell 命令仍需本次确认。
+外部审批可仅允许本次，或批准本会话明确列出的目录、读写范围及是否包含子目录。授权随会话保存，新会话清空。普通项目内 Git 回滚和目录删除不再固定弹窗。专用删除工具仍检查完整清单、版本和取消状态。
 
-`delete_file` 支持精确路径删除，目录须显式设置 `recursive: true` 并确认完整清单。它保护项目根、`.git` 与会话内部记录；链接只删除链接本体。审批后重新核对清单与文件版本，中途失败会报告已删除项。
+这些是应用层检测式权限，未增加操作系统沙箱。项目内脚本的动态外部访问可能无法预先识别；MCP 只读信息来自服务器声明。详见 [权限与访问范围](docs/modules/permission-engine.md)。
 
-`ui.theme` 默认为 `dark`，可设为 `light`。`ui.busy_enter_action` 默认为 `follow_up`（下一轮），也可设为 `steer`（补充当前任务）或 `draft`（保留草稿）。阶段与权限策略分别配置，不接受旧 `permission_mode` 字段。
+`ui.theme` 默认为 `dark`，可设为 `light`。`ui.busy_enter_action` 默认为 `follow_up`（下一轮），也可设为 `steer`（补充当前任务）或 `draft`（保留草稿）。旧 `permission_policy` / `permission_mode` 和旧策略值明确拒绝，原文件保留，不自动兼容。
 
 `runtime.experimental_mcp_tool_append` 默认 `false`，在 `/settings` 的“系统设置”中修改；只接受布尔值。常规模式把发现的 MCP 工具放入 `tools` 数组。实验模式使用 OpenAI Responses 的 `additional_tools` 或 Claude 的原生工具追加 beta，只有支持端点才适合开启。保存前由核心校验空闲，应用后下次请求重建前缀；不支持时关闭实验项。当前验证为离线请求与传输测试，尚未实测模型 API 兼容性或缓存命中率，详见 [请求前缀与缓存边界](docs/modules/prompting.md)。
 
 ### 权限规则文件
 
-LanCher Code 现在区分三层权限规则：
-
-- 会话级：随当前 Session 自动持久化和恢复
-- 项目级：`./.lancher/permissions.yaml`
-- 用户级：`~/.lancher/permissions.yaml`
-
-优先级：
-
-```text
-session > project > user
-```
-
-规则格式：
-
-```yaml
-rules:
-  - match: "RunCommand(git *)"
-    match_kind: glob
-    result: allow
-  - match: "WriteFile(.env)"
-    match_kind: exact
-    result: deny
-```
-
-说明：
-
-- `RunCommand(...)` 的 exact 规则保留完整命令的大小写与内部空白，并绑定绝对 `command_cwd` 和 `command_shell`；glob 必须逐个 AST 子命令匹配。分析不完整时允许规则不会自动放行。
-- `ReadFile/WriteFile/EditFile/DeleteFile(...)` 匹配项目相对路径；删除链接时匹配链接本体。
-- `Glob(...)` 匹配 glob 模式本身。
-- `Grep(...)` 匹配搜索范围路径。
-- 新增命令授权默认使用 `match_kind: exact` 精确匹配整条命令；需要通配时显式使用 `glob`。规则必须填写 `match_kind`，仅接受这两个值。
-- 没有 cwd 与 Shell 上下文的旧命令 exact allow 记录保留，但需要重新批准；已保存的拒绝规则继续生效。
+永久权限文件仅支持额外拒绝规则，必须声明 `format_version: 2`。项目规则存于 `./.lancher/permissions.yaml`，用户规则存于 `~/.lancher/permissions.yaml`，匹配结果只能是 `deny`。旧允许规则不兼容，原文件保留并提示重新配置。会话目录授权只在当前会话保存。
 
 ## 交互命令
 
 - `/discuss [任务]`、`/plan [任务]`、`/do [任务]`
   分别切到讨论、计划、执行；有参数则切换后提交，无参数只切阶段。`Shift+Tab` 循环阶段。
-- `/permissions [default|acceptEdits|bypass]`
-  打开或切换本次审批策略，不改变阶段。
+- `/access [project|full]`
+  选择执行访问范围；讨论和计划始终只读，返回执行阶段恢复选择。
 - `/model [供应商ID/模型ID]`
   打开模型选择器，或直接切换当前会话的主模型；保留对话历史，不修改全局默认值。
 - `/settings`
@@ -149,7 +113,7 @@ rules:
 
 ## 权限确认
 
-当规则和策略都没有明确放行时，输入区展示待审批操作、目标、工作目录、用途及文件差异。主要动作是仅允许本次和拒绝本次；命令的会话／项目授权位于次级入口，并显示实际匹配范围。
+项目访问模式检测到外部目录访问时，输入区展示待审批操作、真实目标、工作目录、用途及文件差异。可仅允许本次、拒绝本次，或在次级入口批准明确显示的本会话目录范围；范围注明只读或读写、是否包含子目录，不生成永久允许规则。非只读 MCP 在项目访问模式仅支持本次批准，完全访问模式自动允许。
 
 审批期间仍可编辑草稿或补充消息。补充会撤销未执行操作的旧审批；过期按钮无效。审批焦点下 `Esc` 拒绝当前审批，`Ctrl+C` 停止本轮并暂停队列；会话后台仍保留。拒绝后模型会收到结构化错误结果，再尝试调整策略。
 
@@ -172,14 +136,14 @@ rules:
 - 会话工作目录：`./.lancher/sessions/<UUID>/workspace/`（含 `plan.md`、`tmp/`、`artifacts/`）
 - 进程记录与输出：`./.lancher/sessions/<UUID>/processes/<进程UUID>/`（应用管理区）
 
-Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入完整 ID；命令不解析短 ID。事件、列表缓存与 checkpoint 的格式版本为 `2`，只读取当前格式。旧版本与旧 `.lancher/session/` 原样保留，不迁移、不自动删除；列表单独报告不支持或损坏的会话，其他会话仍可使用。启动和查询列表不会创建会话，模型调用失败的对话也会保留。压缩活动在聊天中可展开查看前后估算和压缩率，恢复会话后保留结果，未结束活动显示为已中断。详见 [Session 生命周期](docs/workflows/session-lifecycle.md) 与 [上下文压缩活动](docs/workflows/context-compaction.md)。
+Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入完整 ID；命令不解析短 ID。事件、列表缓存与 checkpoint 的格式版本为 `3`，只读取当前格式。旧版本与旧 `.lancher/session/` 原样保留，不迁移、不自动删除；列表单独报告不支持或损坏的会话，其他会话仍可使用。启动和查询列表不会创建会话，模型调用失败的对话也会保留。压缩活动在聊天中可展开查看前后估算和压缩率，恢复会话后保留结果，未结束活动显示为已中断。详见 [Session 生命周期](docs/workflows/session-lifecycle.md) 与 [上下文压缩活动](docs/workflows/context-compaction.md)。
 
-后台进程可跨轮次和对话切换，应用退出时统一清理；重启恢复记录与日志，不自动重跑旧命令。未知命令只在本次启动调用期间保守独占项目，返回后台任务后可继续请求服务器或修改文件；这不表示后台命令没有真实文件副作用。`execution.limits` 配置额度，`execution.command_profiles` 为已知命令明确声明持续资源与本机 TCP 就绪检查；资源默认保留到进程退出，也可明确设为仅调用期间。界面区分待批准与等待资源，说明实际阻塞任务。完整设计、取消竞态、Windows Job Object、ConPTY、中文输出分页与存储失败处理的解释见 [工具执行](docs/workflows/tool-execution.md)。
+后台进程可跨轮次和对话切换，应用退出时统一清理；重启恢复记录与日志，不自动重跑旧命令。未知命令在执行阶段不因分析不完整本身要求审批，已识别的外部范围仍按访问模式判定；只读阶段必须明确识别为读取。资源调度在本次启动调用期间保守独占项目，返回后台任务后可继续请求服务器或修改文件；这不表示后台命令没有真实文件副作用，也无法保证检测脚本动态访问外部目录。`execution.limits` 配置额度，`execution.command_profiles` 为已知命令明确声明持续资源与本机 TCP 就绪检查；资源默认保留到进程退出，也可明确设为仅调用期间。界面区分待批准与等待资源，说明实际阻塞任务。完整设计、取消竞态、Windows Job Object、ConPTY、中文输出分页与存储失败处理的解释见 [工具执行](docs/workflows/tool-execution.md)。
 
 ## 当前状态
 
 - Provider、会话层、工具系统、TurnRunner、TUI 已全部打通。
-- 五层权限系统已落地，并覆盖命令执行与文件操作。
+- 只读、项目访问、完全访问三种有效权限已落地，覆盖文件、Shell 和 MCP；已识别极危险操作与显式拒绝始终生效。
 - 核心代码按 `agent/`、`context/`、`sessions/`、`config/` 等领域组织；目录职责见 [项目结构](docs/project-structure.md)，验证方式见 [开发说明](docs/development.md)。
 
 Skills 的格式、精简示例、引用资料与压缩生命周期见 [Skills 与项目约定](docs/modules/skills.md)。项目同名技能优先，可用 `project/<名称>`、`user/<名称>` 精确指定。技能与项目约定的加载、会话状态及 MCP 生命周期由 `agent/` 核心管理，TUI 只展示状态并调用公共入口；技能不会扩大阶段或执行权限。MCP 本轮只提供 Tools，详见 [MCP 模块](docs/modules/mcp.md)。

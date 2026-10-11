@@ -72,7 +72,7 @@ async def test_model_picker_keyboard_search_and_cancel(tmp_path, size):
         await pilot.press("enter")
         await pilot.pause()
         assert runner.model_ref == "other/chat"
-        assert app._hud.status_left_text() == "日常编程 · 执行 · 逐次确认"
+        assert app._hud.status_left_text() == "日常编程 · 执行 · 项目访问"
         assert config.default_model == "deepseek/chat"
         assert session.transcript == []
         assert len(constructed) == 1
@@ -101,7 +101,7 @@ async def test_model_picker_empty_search_then_direct_selection(tmp_path):
         await pilot.pause()
         await app._execute_slash_command("model", "deepseek/reason")
         assert runner.model_ref == "deepseek/reason"
-        assert app._hud.status_left_text() == "deepseek-reasoner (DeepSeek) · 执行 · 逐次确认"
+        assert app._hud.status_left_text() == "deepseek-reasoner (DeepSeek) · 执行 · 项目访问"
         await app._execute_slash_command("model", "missing/model")
         assert runner.model_ref == "deepseek/reason"
         assert len(constructed) == 1
@@ -144,7 +144,7 @@ async def test_chat_applies_settings_without_changing_active_model_for_new_defau
         app._handle_settings_result(SettingsResult(saved=True, config=changed))
         await pilot.pause()
         assert runner.model_ref == "other/chat"
-        assert app._hud.status_left_text() == "日常编程 · 执行 · 逐次确认"
+        assert app._hud.status_left_text() == "日常编程 · 执行 · 项目访问"
 
 
 @pytest.mark.asyncio

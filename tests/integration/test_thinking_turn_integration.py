@@ -128,7 +128,7 @@ async def _harness(config, tmp_path: Path, responses: list[bytes | httpx.AsyncBy
     tool = RecordingEchoTool()
     registry = ToolRegistry()
     registry.register(tool)
-    session = SessionController(config, cwd=tmp_path, initial_permission_policy="bypass")
+    session = SessionController(config, cwd=tmp_path, initial_execution_access="full")
     executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
     runner = TurnRunner(provider, session, registry, executor)
     try:

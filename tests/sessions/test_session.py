@@ -312,7 +312,7 @@ def test_session_save_and_resume_restores_ui_and_protocol_state(openai_provider_
     controller.append_message_content(assistant.id, "完成")
     _record_model_request(controller, assistant.id, MessageUsage(input_tokens=3, output_tokens=2))
     controller.complete_message(assistant.id, MessageUsage(input_tokens=3, output_tokens=2))
-    controller.set_permission_policy("acceptEdits")
+    controller.set_execution_access("project")
     saved_id = controller.session_id
     controller.close()
 
@@ -322,7 +322,7 @@ def test_session_save_and_resume_restores_ui_and_protocol_state(openai_provider_
     assert [message.content for message in restored.state.messages] == ["先检查项目", "完成"]
     assert restored.state.messages[1].trace.entries[0].text == "思考"
     assert [message.role for message in restored.transcript] == ["user", "assistant", "tool", "assistant"]
-    assert restored.permission_policy == "acceptEdits"
+    assert restored.execution_access == "project"
     assert restored.total_usage().output_tokens == 2
     assert restored.session_id == saved_id
 

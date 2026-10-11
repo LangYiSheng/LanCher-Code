@@ -23,7 +23,7 @@ from lancher_code.context.prompts import build_dynamic_context_prompt, build_pro
 from lancher_code.context.recovery import record_file_snapshot
 from lancher_code.context.request import build_request, prepare_request
 from lancher_code.context.tokens import estimate_request, estimate_request_tokens, update_usage_anchor
-from lancher_code.contracts.control import CancellationToken, PermissionPolicy, WorkPhase, validate_runtime_axes
+from lancher_code.contracts.control import CancellationToken, ExecutionAccess, WorkPhase, validate_runtime_axes
 from lancher_code.contracts.messages import ChatRequest, ContentBlock, ConversationMessage
 from lancher_code.contracts.tools import DeferredToolGroup, ToolCall, ToolDefinition, ToolExecutionResult
 from lancher_code.logging_system import get_logger
@@ -68,7 +68,7 @@ class SessionController:
         cwd: Path | None = None,
         current_date: date | None = None,
         initial_work_phase: WorkPhase | None = None,
-        initial_permission_policy: PermissionPolicy | None = None,
+        initial_execution_access: ExecutionAccess | None = None,
         permission_storage: PermissionStorage | None = None,
         selected_model_ref: str | None = None,
         usage_tracker: RunUsageTracker | None = None,
@@ -92,15 +92,16 @@ class SessionController:
         self._context_lock = asyncio.Lock()
         self._active_dynamic_context: str | None = None
         self._permission_storage = permission_storage or PermissionStorage()
+        self._permission_storage.replace_session_grants(self._state.directory_grants, notify=False)
         self._permission_storage.subscribe_session_rules_changed(self._permissions_changed)
-        if initial_work_phase is not None or initial_permission_policy is not None:
+        if initial_work_phase is not None or initial_execution_access is not None:
             phase = initial_work_phase or self.work_phase
-            policy = initial_permission_policy or self.permission_policy
+            policy = initial_execution_access or self.execution_access
             validate_runtime_axes(phase, policy)
-            self.set_permission_policy(policy)
+            self.set_execution_access(policy)
             self.set_work_phase(phase)
         self._initial_phase = self.work_phase
-        self._initial_policy = self.permission_policy
+        self._initial_policy = self.execution_access
 
     @property
     def project_root(self) -> Path:
@@ -119,8 +120,8 @@ class SessionController:
         return self._state.work_phase
 
     @property
-    def permission_policy(self) -> PermissionPolicy:
-        return self._state.permission_policy
+    def execution_access(self) -> ExecutionAccess:
+        return self._state.execution_access
 
     @property
     def session_id(self) -> str | None:
@@ -210,7 +211,7 @@ class SessionController:
 
     @persist_change()
     def set_work_phase(self, phase: WorkPhase) -> WorkPhase:
-        validate_runtime_axes(phase, self.permission_policy)
+        validate_runtime_axes(phase, self.execution_access)
         previous_phase = self.work_phase
         if phase == previous_phase:
             return phase
@@ -226,10 +227,10 @@ class SessionController:
         return phase
 
     @persist_change()
-    def set_permission_policy(self, policy: PermissionPolicy) -> PermissionPolicy:
+    def set_execution_access(self, policy: ExecutionAccess) -> ExecutionAccess:
         validate_runtime_axes(self.work_phase, policy)
-        if policy != self.permission_policy:
-            self._state.permission_policy = policy
+        if policy != self.execution_access:
+            self._state.execution_access = policy
             self._mark_dirty()
         return policy
 
@@ -399,15 +400,15 @@ class SessionController:
 
     def build_request(
         self, tools: list[ToolDefinition], *, allow_tool_calls: bool,
-        work_phase: WorkPhase | None = None, permission_policy: PermissionPolicy | None = None,
+        work_phase: WorkPhase | None = None, execution_access: ExecutionAccess | None = None,
         deferred_tool_groups: list[DeferredToolGroup] | None = None,
     ) -> ChatRequest:
         phase = self.work_phase if work_phase is None else work_phase
-        policy = self.permission_policy if permission_policy is None else permission_policy
+        policy = self.execution_access if execution_access is None else execution_access
         validate_runtime_axes(phase, policy)
         previous_context, previous_transcript, previous_dirty = self.context_state, self._transcript, self._dirty
         request, candidate, transcript = prepare_request(
-            config=self._provider_config, context=self._prompt_context(work_phase=phase, permission_policy=policy),
+            config=self._provider_config, context=self._prompt_context(work_phase=phase, execution_access=policy),
             transcript=copy.deepcopy(self._transcript), state=copy.deepcopy(self.context_state), dynamic_context=self._active_dynamic_context,
             tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
             experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock(),
@@ -426,11 +427,11 @@ class SessionController:
         return request
 
     def preview_request(self, tools: list[ToolDefinition], *, allow_tool_calls: bool,
-                        work_phase: WorkPhase | None = None, permission_policy: PermissionPolicy | None = None,
+                        work_phase: WorkPhase | None = None, execution_access: ExecutionAccess | None = None,
                         deferred_tool_groups: list[DeferredToolGroup] | None = None) -> ChatRequest:
-        phase, policy = work_phase or self.work_phase, permission_policy or self.permission_policy
+        phase, policy = work_phase or self.work_phase, execution_access or self.execution_access
         validate_runtime_axes(phase, policy)
-        return build_request(config=self._provider_config, context=self._prompt_context(work_phase=phase, permission_policy=policy),
+        return build_request(config=self._provider_config, context=self._prompt_context(work_phase=phase, execution_access=policy),
                              transcript=self._transcript, state=self.context_state, dynamic_context=self._active_dynamic_context,
                              tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
                              experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock())
@@ -792,10 +793,11 @@ class SessionController:
     def new_session(self) -> None:
         self._detach_view()
         self._sessions = SessionService(self._cwd)
-        self._state = SessionState(work_phase=self._initial_phase, permission_policy=self._initial_policy)
+        self._state = SessionState(work_phase=self._initial_phase, execution_access=self._initial_policy)
         self._transcript = []
         self._active_dynamic_context = None
         self._permission_storage.replace_session_rules([], notify=False)
+        self._permission_storage.replace_session_grants([], notify=False)
         self._dirty = False
         self._prompt_epoch_reset = False
 
@@ -844,6 +846,7 @@ class SessionController:
             self._detach_view(prepared=True)
             self._sessions, self._state, self._transcript = retained.service, next_state, retained.transcript
             self._permission_storage.replace_session_rules(retained.rules, notify=False)
+            self._permission_storage.replace_session_grants(next_state.directory_grants, notify=False)
             self._selected_model_ref, self._provider_config = next_ref, next_provider
             self._active_dynamic_context = None
             self._dirty = False
@@ -887,6 +890,7 @@ class SessionController:
         self._sessions = candidate
         self._state, self._transcript = state, transcript
         self._permission_storage.replace_session_rules(rules, notify=False)
+        self._permission_storage.replace_session_grants(state.directory_grants, notify=False)
         self._active_dynamic_context = None
         self._selected_model_ref = next_model_ref
         if resolved_model is not None:
@@ -905,6 +909,7 @@ class SessionController:
             self._sessions.close()
 
     def _permissions_changed(self) -> None:
+        self._state.directory_grants = list(self._permission_storage.session_grants)
         self._mark_dirty()
         self.flush()
 
@@ -919,7 +924,7 @@ class SessionController:
 
     def _prompt_context(
         self, *, work_phase: WorkPhase | None = None,
-        permission_policy: PermissionPolicy | None = None,
+        execution_access: ExecutionAccess | None = None,
         context_state: ContextManagementState | None = None,
     ) -> "PromptContext":
         builder = getattr(self, '_agent_context_builder', None)
@@ -927,7 +932,7 @@ class SessionController:
             cwd=self._cwd,
             current_date=self._date_override or self._request_clock().astimezone().date(),
             work_phase=work_phase if work_phase is not None else self.work_phase,
-            permission_policy=permission_policy if permission_policy is not None else self.permission_policy,
+            execution_access=execution_access if execution_access is not None else self.execution_access,
             plan_snapshot=self.plan_snapshot,
             plan_file_path=self.plan_file_path,
             session_id=self.session_id,

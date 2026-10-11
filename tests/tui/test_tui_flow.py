@@ -189,7 +189,7 @@ async def test_tui_composer_placeholder_is_minimal_in_normal_mode(
         composer = app.query_one("#composer-input", ComposerTextArea)
         status_left = app.query_one("#status-left", Static)
         assert composer.placeholder == "发送一条消息"
-        assert str(status_left.render()) == "gpt-test · 执行 · 逐次确认"
+        assert str(status_left.render()) == "gpt-test · 执行 · 项目访问"
         hint_bar = app.query_one(CommandHintBar)
         assert not hint_bar.display
 
@@ -221,7 +221,7 @@ async def test_shift_tab_cycles_work_phase_without_changing_permission(
             await pilot.press("shift+tab")
             await pilot.pause(0.05)
             assert session.work_phase == expected
-            assert session.permission_policy == "default"
+            assert session.execution_access == "project"
             assert "gpt-test" in str(app.query_one("#status-left", Static).render())
             assert app.query_one(f"#phase-{expected}").has_class("-selected")
 
@@ -328,14 +328,14 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
         menu = app.query_one(SlashCompletionMenu)
         assert menu.display
         assert _visible_slash_commands(app) == [
-            "discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "permissions",
+            "discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "access",
             "compact", "settings", "status", "exit",
         ]
 
         composer.text = "/p"
         composer.cursor_location = composer.document.end
         await pilot.pause(0.05)
-        assert _visible_slash_commands(app) == ["plan", "permissions"]
+        assert _visible_slash_commands(app) == ["plan"]
 
         composer.text = "/d"
         composer.cursor_location = composer.document.end
@@ -494,20 +494,20 @@ async def test_permission_completion_selects_terminal_value_before_submission(
     app, session = _build_app(FakeProvider(responses=[]), openai_provider_config, ui_config, tmp_path)
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)
-        composer.text = "/permissions b"
+        composer.text = "/access f"
         composer.cursor_location = composer.document.end
         composer.focus()
         await pilot.pause(0.05)
         await pilot.press("tab")
         await pilot.pause(0.05)
 
-        assert composer.text == "/permissions bypass"
+        assert composer.text == "/access full"
         assert not app.query_one(SlashCompletionMenu).display
         assert session.work_phase == "execute"
 
         await pilot.press("enter")
         await pilot.pause(0.05)
-        assert session.permission_policy == "bypass"
+        assert session.execution_access == "full"
         assert session.work_phase == "execute"
 
 
@@ -619,7 +619,7 @@ async def test_tui_streams_single_turn_by_message_id(
         assert app.query_one("#composer-input", ComposerTextArea).text == ""
         status_left = app.query_one("#status-left", Static)
         status_right = app.query_one("#status-details", Static)
-        assert str(status_left.render()) == "gpt-test · 执行 · 逐次确认"
+        assert str(status_left.render()) == "gpt-test · 执行 · 项目访问"
         assert "本次模型：gpt-test" in str(status_right.render())
         assert "会话累计已上报用量" in str(status_right.render())
         assert "输入：3 tokens" in str(status_right.render())

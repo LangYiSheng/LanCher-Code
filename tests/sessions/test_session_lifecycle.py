@@ -81,7 +81,7 @@ async def collect(runner, text):
 def test_empty_conversation_has_no_identity_or_storage(openai_provider_config, tmp_path):
     controller = SessionController(openai_provider_config, cwd=tmp_path)
     controller.set_work_phase("discuss")
-    controller.set_permission_policy("acceptEdits")
+    controller.set_execution_access("project")
     assert controller.session_id is None
     assert controller.paths is None
     assert controller.list_sessions().items == []

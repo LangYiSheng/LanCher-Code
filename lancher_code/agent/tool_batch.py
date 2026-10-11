@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from collections.abc import Awaitable, Callable
 from lancher_code.agent.events import TurnEvent
-from lancher_code.contracts.control import WorkPhase, PermissionPolicy, CancellationToken
+from lancher_code.contracts.control import WorkPhase, ExecutionAccess, CancellationToken
 from lancher_code.contracts.tools import ToolCall, ToolExecutionResult
 from lancher_code.execution.contracts import InvocationInfo
 from lancher_code.sessions.controller import SessionController
@@ -15,7 +15,7 @@ from lancher_code.tools.core.registry import ToolRegistry
 async def execute_batch(*, session: SessionController, executor: ToolExecutor,
                         tool_calls: list[ToolCall], precomputed_results: list[ToolExecutionResult],
                         pending: list[ToolCall], message_id: str, turn_id: str, generation: int,
-                        phase: WorkPhase, policy: PermissionPolicy, cancellation_token: CancellationToken,
+                        phase: WorkPhase, policy: ExecutionAccess, cancellation_token: CancellationToken,
                         permission_resolver: PermissionResolver, available_tool_names: set[str],
                         expected_tool_bindings: dict[str, Tool],
                         should_interrupt: Callable[[], bool], is_current: Callable[[], bool],
@@ -64,7 +64,7 @@ async def execute_batch(*, session: SessionController, executor: ToolExecutor,
     results = precomputed_results or await executor.execute_calls(
         tool_calls,
         work_phase=phase,
-        permission_policy=policy,
+        execution_access=policy,
         plan_file_path=session.plan_file_path,
         session_id=session.session_id,
         session_workspace=session.paths.workspace if session.paths else None,

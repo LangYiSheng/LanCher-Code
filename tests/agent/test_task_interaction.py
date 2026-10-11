@@ -84,7 +84,7 @@ async def test_steering_preserves_user_order_and_segment_usage(openai_provider_c
     with pytest.raises(ConfigError):
         runner.set_phase("discuss")
     with pytest.raises(ConfigError):
-        runner.set_permission_policy("bypass")
+        runner.set_execution_access("full")
     gate.set()
     events = await asyncio.wait_for(task, INTERACTION_TIMEOUT)
     assert [m.content for m in session.state.messages if m.role == "user"] == ["原任务", "补充限制"]
@@ -117,7 +117,7 @@ async def test_steering_waits_for_started_read_and_skips_conflicting_write(opena
     read = GatedRead()
     provider = Provider([calls(("read_file", {"path": "new.txt"}), ("write_file", {"path": "new.txt", "content": "不应写入"})), reply("按补充调整")])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, read, WriteFileTool())
-    runner.set_permission_policy("bypass")
+    runner.set_execution_access("full")
     task = asyncio.create_task(collect(runner, "检查再修改"))
     await asyncio.wait_for(read.started.wait(), INTERACTION_TIMEOUT)
     runner.enqueue_input("先不要改文件", "steer")
@@ -134,7 +134,9 @@ async def test_steering_waits_for_started_read_and_skips_conflicting_write(opena
 
 @pytest.mark.asyncio
 async def test_steering_closes_pending_approval_without_writing_or_allow_rule(openai_provider_config, tmp_path):
-    provider = Provider([calls(("write_file", {"path": "new.txt", "content": "不应写入"})), reply("已调整")])
+    tmp_path = tmp_path / "project"
+    tmp_path.mkdir()
+    provider = Provider([calls(("write_file", {"path": "../new.txt", "content": "不应写入"})), reply("已调整")])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
     request_ids = []
 
@@ -150,8 +152,8 @@ async def test_steering_closes_pending_approval_without_writing_or_allow_rule(op
     assert request_ids
     assert any(e.kind == "permission_request_closed" for e in events)
     assert any(e.tool_result and e.tool_result.error_code == "steering_superseded" for e in events)
-    assert not (tmp_path / "new.txt").exists()
-    assert runner.resolve_permission_request(PermissionResolution(request_id=request_ids[0], outcome="allow_project")) is False
+    assert not (tmp_path.parent / "new.txt").exists()
+    assert runner.resolve_permission_request(PermissionResolution(request_id=request_ids[0], outcome="allow_session")) is False
     original_assistant = next(message for message in session.state.messages if message.role == "assistant")
     result = next(entry for entry in original_assistant.trace.entries if entry.kind == "tool_result")
     assert result.metadata["state"] == "skipped"
@@ -161,7 +163,9 @@ async def test_steering_closes_pending_approval_without_writing_or_allow_rule(op
 
 @pytest.mark.asyncio
 async def test_denied_approval_is_recorded_without_claiming_tool_executed(openai_provider_config, tmp_path):
-    provider = Provider([calls(("write_file", {"path": "new.txt", "content": "不应写入"})), reply("已拒绝")])
+    tmp_path = tmp_path / "project"
+    tmp_path.mkdir()
+    provider = Provider([calls(("write_file", {"path": "../new.txt", "content": "不应写入"})), reply("已拒绝")])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
 
     def handle(event):
@@ -170,7 +174,7 @@ async def test_denied_approval_is_recorded_without_claiming_tool_executed(openai
             runner.resolve_permission_request(PermissionResolution(event.permission_request.request_id, "deny"))
 
     events = await asyncio.wait_for(collect(runner, "修改文件", handle), INTERACTION_TIMEOUT)
-    assert not (tmp_path / "new.txt").exists()
+    assert not (tmp_path.parent / "new.txt").exists()
     # 排队和审批也会报告真实进度；拒绝后仍不能宣称已经开始执行。
     progress = [event.progress_message or "" for event in events
                 if event.kind == "progress_updated" and event.tool_call is not None]
@@ -186,7 +190,9 @@ async def test_denied_approval_is_recorded_without_claiming_tool_executed(openai
 
 @pytest.mark.asyncio
 async def test_cancel_during_approval_pauses_queue(openai_provider_config, tmp_path):
-    provider = Provider([calls(("write_file", {"path": "new.txt", "content": "不应写入"}))])
+    tmp_path = tmp_path / "project"
+    tmp_path.mkdir()
+    provider = Provider([calls(("write_file", {"path": "../new.txt", "content": "不应写入"}))])
     runner, _ = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
 
     def handle(event):
@@ -199,7 +205,7 @@ async def test_cancel_during_approval_pauses_queue(openai_provider_config, tmp_p
     assert any(e.kind == "permission_request_closed" for e in events)
     assert runner.pending_inputs[0].state == "paused"
     assert not [e async for e in runner.run_next_queued_turn()]
-    assert not (tmp_path / "new.txt").exists()
+    assert not (tmp_path.parent / "new.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -245,7 +251,7 @@ async def test_plan_execution_uses_bound_content_and_rejects_duplicate(openai_pr
     provider = Provider([calls(("write_plan_file", {"content": "1. 修改保存流程\n2. 测试"})), reply("计划已准备")])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WritePlanFileTool())
     runner.set_phase("plan")
-    runner.set_permission_policy("bypass")
+    runner.set_execution_access("full")
     await collect(runner, "制定计划")
     snapshot = session.plan_snapshot
     assert snapshot is not None and snapshot.ready
@@ -254,7 +260,7 @@ async def test_plan_execution_uses_bound_content_and_rejects_duplicate(openai_pr
         runner.prepare_plan_execution(session.session_id, "旧版本")
     text = runner.prepare_plan_execution(session.session_id, snapshot.digest)
     assert "修改保存流程" in text and "另一个会话" not in text
-    assert session.work_phase == "execute" and session.permission_policy == "bypass"
+    assert session.work_phase == "execute" and session.execution_access == "full"
     with pytest.raises(ConfigError):
         runner.prepare_plan_execution(session.session_id, snapshot.digest)
 
@@ -295,7 +301,9 @@ async def test_explicit_steering_runs_even_when_follow_up_queue_is_paused(openai
 
 @pytest.mark.asyncio
 async def test_removed_steering_keeps_revoked_approval_distinct_from_denial(openai_provider_config, tmp_path):
-    provider = Provider([calls(("write_file", {"path": "new.txt", "content": "不应写入"})), reply("调整后继续")])
+    tmp_path = tmp_path / "project"
+    tmp_path.mkdir()
+    provider = Provider([calls(("write_file", {"path": "../new.txt", "content": "不应写入"})), reply("调整后继续")])
     runner, _ = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
 
     def handle(event):
@@ -304,14 +312,16 @@ async def test_removed_steering_keeps_revoked_approval_distinct_from_denial(open
             runner.remove_pending_input(item.id)
 
     events = await asyncio.wait_for(collect(runner, "修改文件", handle), INTERACTION_TIMEOUT)
-    assert not (tmp_path / "new.txt").exists()
+    assert not (tmp_path.parent / "new.txt").exists()
     assert any(e.tool_result and e.tool_result.error_code == "steering_superseded" for e in events)
     assert not any(e.kind == "permission_request_resolved" for e in events)
 
 
 @pytest.mark.asyncio
 async def test_closing_event_consumer_cancels_approval_and_pauses_queue(openai_provider_config, tmp_path):
-    provider = Provider([calls(("write_file", {"path": "new.txt", "content": "不应写入"}))])
+    tmp_path = tmp_path / "project"
+    tmp_path.mkdir()
+    provider = Provider([calls(("write_file", {"path": "../new.txt", "content": "不应写入"}))])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WriteFileTool())
     stream = runner.run_user_turn("修改文件")
     async for event in stream:
@@ -322,7 +332,7 @@ async def test_closing_event_consumer_cancels_approval_and_pauses_queue(openai_p
     assert not runner.has_active_turn
     assert runner.pending_inputs[0].state == "paused"
     assert session.state.messages[-1].status == "cancelled"
-    assert not (tmp_path / "new.txt").exists()
+    assert not (tmp_path.parent / "new.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -334,7 +344,7 @@ async def test_unsuccessful_plan_replacement_never_reactivates_old_snapshot(open
     ])
     runner, session = make_runner(provider, openai_provider_config, tmp_path, WritePlanFileTool())
     runner.set_phase("plan")
-    runner.set_permission_policy("bypass")
+    runner.set_execution_access("full")
     previous = session.set_plan_snapshot("此前完成的旧计划", source_message_id="previous", ready=True)
     runner.enqueue_input("下一轮应暂停")
 

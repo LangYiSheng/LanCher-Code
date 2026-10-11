@@ -26,7 +26,7 @@ class SlashCompletionContext:
     mcp_choices: tuple[tuple[str, str], ...] = ()
     active_model_ref: str | None = None
     default_model_ref: str | None = None
-    permission_policy: str = "default"
+    execution_access: str = "project"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +92,9 @@ MCP_ACTIONS = {
     "reconnect": "重新连接一个服务器",
     "reload": "重新加载 MCP 配置",
 }
-POLICIES = {
-    "default": "标准 · 修改和命令按规则询问",
-    "acceptEdits": "自动编辑 · 文件编辑自动允许",
-    "bypass": "跳过询问 · 仍遵守阶段与访问限制",
+EXECUTION_ACCESS = {
+    "project": "项目访问 · 项目内自动执行，外部访问审批",
+    "full": "完全访问 · 任意目录自动执行，极危险操作仍拒绝",
 }
 SETTINGS = {
     "theme": ("切换深浅主题", {"dark": "深色", "light": "浅色"}),
@@ -183,9 +182,9 @@ class SlashCommandRegistry:
             elif len(completed) == 1 and completed[0] in TASK_ACTIONS and completed[0] != "list":
                 for value, label in context.process_choices:
                     add(value, label, detail="使用完整进程 UUID；所属会话保持不变。")
-        elif name == "permissions" and not completed:
-            for value, label in POLICIES.items():
-                add(value, label + (" · 当前" if value == context.permission_policy else ""), detail="作用范围：本次对话；不改变工作阶段。")
+        elif name == "access" and not completed:
+            for value, label in EXECUTION_ACCESS.items():
+                add(value, label + (" · 当前" if value == context.execution_access else ""), detail="作用范围：本次对话；不改变工作阶段。")
         elif name == "model" and not completed:
             for value, label in context.model_choices:
                 add(value, label + (" · 本次" if value == context.active_model_ref else "") + (" · 默认" if value == context.default_model_ref else ""), detail="只更改本次模型；新对话默认保持不变。")
@@ -294,8 +293,8 @@ class SlashCommandRegistry:
                 return "选择技能名称或 ID" if name == "skills" else "选择一个服务器名称"
         if name == "model" and not args:
             return "选择本次模型 · 可输入名称或供应商 ID 检索"
-        if name == "permissions" and not args:
-            return "选择本次审批策略 · 不改变工作阶段"
+        if name == "access" and not args:
+            return "选择执行访问范围 · 讨论和计划始终只读"
         if name == "settings" and len(args) < 2 and args != ["open"]:
             return "选择设置项" if not args else "选择一个值 · 保存后生效"
         return match.definition.detail + " · Enter 执行"
@@ -318,8 +317,8 @@ class SlashCommandRegistry:
             return
         if name in {"compact", "status", "exit"} and args:
             raise ValueError(f"用法：{command.usage}")
-        if name == "permissions" and (len(args) > 1 or (args and args[0] not in POLICIES)):
-            raise ValueError("请选择 default、acceptEdits 或 bypass。")
+        if name == "access" and (len(args) > 1 or (args and args[0] not in EXECUTION_ACCESS)):
+            raise ValueError("请选择 project 或 full。")
         if name == "model" and len(args) > 1:
             raise ValueError("请选择一个供应商 ID/模型 ID。")
         if name == "settings" and args:
@@ -354,15 +353,15 @@ class SlashCommandRegistry:
 def create_default_slash_command_registry() -> SlashCommandRegistry:
     registry = SlashCommandRegistry()
     for name, label, detail, usage, branch in (
-        ("discuss", "讨论想法 · 切换到讨论模式", "只读调查；不改变审批策略", "/discuss [问题]", False),
+        ("discuss", "讨论想法 · 切换到讨论模式", "只读调查；不改变访问范围", "/discuss [问题]", False),
         ("plan", "制定计划 · 切换到计划模式", "调查并保存计划，确认后执行", "/plan [任务]", False),
-        ("do", "开始执行 · 切换到执行模式", "保留当前审批策略", "/do [任务]", False),
+        ("do", "开始执行 · 切换到执行模式", "保留当前访问范围", "/do [任务]", False),
         ("session", "切换对话 · 新建、恢复和管理会话", "首条消息自动保存；作用范围：当前项目", "/session <new|list|stop|resume|rename|archive|remove> [UUID] [标题]", True),
         ("tasks", "管理进程 · 输出、输入、后台和停止", "作用范围：当前会话；停止本轮会保留会话后台进程", "/tasks [list|show|read|stop|background] [进程UUID]", True),
         ("skills", "管理技能 · 查看、启停与重新加载", "任务中使用 $技能名指定；加载由核心管理", "/skills [list|show|reload|enable|disable|unload] [技能名或ID]", True),
         ("mcp", "管理 MCP · 查看、刷新与重新连接", "连接状态与工具目录由核心管理", "/mcp [list|refresh|reconnect|reload] [服务器名]", True),
         ("model", "选择模型 · 更改本次对话模型", "本次选择与新对话默认相互独立", "/model <供应商ID/模型ID>", True),
-        ("permissions", "调整权限 · 更改本次审批策略", "只修改权限，不改变工作阶段", "/permissions <default|acceptEdits|bypass>", True),
+        ("access", "选择执行访问范围", "讨论和计划只读；返回执行时恢复此选择", "/access <project|full>", True),
         ("compact", "压缩上下文 · 整理当前对话记录", "作用范围：当前对话上下文", "/compact", False),
         ("settings", "修改设置 · 界面偏好与默认模型", "保存至配置；本次模型保持不变", "/settings <设置项> <值>", True),
         ("status", "查看状态 · 模型、用量与连接", "展开或收起 HUD 状态详情", "/status", False),

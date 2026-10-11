@@ -132,7 +132,7 @@ async def test_app_runtime_save_calls_core_and_hud_only_previews_until_next_requ
         await _submit(app, pilot, "已有任务")
         baseline = _history_snapshot(session)
         epoch = session.context_state.prefix_state["epoch"]
-        phase, policy = session.work_phase, session.permission_policy
+        phase, policy = session.work_phase, session.execution_access
         monkeypatch.setattr(runner, "validate_runtime_settings", validate_saved)
         screen = await _open_system(app, pilot)
         screen.query_one("#runtime-mcp-tool-append", Checkbox).value = True
@@ -142,7 +142,7 @@ async def test_app_runtime_save_calls_core_and_hud_only_previews_until_next_requ
         assert not screen._system_pending
         assert runner.model_config.runtime.experimental_mcp_tool_append
         assert session._prompt_epoch_reset
-        assert (session.work_phase, session.permission_policy) == (phase, policy)
+        assert (session.work_phase, session.execution_access) == (phase, policy)
         assert _history_snapshot(session) == baseline
         assert "下一次请求重建" in str(screen.query_one("#settings-notice", Static).render())
 

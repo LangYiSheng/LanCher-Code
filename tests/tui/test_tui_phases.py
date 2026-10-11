@@ -87,7 +87,7 @@ async def test_plan_command_switches_mode_and_updates_placeholder(
         status_left = app.query_one("#status-left")
         assert session.work_phase == "plan"
         assert composer.placeholder == "补充或修改计划，确认后再开始执行"
-        assert str(status_left.render()) == "gpt-test · 计划 · 逐次确认"
+        assert str(status_left.render()) == "gpt-test · 计划 · 只读"
         assert str(app.query_one("#prompt-glyph").render()) == "#"
 
 
@@ -114,7 +114,7 @@ async def test_plan_phase_can_select_execute_command(
         assert visible == ["do"]
 
         hint_bar = app.query_one(CommandHintBar)
-        assert "保留当前审批策略" in str(hint_bar.render())
+        assert "保留当前访问范围" in str(hint_bar.render())
 
 
 @pytest.mark.asyncio
@@ -165,7 +165,7 @@ async def test_do_command_restores_normal_mode(
         status_left = app.query_one("#status-left")
         assert session.work_phase == "execute"
         assert composer.placeholder == "发送一条消息"
-        assert str(status_left.render()) == "gpt-test · 执行 · 逐次确认"
+        assert str(status_left.render()) == "gpt-test · 执行 · 项目访问"
         assert not status_left.has_class("-plan")
         assert not status_left.has_class("-acceptEdits")
         assert not status_left.has_class("-bypass")

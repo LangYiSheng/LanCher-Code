@@ -76,7 +76,7 @@ uv run pytest            # 运行全部测试
 | 协议（Protocol） | `tools/core/base.py`、`providers/base.py` | 定义"工具/供应商必须长什么样" |
 | 异步生成器 + 队列 | `agent/runner.py` | 后台任务产事件，消费者逐条消费 |
 | 门面 | `ChatTUI` / `ConfigBootstrapTUI` | 包装 Textual App |
-| 状态机 | `SessionController.set_work_phase` / `set_permission_policy` | 阶段与策略独立，只使用当前两轴接口 |
+| 状态机 | `SessionController.set_work_phase` / `set_execution_access` | 讨论和计划有效只读，执行访问选择独立保存，只使用当前两轴接口 |
 | 退出意图状态机 | `tui/exit_flow.py` | 停止期间锁存请求，空闲双按在 3 秒内确认；时钟可注入 |
 | 请求用量账本 | `usage/ledger.py` | 每次实际尝试独立记录，快照按已知字段合并；会话与本次启动共享汇总口径 |
 | 容量与消耗分层 | `context/tokens.py`、`context/budget.py` | 可靠输入 usage 校准下一次请求，动态预算控制容量；粗估不填补实际消耗 |

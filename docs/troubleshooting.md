@@ -52,13 +52,13 @@ Test-Path $HOME\.lancher\lancher.yaml
 | 现象 | 检查点 |
 |---|---|
 | 规则总是命中不了 | 匹配格式是否正确：`RunCommand(git *)` / `WriteFile(.env)` / `mcp__server__tool`；路径是否为项目相对路径（正斜杠、小写）；glob 用 `* ? [` |
-| 项目规则不生效 | 检查文件在 `./.lancher/permissions.yaml`（不是 `~/.lancher/`）；注意**同一作用域内最后一条命中规则生效**，后面的规则会覆盖前面的 |
-| bypass 策略下仍被拒绝 | 正常：工作阶段、危险命令黑名单、路径限制与显式 `deny` 规则依然生效 |
-| 文件写入总被要求确认 | 当前 Session workspace 已批准；其他项目文件在执行阶段按 `default` 询问写入，可选择规则或 `acceptEdits`。讨论／计划阶段源码只读 |
+| 项目规则不生效 | 检查 `format_version: 2`、`result: deny`、匹配方式及实际 cwd；任意匹配的拒绝规则都生效 |
+| 完全访问下仍被拒绝 | 正常：只读阶段、极危险命令和显式 `deny` 仍生效 |
+| 项目外文件要求确认 | 项目访问模式对外部读写审批；可选择本次或会话目录授权，完全访问自动允许。讨论／计划不能普通写入 |
 
 ### 修改配置后不生效
 
-- `runtime.work_phase` / `runtime.permission_policy` 控制启动默认值；运行中可用 `/discuss`、`/plan`、`/do` 和 `/permissions` 分别修改。忙碌时先完成或停止任务
+- `runtime.work_phase` / `runtime.execution_access` 控制启动默认值；运行中可用 `/discuss`、`/plan`、`/do` 和 `/access` 分别修改。忙碌时先完成或停止任务
 - 模型目录与权限规则保存后立即生效，MCP 保存后由核心立即重新应用；直接修改 YAML 或应用失败时使用 `/mcp reload`。只修改默认模型不会替换当前会话所选模型；需要立即改用另一模型时执行 `/model`。
 
 ## 运行问题
@@ -78,8 +78,8 @@ Test-Path $HOME\.lancher\lancher.yaml
 | error_code | 含义与处理 |
 |---|---|
 | `tool_not_found` | 工具未注册或 MCP 工具未加载。MCP 工具需先 `tool_search` |
-| `phase_disallowed` / `mode_disallowed` | 当前阶段不允许该工具（如讨论／计划中的普通写入和 Shell）；规则与 bypass 无法放开 |
-| `path_outside_project` | 路径越出项目根（路径沙箱）。确认路径在 cwd 内 |
+| `phase_disallowed` | 当前阶段不允许该操作（如讨论／计划中的普通写入或无法确认只读的 Shell）；会话目录授权与完全访问均无法突破只读阶段 |
+| `invalid_access_target` / `permission_target_changed` | 路径参数无效，或审批等待期间实际目标已改变；检查路径并重新请求执行 |
 | `stale_file_state` / `incomplete_file_read` / `file_changed_since_read` | 防盲写守卫：先 `read_file`（完整读取），文件被外部改过就重读 |
 | `large_file_requires_paging` | read_file 大文件需要 `offset` + `limit` |
 | `match_not_found` / `match_not_unique` | edit_file 的 `old_text` 找不到或匹配多次，提供更精确原文 |
@@ -135,4 +135,4 @@ Windows 后端从系统目录使用 PowerShell，通过 Job Object 托管；ConP
 - **`lancher.yaml` 与 `lancher.example.yaml` 的区别**：前者是本地真实配置（含密钥，被 gitignore），后者是示例（无密钥）。
 - **`docs/` 被 gitignore**：仓库当前约定不把 `docs/` 纳入版本控制（见 `.gitignore`）。
 - **CLI 没有参数**：`--help` 只有程序名与描述；任何参数都会被解析但无效果。
-- **旧格式需要重新配置**：主配置只读 `~/.lancher/lancher.yaml`。旧 `provider` / `permission_mode` 字段、缺少 `match_kind` 的权限规则均明确报错并保留原文件，不自动迁移。会话格式只接受版本 2；列表会单独报告旧格式或损坏文件，使用 `/session new` 建立新会话。
+- **旧格式需要重新配置**：主配置只读 `~/.lancher/lancher.yaml`。旧 `provider` / `permission_mode` 字段、缺少 `match_kind` 的权限规则均明确报错并保留原文件，不自动迁移。会话格式只接受版本 3；列表会单独报告旧格式或损坏文件，使用 `/session new` 建立新会话。

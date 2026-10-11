@@ -11,6 +11,7 @@ import pytest
 from lancher_code.contracts.tools import ToolCall, ToolDefinition, ToolPermissionMetadata
 from lancher_code.tools.context import ToolContext
 from lancher_code.permissions.engine import PermissionEngine, PermissionStorage
+from lancher_code.permissions.models import DirectoryGrant
 from lancher_code.tools import create_default_tool_registry
 from lancher_code.tools.builtin.command import RunCommandTool
 from lancher_code.tools.builtin.edit_file import EditFileTool
@@ -22,13 +23,13 @@ from lancher_code.tools.builtin.write_plan_file import WritePlanFileTool
 from lancher_code.tools.core.executor import ToolExecutor
 
 
-def _context(project: Path, *, phase: str = "execute", policy: str = "default", identity: str = "a" * 32) -> ToolContext:
+def _context(project: Path, *, phase: str = "execute", policy: str = "project", identity: str = "a" * 32) -> ToolContext:
     root = project / ".lancher" / "sessions" / identity
     workspace = root / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     return ToolContext(file_state_cache=FileStateCache(),
         cwd=project, project_root=project, timeout_seconds=1,
-        work_phase=phase, permission_policy=policy,
+        work_phase=phase, execution_access=policy,
         session_id=identity, session_root=root, session_workspace=workspace,
         plan_file_path=workspace / "plan.md",
     )
@@ -46,8 +47,7 @@ def test_current_workspace_writes_need_no_permission_prompt(tmp_path, phase, too
         call=_call(tool.definition.name, {"path": str(context.session_workspace / "note.md")}),
         tool=tool.definition, context=context,
     )
-    assert check.decision == "allow"
-    assert check.reason_code == "session_workspace_allowed"
+    assert check.decision == ("allow" if phase == "execute" else "deny")
     assert check.request is None
 
 
@@ -64,7 +64,7 @@ def test_explicit_denial_beats_workspace_grant_and_higher_scope_allow(tmp_path):
     context = _context(tmp_path)
     storage = PermissionStorage(project_rules_path=tmp_path / ".lancher" / "permissions.yaml")
     storage.add_project_rule("WriteFile(*)", "deny", match_kind="glob")
-    storage.add_session_rule("WriteFile(*)", "allow", match_kind="glob")
+    storage.add_directory_grants([DirectoryGrant(str(tmp_path), "write")])
     check = PermissionEngine(storage).evaluate(
         call=_call("write_file", {"path": str(context.session_workspace / "note.md")}),
         tool=WriteFileTool().definition, context=context,
@@ -74,19 +74,19 @@ def test_explicit_denial_beats_workspace_grant_and_higher_scope_allow(tmp_path):
 
 
 @pytest.mark.parametrize("phase", ["discuss", "plan"])
-@pytest.mark.parametrize("policy", ["default", "acceptEdits", "bypass"])
+@pytest.mark.parametrize("policy", ["project", "full"])
 def test_project_and_other_workspace_writes_stay_readonly_during_investigation(tmp_path, phase, policy):
     context = _context(tmp_path, phase=phase, policy=policy)
     other = _context(tmp_path, identity="b" * 32)
     storage = PermissionStorage()
-    storage.add_session_rule("WriteFile(*)", "allow", match_kind="glob")
+    storage.add_directory_grants([DirectoryGrant(str(tmp_path), "write")])
     for path in (tmp_path / "code.py", other.session_workspace / "note.md"):
         check = PermissionEngine(storage).evaluate(call=_call("write_file", {"path": str(path)}), tool=WriteFileTool().definition, context=context)
         assert check.decision == "deny"
         assert check.reason_code == "phase_disallowed"
 
 
-@pytest.mark.parametrize("policy", ["default", "acceptEdits", "bypass"])
+@pytest.mark.parametrize("policy", ["project", "full"])
 @pytest.mark.parametrize("relative", ["session.jsonl", "state.json", "workspace/../permissions.json"])
 def test_session_records_are_protected_from_structured_writes(tmp_path, policy, relative):
     context = _context(tmp_path, policy=policy)
@@ -98,18 +98,18 @@ def test_session_records_are_protected_from_structured_writes(tmp_path, policy, 
     assert check.reason_code == "session_records_protected"
 
 
-def test_other_session_workspace_does_not_get_automatic_approval(tmp_path):
+def test_other_session_workspace_gets_project_access_in_execute(tmp_path):
     context = _context(tmp_path)
     other = _context(tmp_path, identity="b" * 32)
     check = PermissionEngine().evaluate(
         call=_call("write_file", {"path": str(other.session_workspace / "note.md")}),
         tool=WriteFileTool().definition, context=context,
     )
-    assert check.decision == "ask"
+    assert check.decision == "allow"
 
 
 def test_control_directory_cannot_impersonate_a_session_workspace(tmp_path):
-    context = _context(tmp_path, policy="bypass")
+    context = _context(tmp_path, policy="full")
     check = PermissionEngine().evaluate(
         call=_call("write_file", {"path": str(tmp_path / ".lancher" / "sessions" / ".locks" / "workspace" / "lock.txt")}),
         tool=WriteFileTool().definition, context=context,
@@ -137,12 +137,12 @@ def test_shell_and_external_tool_do_not_inherit_workspace_approval(tmp_path):
         (RunCommandTool().definition, {"description": "打印", "command": "Write-Output hello"}),
         (external, {"path": str(context.session_workspace / "remote.txt")}),
     ):
-        assert PermissionEngine().evaluate(call=_call(tool.name, arguments), tool=tool, context=context).decision == "ask"
+        assert PermissionEngine().evaluate(call=_call(tool.name, arguments), tool=tool, context=context).decision == ("allow" if tool.name == "run_command" else "ask")
 
 
 @pytest.mark.asyncio
 async def test_direct_file_tool_still_rejects_record_tampering(tmp_path):
-    context = _context(tmp_path, policy="bypass")
+    context = _context(tmp_path, policy="full")
     result = await WriteFileTool().execute({"path": str(context.session_root / "session.jsonl"), "content": "tamper"}, context)
     assert result.error_code == "session_records_protected"
     assert not (context.session_root / "session.jsonl").exists()
@@ -151,7 +151,7 @@ async def test_direct_file_tool_still_rejects_record_tampering(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", [WriteFileTool(), EditFileTool()])
 async def test_workspace_hardlink_cannot_modify_control_records(tmp_path, tool):
-    context = _context(tmp_path, phase="plan", policy="bypass")
+    context = _context(tmp_path, phase="execute", policy="full")
     control = context.session_root / "events.jsonl"
     control.write_text("original", encoding="utf-8")
     link = context.session_workspace / "note.md"
@@ -168,8 +168,8 @@ async def test_workspace_hardlink_cannot_modify_control_records(tmp_path, tool):
     assert control.read_text(encoding="utf-8") == link.read_text(encoding="utf-8") == "original"
 
 
-def test_project_hardlink_is_protected_even_under_bypass_policy(tmp_path):
-    context = _context(tmp_path, policy="bypass")
+def test_project_hardlink_is_protected_even_under_full_access(tmp_path):
+    context = _context(tmp_path, policy="full")
     file = tmp_path / "source.py"
     file.write_text("original", encoding="utf-8")
     link = tmp_path / "alias.py"
@@ -188,7 +188,7 @@ async def test_file_read_state_is_reset_when_switching_sessions(tmp_path):
     executor = ToolExecutor(create_default_tool_registry(), cwd=tmp_path)
 
     def parameters(context):
-        return {"session_id": context.session_id, "session_root": context.session_root, "session_workspace": context.session_workspace, "permission_policy": "acceptEdits"}
+        return {"session_id": context.session_id, "session_root": context.session_root, "session_workspace": context.session_workspace, "execution_access": "project"}
 
     await executor.execute_calls([_call("read_file", {"path": "code.py"})], **parameters(first))
     results = await executor.execute_calls([_call("write_file", {"path": "code.py", "content": "new"})], **parameters(second))

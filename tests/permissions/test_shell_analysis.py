@@ -35,7 +35,8 @@ def test_bash_directory_changes_and_redirects_have_execution_cwd(project):
     assert result.commands[1].cwd == project / "Sub Dir"
     assert result.unknown_reasons
     assert {(item.operation, item.path) for item in result.path_accesses} == {
-        ("cwd", project / "Sub Dir"), ("read", project / "Sub Dir/In.txt"), ("write", project / "Sub Dir/Out.txt")}
+        ("cwd", project / "Sub Dir"), ("read", project / "Sub Dir/In.txt"), ("write", project / "Sub Dir/Out.txt"),
+        ("read", project / "In.txt"), ("write", project / "Out.txt")}
 
 
 def test_bash_read_redirect_and_fd_duplication(project):
@@ -60,7 +61,7 @@ def test_bash_nested_substitution_still_exposes_delete(project):
     assert result.deletes[0].path == project / "file.txt"
 
 
-@pytest.mark.parametrize("command", ["format volume", "sudo rm file", "shutdown now", "git reset --hard", "git clean -fdx", "git -C . reset --hard", "git clean --force"])
+@pytest.mark.parametrize("command", ["format volume", "sudo mkfs.ext4 /dev/sda", "dd if=file of=/dev/sda", "wipefs -a /dev/sda", "sh -c 'mkfs /dev/sda'"])
 def test_high_risk_operations_are_ast_commands(command, project):
     assert analyze(command, project).hard_denials
 
@@ -133,8 +134,8 @@ class TestPowerShell:
     def test_directory_change_and_write_target(self, project):
         result = analyze('Set-Location "Sub Dir"; Set-Content -LiteralPath Out.txt -Value "data > format"', project, "powershell")
         assert result.unknown_reasons
-        assert result.path_accesses[-1].path == project / "Sub Dir/Out.txt"
-        assert result.path_accesses[-1].operation == "write"
+        assert any(item.path == project / "Sub Dir/Out.txt" and item.operation == "write" for item in result.path_accesses)
+        assert any(item.path == project / "Out.txt" and item.operation == "write" for item in result.path_accesses)
 
     def test_recursive_delete_is_visible(self, project):
         result = analyze('Remove-Item -Path "Sub Dir" -Recurse -Force', project, "powershell")
@@ -173,7 +174,7 @@ class TestPowerShell:
         'python -c "print(1)"', 'Remove-Item *.txt',
         'Set-Location $path; Remove-Item file.txt',
     ])
-    def test_dynamic_execution_requires_approval(self, command, project):
+    def test_dynamic_execution_is_recorded_as_unknown(self, command, project):
         assert analyze(command, project, "powershell").unknown_reasons
 
     def test_script_block_delete_is_still_visible(self, project):
@@ -270,3 +271,74 @@ def test_copy_into_existing_directory_exposes_actual_child(project):
 
 def test_recursive_copy_without_existing_destination_is_unknown(project):
     assert analyze("cp -R Source Destination", project).unknown_reasons
+
+
+@pytest.mark.parametrize("command", ["sudo rm file", "shutdown now", "git reset --hard", "git clean -fdx", "git -C . reset --hard", "git clean --force", "git checkout -- a.txt", "git restore --source=HEAD a.txt"])
+def test_ordinary_destructive_operations_are_not_hard_denied(command, project):
+    assert not analyze(command, project).hard_denials
+
+
+@pytest.mark.parametrize("command,expected", [("cat file.txt", True), ("echo ready", True), ("git status", True), ("rm file.txt", False), ("touch file.txt", False), ("npm run build", False), ("python -c 'print(1)'", False), ("git reset --hard", False)])
+def test_read_only_requires_complete_query(command, expected, project):
+    assert analyze(command, project).read_only is expected
+
+
+def test_git_external_directory_and_output_paths_are_access_facts(project):
+    external = project.parent / "external"
+    result = analyze(f'git -C "{external}" log --output=Log.txt', project)
+    assert any(item.operation == "cwd" and item.path == external for item in result.path_accesses)
+    assert any(item.operation == "write" and item.path == external / "Log.txt" for item in result.path_accesses)
+
+
+def test_failed_directory_change_keeps_original_cwd_candidate(project):
+    result = analyze('cd missing/deep; rm ../../external.txt', project)
+    assert any(item.path == (project / '../../external.txt').resolve() for item in result.deletes)
+
+
+def test_unknown_program_named_output_path_is_detected(project):
+    result = analyze('generator --output=../external.txt', project)
+    assert any(item.operation == "write" and item.path == project.parent / "external.txt" for item in result.path_accesses)
+
+
+def test_nested_literal_shell_exposes_external_write(project):
+    result = analyze("sh -c 'echo data > ../external.txt'", project)
+    assert any(item.operation == "write" and item.path == project.parent / "external.txt" for item in result.path_accesses)
+
+
+def test_inline_python_source_is_not_a_literal_file_path(project):
+    result = analyze('python -c "print(1 / 2)"', project)
+    assert result.unknown_reasons
+    assert not result.path_accesses
+
+
+def test_delete_symlink_preserves_the_link_target(project):
+    link = project / "link.txt"
+    try:
+        link.symlink_to(project.parent / "external.txt")
+    except OSError:
+        pytest.skip("当前系统不允许创建符号链接")
+    result = analyze("rm link.txt", project)
+    assert result.deletes[0].path == link
+
+
+@pytest.mark.skipif(os.name != "nt", reason="需要 PowerShell AST")
+def test_encoded_powershell_risk_is_decoded_without_execution(project):
+    import base64
+    source = "Format-Volume -DriveLetter X"
+    encoded = base64.b64encode(source.encode("utf-16-le")).decode("ascii")
+    assert analyze(f'powershell -EncodedCommand {encoded}', project, "powershell").hard_denials
+
+
+@pytest.mark.parametrize("command", ['curl http://127.0.0.1:8080/', 'curl https://example.com/path', 'git clone git@github.com:org/repo.git'])
+def test_remote_urls_are_not_local_write_paths(command, project):
+    assert not analyze(command, project).path_accesses
+
+
+def test_file_url_is_still_a_local_access_path(project):
+    target = project.parent / "external.txt"
+    result = analyze(f'curl "{target.as_uri()}"', project)
+    assert any(item.path == target and item.operation == "write" for item in result.path_accesses)
+
+
+def test_nested_windows_disk_tool_is_detected_from_bash(project):
+    assert analyze("sh -c 'format.exe X:'", project).hard_denials

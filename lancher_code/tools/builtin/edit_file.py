@@ -12,7 +12,7 @@ EDIT_FILE_DESCRIPTION = (
     "在文件中按原文做唯一匹配替换，适合局部修改代码或配置。"
     "应该在已经读过目标文件、并且确认文件没有被外部改动后使用。"
     "不要拿它做整文件重写；整文件改写请使用 write_file。"
-    "讨论和计划阶段只能修改当前会话的 workspace 工作目录中的文件。"
+    "仅执行阶段可用；项目外路径由访问权限决定是否需要批准。"
 )
 
 
@@ -42,7 +42,7 @@ class EditFileTool:
                 "additionalProperties": False,
             },
             category="write",
-            allowed_phases=("discuss", "plan", "execute"),
+            allowed_phases=("execute",),
         )
 
     async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolExecutionResult:

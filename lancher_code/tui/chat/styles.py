@@ -93,7 +93,7 @@ CHAT_CSS = """
     Screen.-narrow #status-left { height: 2; }
     Screen.-tiny #status-bar, Screen.-tiny #status-left { height: 3; }
     Screen.-tiny #composer-actions.-working #chat-model,
-    Screen.-tiny #composer-actions.-working #chat-policy,
+    Screen.-tiny #composer-actions.-working #chat-access,
     Screen.-tiny #composer-actions.-working #chat-details { display: none; }
     Screen.-narrow #status-right { display: none; }
     Screen.-narrow #composer-help { display: none; }

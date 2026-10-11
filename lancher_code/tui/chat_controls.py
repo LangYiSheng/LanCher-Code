@@ -207,28 +207,27 @@ class PlanReviewScreen(ModalScreen[tuple[str, str] | None]):
         self.dismiss(None)
 
 
-class PermissionPolicyScreen(ModalScreen[str | None]):
+class ExecutionAccessScreen(ModalScreen[str | None]):
     BINDINGS = [("escape", "cancel", "返回")]
     CSS = """
-    PermissionPolicyScreen { align: center middle; background: $background 70%; }
-    #policy-box { width: 64; max-width: 96%; height: auto; max-height: 90%; overflow-y: auto; padding: 1 2; background: $surface; }
-    #policy-box Button { width: 1fr; height: 3; background: transparent; border: none; text-style: none; color: $text; }
-    #policy-box Button:focus { background: $foreground; color: $background; text-style: bold; }
-    #policy-box Static { height: auto; margin-bottom: 1; }
-    #policy-box .section-title { text-style: bold; }
+    ExecutionAccessScreen { align: center middle; background: $background 70%; }
+    #access-box { width: 64; max-width: 96%; height: auto; max-height: 90%; overflow-y: auto; padding: 1 2; background: $surface; }
+    #access-box Button { width: 1fr; height: 3; background: transparent; border: none; text-style: none; color: $text; }
+    #access-box Button:focus { background: $foreground; color: $background; text-style: bold; }
+    #access-box Static { height: auto; margin-bottom: 1; }
+    #access-box .section-title { text-style: bold; }
     """
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="policy-box"):
-            yield Static("本次对话的审批策略", classes="section-title")
-            yield Static("讨论只读，计划只写计划文档。审批策略不改变这些边界。")
-            yield Button("逐次确认 · 修改和命令按规则询问", id="policy-default")
-            yield Button("自动编辑 · 文件编辑自动允许", id="policy-acceptEdits")
-            yield Button("跳过询问 · 仍遵循阶段与访问限制", id="policy-bypass")
+        with Vertical(id="access-box"):
+            yield Static("执行访问范围", classes="section-title")
+            yield Static("讨论和计划始终只读，专用计划工具可写计划文件。返回执行阶段时恢复此选择。")
+            yield Button("项目访问 · 项目内自动执行，外部访问审批", id="access-project")
+            yield Button("完全访问 · 所有目录自动执行，极危险操作仍拒绝", id="access-full")
 
     @on(Button.Pressed)
     def choose(self, event: Button.Pressed) -> None:
-        self.dismiss((event.button.id or "").removeprefix("policy-"))
+        self.dismiss((event.button.id or "").removeprefix("access-"))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

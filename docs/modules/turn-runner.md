@@ -36,7 +36,7 @@ tui/app.py  ──run_user_turn()──▶  TurnRunner
 | `stop_and_wait()` | 界面关闭时取消当前任务并等待工具、子进程和管道收尾 |
 | `has_active_turn` | 是否有回合在跑 |
 | `compact_context()` | 手动压缩（`/compact`），模型响应中禁止 |
-| `set_phase(phase)` / `set_permission_policy(policy)` | 分别切换阶段和策略；运行、审批、压缩期间拒绝修改 |
+| `set_phase(phase)` / `set_execution_access(policy)` | 分别切换阶段和策略；运行、审批、压缩期间拒绝修改 |
 | `enqueue_input(text, delivery)` | 接收下一轮或当前任务补充，返回 `PendingInput` 回执 |
 | `update_pending_input` / `remove_pending_input` / `convert_pending_input` | 编辑、移除、转换未消费消息；消费后不允许重复转换 |
 | `pause_queue()` / `resume_queue()` / `run_next_queued_turn()` | 暂停、明确继续，以及原子消费下一项 |
@@ -92,7 +92,7 @@ run_user_turn(text)
 
 `TurnEvent`（定义在 `agent/events.py`）是当前轮次的界面事件协议；任务窗口另通过 runner facade 查询并控制所属 Session 的进程，`kind` 包括：
 
-主要包括 `user_message_created`、`assistant_message_started`、`assistant_text_delta`、`tool_call_started`、`tool_result_received`、`usage_updated`、`progress_updated`、`phase_changed`、`policy_changed`、`permission_request_created`、`permission_request_resolved`、`permission_request_closed`、`pending_input_changed`、`steering_applied`、`assistant_message_completed`、`turn_completed`、`turn_cancelled`、`turn_failed`。
+主要包括 `user_message_created`、`assistant_message_started`、`assistant_text_delta`、`tool_call_started`、`tool_result_received`、`usage_updated`、`progress_updated`、`phase_changed`、`access_changed`、`permission_request_created`、`permission_request_resolved`、`permission_request_closed`、`pending_input_changed`、`steering_applied`、`assistant_message_completed`、`turn_completed`、`turn_cancelled`、`turn_failed`。
 
 `assistant_message_completed` 是段结束，可因补充而出现多次，用量按段结算；`turn_completed` 才表示整个任务成功，只发一次，UI 据此继续队列。
 
