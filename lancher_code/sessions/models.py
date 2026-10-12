@@ -72,6 +72,7 @@ class PendingInput:
 @dataclass(slots=True)
 class SessionState:
     messages: list[SessionMessage] = field(default_factory=list)
+    reasoning_effort: str = "auto"
     work_phase: WorkPhase = "execute"
     execution_access: ExecutionAccess = "project"
     directory_grants: list[DirectoryGrant] = field(default_factory=list)

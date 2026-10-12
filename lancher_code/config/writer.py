@@ -27,8 +27,6 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
                 value = getattr(model, key)
                 if value is not None:
                     model_data[key] = value
-            if model.reasoning_effort != "auto":
-                model_data["reasoning_effort"] = model.reasoning_effort
             if model.metadata is not None:
                 model_data["metadata"] = serialize_metadata(model.metadata)
             models_data[model_id] = model_data

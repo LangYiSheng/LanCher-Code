@@ -16,7 +16,7 @@ from lancher_code.tui.theme import apply_theme
 from lancher_code.errors import ConfigError
 from lancher_code.mcp.template import ensure_user_mcp_config
 from lancher_code.providers.catalog import new_entry_id
-from lancher_code.providers.reasoning import API_MODE_OPTIONS, EFFORT_LABELS, EFFORT_LEVELS, reasoning_capabilities
+from lancher_code.providers.reasoning import API_MODE_OPTIONS
 from lancher_code.providers.discovery import ModelDiscoveryClient, discovery_connection
 from lancher_code.providers.models import ProviderDefinition
 from lancher_code.providers.metadata import bound_metadata, serialize_metadata
@@ -130,9 +130,6 @@ class ConfigBootstrapApp(App[int]):
                         yield Static("以后可在设置中添加模型，或为单个模型覆盖连接参数。", classes="setup-hint")
                         yield Static("单次总输出额度（token，可选）", classes="field-label")
                         yield Input(placeholder="默认 32768；包含思考、正文和工具参数", id="max-output-tokens-input", classes="field-input")
-                        yield Static("推理强度（effort）", classes="field-label")
-                        yield Select([("自动（推荐）", "auto")], value="auto", allow_blank=False, id="reasoning-effort-select", classes="field-input")
-                        yield Static("", id="reasoning-help", classes="setup-hint", markup=False)
                         yield Static("思考轨迹显示可在外观设置中调整。", classes="setup-hint")
                 with Vertical(id="setup-confirm", classes="setup-page"):
                     yield Static("", id="bootstrap-summary", markup=False)
@@ -225,28 +222,6 @@ class ConfigBootstrapApp(App[int]):
         model_input.placeholder = MODEL_PLACEHOLDERS[protocol]
         if not base_url_input.value.strip() or base_url_input.value in DEFAULT_BASE_URLS.values():
             base_url_input.value = DEFAULT_BASE_URLS[protocol]
-        self._sync_reasoning()
-
-    @on(Input.Changed, "#model-input")
-    @on(Input.Changed, "#base-url-input")
-    def reasoning_model_changed(self) -> None:
-        self._sync_reasoning()
-
-    def _sync_reasoning(self) -> None:
-        model = os.path.expandvars(self.query_one("#model-input", Input).value).strip()
-        metadata = next((item for item in self._discovered_models if item.id == model), None)
-        metadata = bound_metadata(metadata, protocol=self._read_select_value(), model=model,
-            base_url=os.path.expandvars(self.query_one("#base-url-input", Input).value).strip().rstrip('/'),
-            api_key=os.path.expandvars(self.query_one("#api-key-input", Input).value).strip())
-        capabilities = reasoning_capabilities(self._read_select_value(), metadata)
-        selector = self.query_one("#reasoning-effort-select", Select)
-        levels = ("auto", *(capabilities.levels if capabilities.levels is not None else EFFORT_LEVELS[1:]))
-        selected = selector.value if selector.value in levels else "auto"
-        with self.prevent(Select.Changed):
-            selector.set_options([(EFFORT_LABELS.get(level, level), level) for level in levels])
-            selector.value = selected
-        selector.disabled = capabilities.levels == ()
-        self.query_one("#reasoning-help", Static).update(capabilities.description)
 
     @on(Input.Changed, '#base-url-input')
     @on(Input.Changed, '#api-key-input')
@@ -259,7 +234,6 @@ class ConfigBootstrapApp(App[int]):
         if self._discovery_worker is not None:
             self._discovery_worker.cancel()
         self.query_one('#bootstrap-discover', Button).disabled = False
-        self._sync_reasoning()
 
     def _discovery_provider(self) -> ProviderDefinition:
         return ProviderDefinition(name=self.query_one('#provider-name-input', Input).value.strip(),
@@ -311,7 +285,6 @@ class ConfigBootstrapApp(App[int]):
                 first = self._discovered_models[0]
                 self.query_one('#model-input', Input).value = first.id
                 self.query_one('#model-display-input', Input).value = first.display_name
-            self._sync_reasoning()
             self.query_one('#bootstrap-discovery-status', Static).update(f'已选择 {len(ids)} 个模型，首个模型用于首次对话。')
         self.push_screen(ModelDiscoveryScreen(result, provider_name=provider.name,
                                               initial={model_name} if model_name else set()), selected)
@@ -358,7 +331,6 @@ class ConfigBootstrapApp(App[int]):
                 model["max_output_tokens"] = self._parse_positive_int(output_raw, "max_output_tokens")
 
         if not connection_only:
-            model["reasoning_effort"] = self.query_one("#reasoning-effort-select", Select).value
             for metadata in self._discovered_models:
                 metadata = bound_metadata(metadata, protocol=protocol, model=metadata.id,
                     base_url=os.path.expandvars(provider['base_url']).strip().rstrip('/'),

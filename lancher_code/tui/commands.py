@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from lancher_code.providers.reasoning import EFFORT_LABELS, EFFORT_LEVELS
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,9 @@ class SlashCompletionContext:
     active_model_ref: str | None = None
     default_model_ref: str | None = None
     execution_access: str = "project"
+    effort_levels: tuple[str, ...] = EFFORT_LEVELS
+    active_effort: str = "auto"
+    effort_known: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +192,11 @@ class SlashCommandRegistry:
         elif name == "model" and not completed:
             for value, label in context.model_choices:
                 add(value, label + (" · 本次" if value == context.active_model_ref else "") + (" · 默认" if value == context.default_model_ref else ""), detail="只更改本次模型；新对话默认保持不变。")
+        elif name == "effort" and not completed:
+            for value in context.effort_levels:
+                label = EFFORT_LABELS.get(value, value) + (' · 当前' if value == context.active_effort else '')
+                add(value, label, detail='作用范围：本对话，后续回合继续沿用。' + (
+                    '' if context.effort_known else '端点未声明范围，显式档位由端点校验。'))
         elif name == "settings":
             if not completed:
                 for value, (label, _) in SETTINGS.items():
@@ -293,6 +302,8 @@ class SlashCommandRegistry:
                 return "选择技能名称或 ID" if name == "skills" else "选择一个服务器名称"
         if name == "model" and not args:
             return "选择本次模型 · 可输入名称或供应商 ID 检索"
+        if name == "effort":
+            return '选择推理强度 · 从下一条消息开始沿用' if not args else 'Enter 切换档位 · 后续回合继续沿用'
         if name == "access" and not args:
             return "选择执行访问范围 · 讨论和计划始终只读"
         if name == "settings" and len(args) < 2 and args != ["open"]:
@@ -321,6 +332,11 @@ class SlashCommandRegistry:
             raise ValueError("请选择 project 或 full。")
         if name == "model" and len(args) > 1:
             raise ValueError("请选择一个供应商 ID/模型 ID。")
+        if name == 'effort':
+            if len(args) > 1:
+                raise ValueError('用法：/effort <档位>；切换后请单独发送消息。')
+            if args and args[0] in {'none', 'off', 'disabled'}:
+                raise ValueError('不提供关闭推理档位；输入 /effort 查看可用选择。')
         if name == "settings" and args:
             if args[0] not in SETTINGS:
                 raise ValueError("未知设置项；输入 /settings 查看可用设置。")
@@ -361,6 +377,7 @@ def create_default_slash_command_registry() -> SlashCommandRegistry:
         ("skills", "管理技能 · 查看、启停与重新加载", "任务中使用 $技能名指定；加载由核心管理", "/skills [list|show|reload|enable|disable|unload] [技能名或ID]", True),
         ("mcp", "管理 MCP · 查看、刷新与重新连接", "连接状态与工具目录由核心管理", "/mcp [list|refresh|reconnect|reload] [服务器名]", True),
         ("model", "选择模型 · 更改本次对话模型", "本次选择与新对话默认相互独立", "/model <供应商ID/模型ID>", True),
+        ("effort", "调整推理强度 · 本对话持续生效", "下一条消息及后续回合沿用；auto 恢复自动", "/effort <档位>", True),
         ("access", "选择执行访问范围", "讨论和计划只读；返回执行时恢复此选择", "/access <project|full>", True),
         ("compact", "压缩上下文 · 整理当前对话记录", "作用范围：当前对话上下文", "/compact", False),
         ("settings", "修改设置 · 界面偏好与默认模型", "保存至配置；本次模型保持不变", "/settings <设置项> <值>", True),

@@ -387,8 +387,8 @@ def test_context_details_are_read_only_for_runtime_anchor(openai_provider_config
 def test_thinking_output_cap_and_input_budget_share_actual_allowance(claude_provider_config):
     claude_provider_config.context_window = 16_000
     claude_provider_config.max_output_tokens = 12_000
-    claude_provider_config.reasoning_effort = "high"
     session = SessionController(claude_provider_config)
+    session.set_effort('high')
     request = session.build_request([], allow_tool_calls=True)
     budget = context_budget(session.context_window, request.max_output_tokens)
 

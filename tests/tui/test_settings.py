@@ -355,13 +355,12 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
         screen.query_one("#model-max-output-tokens", Input).value = "8192"
         screen.query_one("#model-name", Input).value = "claude-sonnet-4-6"
         await pilot.pause()
-        screen.query_one("#model-reasoning-effort", Select).value = "high"
         screen.action_save_settings()
         await pilot.pause()
         await pilot.pause()
         model = service.load().config.providers["test"].models["default"]
         assert (model.protocol, model.base_url, model.api_key, model.timeout_seconds) == ("claude", "${CUSTOM_URL}", "${CUSTOM_KEY}", 91)
-        assert model.context_window == 12345 and model.reasoning_effort == "high"
+        assert model.context_window == 12345
         assert model.max_output_tokens == 8192
         editor.open_model("test", "default")
         assert screen.query_one("#model-max-output-tokens", Input).value == "8192"
@@ -373,7 +372,7 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
         for field in ("protocol", "base-url", "api-key", "timeout"):
             screen.query_one(f"#inherit-{field}", Checkbox).value = True
         await pilot.pause()
-        assert not screen.query_one("#model-reasoning-effort", Select).disabled
+        assert not screen.query('#model-reasoning-effort')
         screen.action_save_settings()
         await pilot.pause()
         model = service.load().config.providers["test"].models["default"]
@@ -389,7 +388,7 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 40), (32, 16)])
-async def test_reasoning_selector_follows_effective_model_connection(tmp_path, size):
+async def test_settings_has_no_effort_and_metadata_follows_connection(tmp_path, size):
     service = _service(tmp_path)
     config = service.load().config
     config.providers['test'].models['default'].metadata = parse_model_metadata(
@@ -401,19 +400,16 @@ async def test_reasoning_selector_follows_effective_model_connection(tmp_path, s
         screen = app.screen
         editor = screen.query_one(ModelSettingsEditor)
         editor.open_model("test", "default")
-        selector = screen.query_one("#model-reasoning-effort", Select)
-        assert not selector.disabled and selector.value == "auto"
+        assert not screen.query('#model-reasoning-effort')
+        assert not screen.query('#model-reasoning-help')
+        assert '获取于 test' in str(screen.query_one('#model-metadata-info', Static).render())
         screen.query_one("#inherit-base-url", Checkbox).value = False
         screen.query_one("#model-base-url", Input).value = "https://changed.test/v1"
         await pilot.pause()
-        assert not selector.disabled
-        selector.value = "max"
-        await pilot.pause()
-        assert editor.collect().providers["test"].models["default"].reasoning_effort == "max"
+        assert '尚未获取' in str(screen.query_one('#model-metadata-info', Static).render())
         screen.query_one("#inherit-base-url", Checkbox).value = True
         await pilot.pause()
-        assert not selector.disabled and selector.value == "max"
-        assert editor.collect().providers["test"].models["default"].reasoning_effort == "max"
+        assert '获取于 test' in str(screen.query_one('#model-metadata-info', Static).render())
 
 
 @pytest.mark.asyncio

@@ -64,7 +64,7 @@ def test_catalog_resolves_inheritance_overrides_and_display_names(monkeypatch) -
     assert alternate.api_key == "other-key"
     assert alternate.timeout_seconds == 45.0
     assert alternate.context_window == 200000
-    assert alternate.reasoning_effort == "high"
+    assert alternate.reasoning_effort == "auto"
     assert model_display_name(config.providers, "deepseek/chat") == "日常模型"
     assert model_display_name(config.providers, "deepseek/reasoner") == "deepseek-reasoner (DeepSeek)"
     assert iter_model_refs(config.providers) == ["deepseek/chat", "deepseek/reasoner", "deepseek/claude", "backup/chat"]
@@ -84,7 +84,7 @@ def test_resolved_snapshot_never_overwrites_raw_values_or_inheritance(monkeypatc
     config.providers["deepseek"].api_key = "changed-parent-key"
     assert resolve_model(config.providers, config.default_model).api_key == "changed-parent-key"
     assert resolve_model(config.providers, "deepseek/claude").api_key == "other-key"
-    assert resolve_model(config.providers, "deepseek/claude").reasoning_effort == "high"
+    assert resolve_model(config.providers, "deepseek/claude").reasoning_effort == "auto"
 
 
 @pytest.mark.parametrize("include_current", [False, True])
@@ -125,7 +125,6 @@ def test_catalog_rejects_invalid_default_reference(reference: str) -> None:
     ("timeout_seconds", True), ("timeout_seconds", float("inf")),
     ("context_window", False), ("context_window", 0),
     ("max_output_tokens", False), ("max_output_tokens", 0), ("max_output_tokens", "32768"),
-    ("reasoning_effort", False), ("reasoning_effort", "off"),
 ])
 def test_invalid_nondefault_model_reports_qualified_path(field: str, value: object) -> None:
     raw = _catalog_data()
@@ -185,6 +184,15 @@ def test_retired_thinking_fields_are_ignored_and_removed_on_save() -> None:
     config = load_config_data(raw)
     assert resolve_model(config.providers, "deepseek/claude").reasoning_effort == "auto"
     assert "thinking" not in serialize_config(config)["providers"]["deepseek"]["models"]["claude"]
+
+
+@pytest.mark.parametrize('effort', ['high', 'off', False])
+def test_retired_model_effort_is_ignored_and_removed_on_save(effort):
+    raw = _catalog_data()
+    raw['providers']['deepseek']['models']['claude']['reasoning_effort'] = effort
+    config = load_config_data(raw)
+    assert resolve_model(config.providers, 'deepseek/claude').reasoning_effort == 'auto'
+    assert 'reasoning_effort' not in serialize_config(config)['providers']['deepseek']['models']['claude']
 
 
 def test_new_entry_id_is_stable_safe_and_unique() -> None:

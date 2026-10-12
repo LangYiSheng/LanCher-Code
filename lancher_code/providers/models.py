@@ -33,7 +33,6 @@ class ModelDefinition:
     api_key: str | None = None
     timeout_seconds: float | None = None
     context_window: int | None = None
-    reasoning_effort: str = "auto"
     max_output_tokens: int | None = None
     metadata: ModelMetadata | None = None
     api_mode: str | None = None

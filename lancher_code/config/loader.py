@@ -197,8 +197,7 @@ def _load_model(raw: Any, path: str) -> ModelDefinition:
         timeout_seconds=_read_positive_float(raw["timeout_seconds"], f"{path}.timeout_seconds") if raw.get("timeout_seconds") is not None else None,
         context_window=_read_positive_int(raw["context_window"], f"{path}.context_window") if raw.get("context_window") is not None else None,
         max_output_tokens=_read_positive_int(raw["max_output_tokens"], f"{path}.max_output_tokens") if raw.get("max_output_tokens") is not None else None,
-        # 旧 thinking.enabled/budget_tokens 不再生效；保存时移除，统一使用自动推理。
-        reasoning_effort=raw.get("reasoning_effort", "auto"),
+        # 旧思考开关、预算和固定 effort 不再生效；推理强度属于对话状态。
         metadata=load_metadata(raw.get("metadata"), f"{path}.metadata"),
         api_mode=_load_api_mode(raw["api_mode"], f"{path}.api_mode") if raw.get("api_mode") is not None else None,
     )

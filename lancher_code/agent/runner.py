@@ -160,6 +160,22 @@ class TurnRunner:
     def model_notice(self) -> str:
         return self._models.model_notice
 
+    @property
+    def reasoning_effort(self) -> str:
+        return self._session.reasoning_effort
+
+    @property
+    def effort_levels(self) -> tuple[str, ...]:
+        return self._session.effort_levels
+
+    @property
+    def effort_known(self) -> bool:
+        return self._session.effort_known
+
+    def set_effort(self, effort: str) -> None:
+        self._ensure_model_idle()
+        self._session.set_effort(effort)
+
     def _ensure_model_idle(self) -> None:
         if getattr(self, '_capabilities', None) is not None and self._capabilities.updating:
             raise ConfigError('能力目录正在更新，请等待完成后再操作。')

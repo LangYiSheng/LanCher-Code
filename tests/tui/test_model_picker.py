@@ -184,3 +184,22 @@ async def test_default_picker_highlights_default_and_explains_scope(tmp_path):
         assert "本次对话保持" in str(screen.query_one("#model-picker-scope", Static).render())
         await pilot.press("escape")
         assert runner.model_ref == "deepseek/chat"
+
+
+@pytest.mark.asyncio
+async def test_model_capability_refresh_reports_effort_reset(tmp_path, monkeypatch):
+    from lancher_code.providers.metadata import connection_fingerprint, parse_model_metadata
+    app, runner, _, config, _ = build_model_app(tmp_path)
+    async with app.run_test() as pilot:
+        runner.set_effort('low')
+        changed = deepcopy(config)
+        provider = changed.providers['deepseek']
+        provider.models['chat'].metadata = parse_model_metadata(
+            {'id': 'deepseek-chat', 'effort': {'supported_levels': ['high']}},
+            fingerprint=connection_fingerprint(provider.protocol, provider.base_url, provider.api_key), fetched_at='now')
+        notices = []
+        monkeypatch.setattr(app, 'notify', lambda message, **kwargs: notices.append(message))
+        app._apply_models_settings(changed)
+        await pilot.pause()
+        assert runner.reasoning_effort == 'auto'
+        assert any('不支持先前的 low 档位' in notice for notice in notices)

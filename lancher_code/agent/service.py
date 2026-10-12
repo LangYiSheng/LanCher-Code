@@ -401,6 +401,22 @@ class AgentService:
         return self._runner.model_notice
 
     @property
+    def reasoning_effort(self) -> str:
+        return self._runner.reasoning_effort
+
+    @property
+    def effort_levels(self) -> tuple[str, ...]:
+        return self._runner.effort_levels
+
+    @property
+    def effort_known(self) -> bool:
+        return self._runner.effort_known
+
+    def set_effort(self, effort: str) -> None:
+        self._ensure_idle()
+        self._runner.set_effort(effort)
+
+    @property
     def pending_inputs(self) -> list[PendingInput]:
         return deepcopy(self._runner.pending_inputs)
 

@@ -95,7 +95,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 
 `ui.show_thinking_status` 只改变界面显示，不改变请求、模型能力或保存的思考协议。不同模型可以使用固定推理策略、默认推理或端点支持的可调策略，不能把界面开关理解成所有模型都支持的“深度思考开关”。
 
-模型参数统一使用 `reasoning_effort`，默认 `auto`；在供应商设置中“发现模型”可读取实际能力，设置页会注明信息获取时间。支持自适应推理的声明触发 adaptive，未知字段沿用服务端默认；没有型号、归属或域名推断。未声明档位范围时，显式档位由端点校验。需要 Responses 的 OpenAI 端点可在高级连接选项中明确选择。旧 `thinking.enabled` 与 `thinking.budget_tokens` 读取时忽略、保存时移除；界面的思考显示开关仍只影响显示。详见 [模型发现](workflows/model-discovery.md)及[配置](configuration.md#自动推理与-effort)。
+聊天用 `/effort <档位>` 切换当前对话的强度，默认 `auto`，从下一条消息开始沿用；消息正文单独发送，设置页不再提供强度选项。在供应商设置中“发现模型”可读取实际能力，设置页会注明信息获取时间。支持自适应推理的声明触发 adaptive，未知字段沿用服务端默认；没有型号、归属或域名推断。未声明档位范围时，显式档位由端点校验。需要 Responses 的 OpenAI 端点可在高级连接选项中明确选择。旧 `thinking.enabled`、`thinking.budget_tokens` 和模型 `reasoning_effort` 读取时忽略、保存时移除；界面的思考显示开关仍只影响显示。详见 [模型发现](workflows/model-discovery.md)及[配置](configuration.md#自动推理与-effort)。
 
 ### 工具执行失败（结构化错误）
 

@@ -13,7 +13,7 @@ def complete(text, **kwargs):
 
 def test_root_only_has_commands_and_supports_chinese_intent():
     rows = complete("/")
-    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "access", "compact", "settings", "status", "exit"]
+    assert [r.display for r in rows] == ["discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "effort", "access", "compact", "settings", "status", "exit"]
     assert all("<" not in r.display and "[" not in r.display for r in rows)
     assert complete("/切换对话")[0].apply("/切换对话") == "/session "
     assert create_default_slash_command_registry().parse_submission("/mode plan") is None
@@ -78,6 +78,20 @@ def test_invalid_commands_are_rejected(name, args):
 def test_phase_payload_is_not_tokenized_or_rewritten():
     match = create_default_slash_command_registry().parse_submission('/plan 调查 "多个 空格"\n下一段')
     assert match.arguments_text == '调查 "多个 空格"\n下一段'
+
+
+def test_effort_completion_uses_current_model_capabilities():
+    registry = create_default_slash_command_registry()
+    choices = registry.complete(SlashCompletionContext(
+        text='/effort ', effort_levels=('auto', 'low', 'high'), active_effort='low', effort_known=True))
+    assert [choice.value for choice in choices] == ['auto', 'low', 'high']
+    assert '当前' in choices[1].description
+    assert registry.complete(SlashCompletionContext(text='/effort low 消息')) == []
+    registry.validate('effort', 'low')
+    with pytest.raises(ValueError, match='切换后请单独发送消息'):
+        registry.validate('effort', 'low 需要处理的消息\n下一段')
+    with pytest.raises(ValueError):
+        registry.validate('effort', 'off')
 
 
 def test_session_title_preserves_spaces():

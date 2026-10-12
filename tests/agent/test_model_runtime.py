@@ -49,7 +49,6 @@ def _catalog() -> AppConfig:
                     "sonnet": ModelDefinition(
                         model_name="claude-sonnet-4-6",
                         context_window=200000,
-                        reasoning_effort="auto",
                         metadata=parse_model_metadata({'id': 'claude-sonnet-4-6', 'capabilities': {
                             'thinking': {'types': {'adaptive': {'supported': True}}},
                             'effort': {'supported_levels': ['low', 'medium', 'high', 'max']}}},
@@ -120,19 +119,94 @@ def _history(session: SessionController) -> None:
     ])
 
 
-def test_effort_reload_updates_provider_session_and_request_atomically(tmp_path):
+def test_effort_is_session_state_and_survives_config_reload(tmp_path):
     runner, session, _, created, config = _runner(tmp_path)
     runner.switch_model("anthropic/sonnet")
-    config.providers["anthropic"].models["sonnet"].reasoning_effort = "high"
+    runner.set_effort('high')
     assert not runner.reload_models(config)
-    assert created[-1].config.reasoning_effort == session.provider_config.reasoning_effort == "high"
+    assert created[-1].config.reasoning_effort == session.provider_config.reasoning_effort == "auto"
     assert session.build_request([], allow_tool_calls=True).reasoning_effort == "high"
-    invalid = deepcopy(config)
-    invalid.providers["anthropic"].models["sonnet"].reasoning_effort = "xhigh"
     with pytest.raises(ConfigError, match="推理档位"):
-        runner.reload_models(invalid)
+        runner.set_effort('xhigh')
     assert runner._models.provider is created[-1]
     assert session.build_request([], allow_tool_calls=True).reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_effort_applies_to_current_and_following_turns_and_resumes(tmp_path):
+    runner, session, initial, _, _ = _runner(tmp_path)
+    runner.set_effort('low')
+    for prompt in ('第一条', '第二条'):
+        async for _ in runner.run_user_turn(prompt):
+            pass
+    assert [request.reasoning_effort for request in initial.requests] == ['low', 'low']
+    saved_id = session.session_id
+    runner.new_session()
+    assert runner.reasoning_effort == 'auto'
+    runner.resume_session(saved_id)
+    assert runner.reasoning_effort == 'low'
+    runner.set_effort('auto')
+    assert session.build_request([], allow_tool_calls=True).reasoning_effort == 'auto'
+    session.close()
+
+
+def test_effort_capabilities_switch_reset_and_failed_persistence(tmp_path, monkeypatch):
+    runner, session, _, _, config = _runner(tmp_path)
+    runner.set_effort('xhigh')
+    runner.switch_model('anthropic/sonnet')
+    assert runner.reasoning_effort == 'auto' and 'xhigh' in runner.model_notice
+    assert runner.effort_known and 'xhigh' not in runner.effort_levels
+    runner.set_effort('low')
+    session.create_user_message('保存本次选择')
+    def fail(*_args, **_kwargs):
+        raise SessionRepositoryError('磁盘不可写')
+    with monkeypatch.context() as patch:
+        patch.setattr(session, 'flush', fail)
+        with pytest.raises(SessionRepositoryError):
+            runner.set_effort('high')
+    assert runner.reasoning_effort == 'low'
+    runner.reload_models(config)
+    assert runner.reasoning_effort == 'low'
+    session.close()
+
+
+def test_effort_unknown_and_explicitly_unsupported_models(tmp_path):
+    runner, session, _, _, config = _runner(tmp_path)
+    assert not runner.effort_known and runner.effort_levels == ('auto', 'low', 'medium', 'high', 'xhigh', 'max')
+    config.providers['deepseek'].models['chat'].metadata = parse_model_metadata(
+        {'id': 'deepseek-chat', 'effort': {'supported_levels': []}},
+        fingerprint=connection_fingerprint('openai', 'https://deepseek.example/v1', 'deepseek-secret-key'), fetched_at='test')
+    runner.reload_models(config)
+    assert runner.effort_known and runner.effort_levels == ('auto',)
+    with pytest.raises(ConfigError):
+        runner.set_effort('low')
+    assert runner.reasoning_effort == 'auto'
+    session.close()
+
+
+def test_effort_survives_disk_restore_and_resets_for_new_capabilities(tmp_path):
+    config = _catalog()
+    resolved = resolve_model(config.providers, 'anthropic/sonnet')
+    original = SessionController(resolved, cwd=tmp_path)
+    original.set_effort('high')
+    original.create_user_message('保存强度')
+    saved_id = original.session_id
+    original.set_effort('low')
+    original.close()
+    restored = SessionController(resolved, cwd=tmp_path)
+    restored.resume_session(saved_id, resolved_model=(resolved, 'anthropic/sonnet'))
+    assert restored.reasoning_effort == 'low'
+    assert restored.build_request([], allow_tool_calls=True).reasoning_effort == 'low'
+    restored.close()
+    changed = deepcopy(config)
+    changed.providers['anthropic'].models['sonnet'].metadata = parse_model_metadata(
+        {'id': resolved.model, 'effort': {'supported_levels': ['high']}},
+        fingerprint=connection_fingerprint(resolved.protocol, resolved.base_url, resolved.api_key), fetched_at='later')
+    changed_model = resolve_model(changed.providers, 'anthropic/sonnet')
+    reopened = SessionController(changed_model, cwd=tmp_path)
+    reopened.resume_session(saved_id, resolved_model=(changed_model, 'anthropic/sonnet'))
+    assert reopened.reasoning_effort == 'auto'
+    reopened.close()
 
 
 def _quoted_tool_history(texts: list[str]) -> tuple[list[dict], list[dict]]:
@@ -279,8 +353,6 @@ async def test_switch_is_rejected_during_active_turn(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_manual_compaction_uses_new_model_and_prevents_switch(tmp_path: Path) -> None:
     runner, session, _, created, config = _runner(tmp_path)
-    config.providers["anthropic"].models["sonnet"].reasoning_effort = "high"
-    runner.reload_models(config)
     _history(session)
     # 已结束的长旧轮次可交给摘要，最新短请求仍须保留。
     completed = session.create_assistant_message()
@@ -288,6 +360,7 @@ async def test_manual_compaction_uses_new_model_and_prevents_switch(tmp_path: Pa
     session.complete_message(completed.id)
     session.create_user_message("继续检查下一项。")
     runner.switch_model("anthropic/sonnet")
+    runner.set_effort('high')
     provider = created[0]
     headings = ("主要请求和意图", "关键技术概念", "文件和代码段", "错误与修复", "问题解决过程", "用户消息与明确反馈", "待办任务", "当前工作", "可能的下一步")
     provider.text = "<summary>" + "\n".join(f"## {heading}\n内容" for heading in headings) + "</summary>"

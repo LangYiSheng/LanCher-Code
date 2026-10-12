@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -31,6 +31,9 @@ from lancher_code.logging_system import get_logger
 from lancher_code.permissions.storage import PermissionStorage
 from lancher_code.providers.base import ChatProvider
 from lancher_code.providers.models import ProviderConfig
+from lancher_code.providers.metadata import bound_metadata
+from lancher_code.providers.reasoning import EFFORT_LEVELS, ReasoningCapabilities, validate_effort
+from lancher_code.errors import ConfigError
 from lancher_code.sessions.codec import SessionCodec
 from lancher_code.sessions.compaction import prepare_compaction
 from lancher_code.sessions.messages import MessageEditor
@@ -185,14 +188,57 @@ class SessionController:
     def selected_model_ref(self) -> str | None:
         return self._selected_model_ref
 
+    @staticmethod
+    def _effort_capabilities(config: ProviderConfig, effort: str) -> ReasoningCapabilities:
+        metadata = bound_metadata(config.metadata, protocol=config.protocol, model=config.model,
+                                  base_url=config.base_url, api_key=config.api_key)
+        return validate_effort(config.protocol, metadata, effort, path='/effort')
+
+    @property
+    def reasoning_effort(self) -> str:
+        return self._state.reasoning_effort
+
+    @property
+    def effort_levels(self) -> tuple[str, ...]:
+        cap = self._effort_capabilities(self._provider_config, 'auto')
+        return ('auto', *cap.levels) if cap.levels is not None else EFFORT_LEVELS
+
+    @property
+    def effort_known(self) -> bool:
+        return self._effort_capabilities(self._provider_config, 'auto').levels is not None
+
+    def set_effort(self, effort: str) -> None:
+        """只更新本对话，落盘失败时保留先前档位。"""
+        self._effort_capabilities(self._provider_config, effort)
+        previous, dirty = self.reasoning_effort, self._dirty
+        self._state.reasoning_effort = effort
+        self._mark_dirty()
+        try:
+            self.flush()
+        except Exception:
+            self._state.reasoning_effort, self._dirty = previous, dirty
+            raise
+
+    @classmethod
+    def _adapt_effort(cls, state: SessionState, config: ProviderConfig) -> None:
+        try:
+            cls._effort_capabilities(config, state.reasoning_effort)
+        except ConfigError:
+            state.reasoning_effort = 'auto'
+
+    def _request_config(self) -> ProviderConfig:
+        return replace(self._provider_config, reasoning_effort=self.reasoning_effort)
+
     def set_model(self, config: ProviderConfig, model_ref: str, *, initial: bool = False) -> None:
         """保留会话内容，原子更新模型与依赖模型的上下文校准。"""
         previous_config = self._provider_config
         previous_ref = self._selected_model_ref
         previous_context = copy.deepcopy(self.context_state)
         previous_dirty = self._dirty
+        previous_effort = self.reasoning_effort
         self._provider_config = config
         self._selected_model_ref = model_ref
+        self._adapt_effort(self._state, config)
         self._reset_model_context(self.context_state)
         if initial:
             return
@@ -205,6 +251,7 @@ class SessionController:
                 self._selected_model_ref = previous_ref
                 self._state.context_management = previous_context
                 self._dirty = previous_dirty
+                self._state.reasoning_effort = previous_effort
                 raise
 
     @staticmethod
@@ -428,7 +475,7 @@ class SessionController:
         validate_runtime_axes(phase, policy)
         previous_context, previous_transcript, previous_dirty = self.context_state, self._transcript, self._dirty
         request, candidate, transcript = prepare_request(
-            config=self._provider_config, context=self._prompt_context(work_phase=phase, execution_access=policy),
+            config=self._request_config(), context=self._prompt_context(work_phase=phase, execution_access=policy),
             transcript=copy.deepcopy(self._transcript), state=copy.deepcopy(self.context_state), dynamic_context=self._active_dynamic_context,
             tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
             experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock(),
@@ -451,7 +498,7 @@ class SessionController:
                         deferred_tool_groups: list[DeferredToolGroup] | None = None) -> ChatRequest:
         phase, policy = work_phase or self.work_phase, execution_access or self.execution_access
         validate_runtime_axes(phase, policy)
-        return build_request(config=self._provider_config, context=self._prompt_context(work_phase=phase, execution_access=policy),
+        return build_request(config=self._request_config(), context=self._prompt_context(work_phase=phase, execution_access=policy),
                              transcript=self._transcript, state=self.context_state, dynamic_context=self._active_dynamic_context,
                              tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
                              experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock())
@@ -618,7 +665,7 @@ class SessionController:
             self._mark_dirty()
             self.flush()
             candidate = await prepare_compaction(
-                config=self._provider_config, prompt_context=self._prompt_context(),
+                config=self._request_config(), prompt_context=self._prompt_context(),
                 transcript=previous_transcript, context=previous_context,
                 dynamic_context=self._active_dynamic_context, before_estimate=before_estimate,
                 visible_tools=visible_tools, deferred_tool_groups=deferred_tool_groups,
@@ -845,8 +892,12 @@ class SessionController:
             self._execution_runtime.sessions.release(session_id)
 
     def read_session_model_ref(self, session_id: str) -> str | None:
+        return self.read_session_selection(session_id)[0]
+
+    def read_session_selection(self, session_id: str) -> tuple[str | None, str]:
         data = SessionCodec.project(self._sessions.repository.read(session_id))
-        return SessionCodec.decode(data, session_id)[3]
+        state, _, _, model_ref = SessionCodec.decode(data, session_id)
+        return model_ref, state.reasoning_effort
 
     def resume_session(self, session_id: str, *, resolved_model=None) -> int:
         if session_id == self.session_id and self._sessions.writer is not None:
@@ -858,10 +909,10 @@ class SessionController:
             self._prepare_detach_view()
             next_ref = resolved_model[1] if resolved_model is not None else retained.model_ref
             next_provider = resolved_model[0] if resolved_model is not None else retained.provider_config
-            next_state = retained.state
+            next_state = copy.deepcopy(retained.state)
             if next_ref != retained.model_ref or next_provider != retained.provider_config:
-                next_state = copy.deepcopy(retained.state)
                 self._reset_model_context(next_state.context_management)
+            self._adapt_effort(next_state, next_provider)
             retained.service.persist(SessionCodec.encode(next_state, retained.transcript, retained.rules, next_ref))
             self._detach_view(prepared=True)
             self._sessions, self._state, self._transcript = retained.service, next_state, retained.transcript
@@ -882,6 +933,7 @@ class SessionController:
                 item.state = 'paused'
             if resolved_model is not None or model_ref != self._selected_model_ref:
                 self._reset_model_context(state.context_management)
+            self._adapt_effort(state, resolved_model[0] if resolved_model is not None else self._provider_config)
         except Exception:
             prepared[0].close()
             raise

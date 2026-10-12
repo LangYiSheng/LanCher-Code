@@ -125,6 +125,7 @@ class HudPresenter:
             f"会话：{self.agent.session_title or '新对话'} · {self.agent.session_id or '首条消息后创建'}\n"
             f"会话工作目录：{self.agent.paths.workspace if self.agent.paths else '尚未创建'}\n"
             f"模型引用：{ref or self.provider_model}\n"
+            f"推理强度：{self.agent.reasoning_effort} · /effort 调整，后续回合沿用\n"
             f"新对话默认：{config.default_model if config is not None else '当前配置'}\n"
             f"会话累计已上报用量：\n{self.format_usage_text(usage)}\n"
             f"当前{banner.context_usage_status} · {state.context_estimate_label}\n"

@@ -7,6 +7,7 @@ from textual.widgets import Static
 
 from lancher_code.contracts.messages import StreamEvent
 from lancher_code.config.models import UIConfig
+from lancher_code.errors import ConfigError
 from lancher_code.sessions.controller import SessionController
 from lancher_code.sessions.storage import SessionRepositoryError
 from lancher_code.tui.command_actions import CommandConfirmationScreen
@@ -25,6 +26,102 @@ async def type_command(app, pilot, text):
     composer.focus()
     await pilot.pause()
     return composer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('size', [(100, 40), (32, 16)])
+async def test_effort_command_only_switches_and_following_messages_use_it(openai_provider_config, tmp_path, size):
+    response = [StreamEvent(kind='text_delta', text='收到'), StreamEvent(kind='message_end', response_complete=True)]
+    provider = FakeProvider([response, response])
+    app, session = _build_app(provider, openai_provider_config, UIConfig(), tmp_path)
+    async with app.run_test(size=size) as pilot:
+        composer = await type_command(app, pilot, '/effort')
+        await pilot.press('enter')
+        assert composer.text == '/effort auto' and not provider.requests
+        await type_command(app, pilot, '/effort low')
+        await pilot.press('tab', 'enter')
+        assert session.reasoning_effort == 'low' and not provider.requests and not session.state.messages
+        await type_command(app, pilot, '检查代码  保留空格\n以及第二段')
+        await pilot.press('enter')
+        for _ in range(60):
+            if not app._is_streaming:
+                break
+            await pilot.pause(0.05)
+        assert provider.requests[0].reasoning_effort == 'low'
+        assert session.state.messages[0].content == '检查代码  保留空格\n以及第二段'
+        await type_command(app, pilot, '继续')
+        await pilot.press('enter')
+        for _ in range(60):
+            if not app._is_streaming:
+                break
+            await pilot.pause(0.05)
+        assert [request.reasoning_effort for request in provider.requests] == ['low', 'low']
+        await type_command(app, pilot, '/effort high')
+        await pilot.press('tab', 'enter')
+        assert session.reasoning_effort == 'high' and len(provider.requests) == 2
+        assert len([message for message in session.state.messages if message.role == 'user']) == 2
+        await type_command(app, pilot, '/effort auto')
+        await pilot.press('tab', 'enter')
+        assert session.reasoning_effort == 'auto' and composer.text == ''
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('level', ['banana', 'off', 'xhigh'])
+async def test_effort_command_rejects_invalid_or_unsupported_level(openai_provider_config, tmp_path, level):
+    from lancher_code.providers.metadata import connection_fingerprint, parse_model_metadata
+    openai_provider_config.metadata = parse_model_metadata(
+        {'id': openai_provider_config.model, 'effort': {'supported_levels': ['low', 'high']}},
+        fingerprint=connection_fingerprint(openai_provider_config.protocol, openai_provider_config.base_url, openai_provider_config.api_key),
+        fetched_at='test')
+    provider = FakeProvider([])
+    app, session = _build_app(provider, openai_provider_config, UIConfig(), tmp_path)
+    async with app.run_test() as pilot:
+        composer = await type_command(app, pilot, f'/effort {level}')
+        await pilot.press('enter')
+        assert composer.text == f'/effort {level}'
+        assert not provider.requests and not session.state.messages
+        assert session.reasoning_effort == 'auto'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('command', ['/effort low 检查代码', '/effort high\n继续', '/effort low high'])
+async def test_effort_rejects_message_body_and_preserves_input(openai_provider_config, tmp_path, command):
+    provider = FakeProvider([])
+    app, session = _build_app(provider, openai_provider_config, UIConfig(), tmp_path)
+    async with app.run_test() as pilot:
+        app._agent.set_effort('medium')
+        notices = []
+        app.notify = lambda message, **kwargs: notices.append(message)
+        composer = await type_command(app, pilot, command)
+        await pilot.press('enter')
+        assert composer.text == command
+        assert session.reasoning_effort == 'medium'
+        assert not provider.requests and not session.state.messages
+        assert any('切换后请单独发送消息' in notice for notice in notices)
+
+
+@pytest.mark.asyncio
+async def test_effort_cannot_change_an_active_turn(openai_provider_config, tmp_path):
+    provider = GatedProvider()
+    app, session = _build_app(provider, openai_provider_config, UIConfig(), tmp_path)
+    async with app.run_test() as pilot:
+        await type_command(app, pilot, '正在执行的任务')
+        await pilot.press('enter')
+        await asyncio.wait_for(provider.started.wait(), timeout=10)
+        try:
+            composer = await type_command(app, pilot, '/effort low')
+            await pilot.press('enter')
+            assert composer.text == '/effort low'
+            assert session.reasoning_effort == provider.requests[0].reasoning_effort == 'auto'
+            assert not app._agent.pending_inputs
+            with pytest.raises(ConfigError):
+                app._agent.set_effort('low')
+        finally:
+            provider.release.set()
+            for _ in range(60):
+                if not app._is_streaming:
+                    break
+                await pilot.pause(0.05)
 
 
 @pytest.mark.asyncio

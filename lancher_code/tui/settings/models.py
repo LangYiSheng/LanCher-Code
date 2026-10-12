@@ -17,7 +17,7 @@ from textual.widgets import Button, Checkbox, Collapsible, Input, Select, Static
 from lancher_code.providers.catalog import iter_model_refs, model_display_name, new_entry_id, resolve_model
 from lancher_code.config.models import AppConfig
 from lancher_code.providers.models import ModelDefinition, ProviderDefinition
-from lancher_code.providers.reasoning import API_MODE_OPTIONS, EFFORT_LABELS, EFFORT_LEVELS, reasoning_capabilities
+from lancher_code.providers.reasoning import API_MODE_OPTIONS
 from lancher_code.providers.metadata import bound_metadata
 from lancher_code.tui.theme import theme_palette
 
@@ -164,8 +164,6 @@ class ModelSettingsEditor(Vertical):
                 yield from self._field("单次总输出额度（token）", Input(id="model-max-output-tokens", type="integer", placeholder="默认 32768；小窗口自动适配"))
                 yield Static("总输出额度包含思考、正文和工具参数，需符合供应商支持的上限。", classes="inherit-note")
                 yield Static("思考轨迹的显示在“外观与输入”中设置。", classes="inherit-note")
-                yield from self._field("推理强度（effort）", Select([(EFFORT_LABELS["auto"], "auto")], value="auto", allow_blank=False, id="model-reasoning-effort"))
-                yield Static("", id="model-reasoning-help", classes="inherit-note", markup=False)
                 yield Static("", id="model-id", classes="entry-id", markup=False)
             yield Button("删除模型", id="model-delete", classes="danger-button")
 
@@ -304,8 +302,6 @@ class ModelSettingsEditor(Vertical):
         self.query_one("#model-delete").display = not self.is_new
         self.query_one("#model-advanced", Collapsible).collapsed = False if any(getattr(model, key) is not None for key in ("protocol", "base_url", "api_key", "timeout_seconds")) else True
         self._sync_inheritance()
-        with self.prevent(Select.Changed):
-            self.query_one("#model-reasoning-effort", Select).value = model.reasoning_effort
         self._finish_open()
 
     def _finish_open(self) -> None:
@@ -336,15 +332,15 @@ class ModelSettingsEditor(Vertical):
                 widget.disabled = inherited
                 if inherited:
                     widget.value = "" if name == "api-key" else str(getattr(provider, attr))
-        self._sync_reasoning()
+        self._sync_metadata()
 
     @on(Input.Changed, "#model-name")
     @on(Input.Changed, "#model-base-url")
     @on(Input.Changed, "#model-api-key")
-    def reasoning_model_changed(self) -> None:
-        self._sync_reasoning()
+    def metadata_model_changed(self) -> None:
+        self._sync_metadata()
 
-    def _sync_reasoning(self) -> None:
+    def _sync_metadata(self) -> None:
         if self.kind != "model":
             return
         protocol = self.query_one("#model-protocol", Select).value
@@ -355,15 +351,6 @@ class ModelSettingsEditor(Vertical):
             model=os.path.expandvars(self.query_one("#model-name", Input).value).strip(),
             base_url=os.path.expandvars(self.query_one("#model-base-url", Input).value).strip().rstrip('/'),
             api_key=os.path.expandvars(api_key).strip())
-        capabilities = reasoning_capabilities(str(protocol), metadata)
-        selector = self.query_one("#model-reasoning-effort", Select)
-        levels = ("auto", *(capabilities.levels if capabilities.levels is not None else EFFORT_LEVELS[1:]))
-        selected = selector.value if selector.value in levels else "auto"
-        with self.prevent(Select.Changed):
-            selector.set_options([(EFFORT_LABELS.get(level, level), level) for level in levels])
-            selector.value = selected
-        selector.disabled = capabilities.levels == ()
-        self.query_one("#model-reasoning-help", Static).update(capabilities.description)
         self.query_one("#model-metadata-info", Static).update(
             f'归属：{metadata.owned_by or "未声明"} · 模型信息获取于 {metadata.fetched_at}' if metadata else '尚未获取此连接的模型信息；可在供应商页面发现模型。')
 
@@ -421,7 +408,6 @@ class ModelSettingsEditor(Vertical):
                 setattr(model, attr, value)
             model.context_window = self._positive_number("model-context-window", "上下文窗口", integer=True) if self.query_one("#model-context-window", Input).value.strip() else None
             model.max_output_tokens = self._positive_number("model-max-output-tokens", "单次总输出额度", integer=True) if self.query_one("#model-max-output-tokens", Input).value.strip() else None
-            model.reasoning_effort = str(self.query_one("#model-reasoning-effort", Select).value)
             models = candidate.providers[self.provider_id].models
             model_id = self.model_id or new_entry_id(f"model-{uuid4().hex[:12]}", models)
             models[model_id] = model

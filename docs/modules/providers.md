@@ -9,7 +9,7 @@
 ## 配置与模型解析
 
 - `providers.models.ProviderDefinition` 保存供应商名称、公共协议、Base URL、API Key、超时和模型目录。
-- `providers.models.ModelDefinition` 保存 API 模型名、可选显示名、连接覆盖以及上下文窗口/推理强度。`None` 表示继承供应商的对应连接字段。
+- `providers.models.ModelDefinition` 保存 API 模型名、可选显示名、连接覆盖以及上下文窗口和输出额度。`None` 表示继承供应商的对应连接字段。推理强度保存于会话，由聊天命令 `/effort` 调整。
 - `config.models.AppConfig.providers` 与 `default_model` 是配置源；不再维护单供应商快照。
 - `providers.catalog.resolve_model(providers, ref)` 逐字段合并覆盖、展开环境变量，产生独立的 `ProviderConfig`。原配置保留变量原文和缺省字段，`ref` 为稳定的 `供应商ID/模型ID`。
 - `model_display_name()` 优先显示模型的 `display_name`，否则显示 `model_name (供应商名称)`；显示名称不发送给 API。
@@ -98,9 +98,9 @@
 - ← `TurnRunner.configure_models/switch_model/reload_models`：协调模型目录、协议适配器和会话有效配置的切换；正在响应或压缩时禁止切换
 - ← `agent/streaming.py`：`collect_response()` 消费流事件并验证完整响应
 - ← `context/compaction.py`：摘要压缩请求也走 `stream_chat()`
-- ← `context/request.py`：`build_request()` 携带当前模型的 reasoning_effort；供应商按已确认能力适配请求
+- ← `context/request.py`：`build_request()` 携带当前会话的 reasoning_effort；供应商按已确认能力适配请求
 
-切换保留协议无关 transcript、消息、工具结果和权限；模型、reasoning_effort、context_window 一起更新，同时清除旧模型的 token 校准锚点和压缩失败计数。工具历史由当前协议重新序列化，OpenAI 会把同一批工具结果逐条展开为 `tool` 消息。摘要压缩也使用当前主模型，不另设摘要模型。
+切换保留协议无关 transcript、消息、工具结果和权限；更新模型和 context_window，同时清除旧模型的 token 校准锚点和压缩失败计数。会话 effort 在新模型支持时保留，否则恢复 auto 并提示。工具历史由当前协议重新序列化，OpenAI 会把同一批工具结果逐条展开为 `tool` 消息。摘要压缩也使用当前主模型与会话 effort，不另设摘要模型。
 
 ## 如何新增一个协议
 

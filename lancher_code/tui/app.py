@@ -805,6 +805,8 @@ class LanCherTextualApp(App[int]):
 
     def _apply_models_settings(self, config) -> str | None:
         self._agent.reload_models(config)
+        if self._agent.model_notice:
+            self.notify(self._agent.model_notice, title='模型', severity='warning')
         self._refresh_status_bar()
         self._refresh_context_usage()
         return self._agent.model_ref
@@ -827,7 +829,7 @@ class LanCherTextualApp(App[int]):
             if (self._is_streaming or self._agent.has_active_turn) and not self._completion.allowed_while_busy(command_name, arguments_text):
                 raise ValueError("当前任务结束后可执行命令；草稿已保留。")
             self._slash_command_registry.validate(command_name, arguments_text)
-            if command_name in {"session", "model", "access", "settings"} and not arguments_text.strip():
+            if command_name in {"session", "model", "effort", "access", "settings"} and not arguments_text.strip():
                 composer = self.query_one(ComposerTextArea)
                 composer.text = f"/{command_name} "
                 composer.cursor_location = composer.document.end
@@ -884,6 +886,17 @@ class LanCherTextualApp(App[int]):
             self._refresh_status_bar()
             self._refresh_context_usage()
             self.notify(f"已切换为 {model_display_name(config.providers, ref)}", title="本次模型")
+            if self._agent.model_notice:
+                self.notify(self._agent.model_notice, title='推理强度', severity='warning')
+            return None
+
+        if command_name == 'effort':
+            effort = arguments_text.strip()
+            self._agent.set_effort(effort)
+            self._refresh_status_bar()
+            self._refresh_context_usage()
+            note = '' if self._agent.effort_known or effort == 'auto' else ' 端点未声明范围，此档位由端点校验。'
+            self.notify(f'推理强度已设为 {effort}，从下一条消息开始沿用。' + note, title='推理强度')
             return None
 
         if command_name == "settings":
@@ -1072,6 +1085,8 @@ class LanCherTextualApp(App[int]):
                 label = model_display_name(config.providers, model_ref)
                 self._status_hint = "就绪"
                 self.notify(f"已切换为 {label}", title="模型")
+                if self._agent.model_notice:
+                    self.notify(self._agent.model_notice, title='推理强度', severity='warning')
                 self._refresh_status_bar()
                 self._refresh_context_usage()
         if len(self.screen_stack) == 1:

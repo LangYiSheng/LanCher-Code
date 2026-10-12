@@ -72,6 +72,9 @@ class CompletionController:
                     active_model_ref=self.agent.model_ref,
                     default_model_ref=self.agent.model_config.default_model if self.agent.model_config is not None else None,
                     execution_access=self.agent.execution_access,
+                    effort_levels=self.agent.effort_levels,
+                    active_effort=self.agent.reasoning_effort,
+                    effort_known=self.agent.effort_known,
                 )
             )
             if cursor_at_end and not composer.should_suppress_slash_menu()

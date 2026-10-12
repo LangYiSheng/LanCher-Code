@@ -35,6 +35,7 @@ class SessionCodec:
     def encode(cls, state, transcript, rules, model_ref):
         state_data = {
             'work_phase': state.work_phase, 'execution_access': state.execution_access,
+            'reasoning_effort': state.reasoning_effort,
             'directory_grants': [asdict(grant) for grant in state.directory_grants],
             'plan_mode_turn_count': state.plan_mode_turn_count,
             'pending_plan_exit_notice': state.pending_plan_exit_notice,
@@ -64,6 +65,9 @@ class SessionCodec:
             if 'request_usage' not in raw:
                 raise ValueError('会话缺少请求用量账本，旧计量格式不兼容，请创建新会话。')
             phase, policy = raw["work_phase"], raw["execution_access"]
+            effort = raw.get('reasoning_effort', 'auto')
+            if not isinstance(effort, str) or not effort.strip() or effort in {'none', 'off', 'disabled'}:
+                raise ValueError('推理强度无效。')
             if 'permission_policy' in raw or 'permission_mode' in raw:
                 raise ValueError('旧权限格式不兼容，请创建新会话；原文件已保留。')
             if phase not in {"discuss", "plan", "execute"} or policy not in {"project", "full"}:
@@ -74,6 +78,7 @@ class SessionCodec:
                 raise ValueError('计划回合状态无效。')
             state = SessionState(
                 session_id=session_id, work_phase=phase, execution_access=policy,
+                reasoning_effort=effort,
                 directory_grants=cls._decode_directory_grants(raw['directory_grants']),
                 messages=[cls._decode_message(item) for item in data['messages']],
                 plan_snapshot=cls.decode_plan_snapshot(raw['plan_snapshot']),

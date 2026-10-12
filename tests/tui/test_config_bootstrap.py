@@ -154,7 +154,7 @@ async def test_config_bootstrap_error_scrolls_back_into_view(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_bootstrap_app_can_save_claude_reasoning_effort(tmp_path) -> None:
+async def test_config_bootstrap_uses_auto_effort_without_a_selector(tmp_path) -> None:
     config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
     app = ConfigBootstrapApp(config_path)
 
@@ -166,7 +166,8 @@ async def test_config_bootstrap_app_can_save_claude_reasoning_effort(tmp_path) -
         app.query_one("#model-input", Input).value = "claude-sonnet-4-6"
         app.query_one("#api-key-input", Input).value = "test-key"
         await pilot.pause()
-        app.query_one("#reasoning-effort-select", Select).value = "high"
+        assert not app.query('#reasoning-effort-select')
+        assert not app.query('#reasoning-help')
         app.query_one("#max-output-tokens-input", Input).value = "65536"
         app._save()
         await pilot.pause(0.05)
@@ -175,7 +176,8 @@ async def test_config_bootstrap_app_can_save_claude_reasoning_effort(tmp_path) -
     active = resolve_model(config.providers, config.default_model)
     assert active.protocol == "claude"
     assert active.base_url == "https://api.anthropic.com/v1"
-    assert active.reasoning_effort == "high"
+    assert active.reasoning_effort == "auto"
+    assert 'reasoning_effort' not in config_path.read_text(encoding='utf-8')
     assert active.max_output_tokens == 65536
 
 

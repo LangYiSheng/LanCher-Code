@@ -10,7 +10,7 @@ from lancher_code.context.budget import context_budget
 from lancher_code.errors import ConfigError
 from lancher_code.providers.models import ModelDefinition, ProviderConfig, ProviderDefinition
 from lancher_code.providers.metadata import ModelMetadata, bound_metadata, connection_fingerprint
-from lancher_code.providers.reasoning import validate_effort, reasoning_parameters, resolve_api_mode
+from lancher_code.providers.reasoning import reasoning_parameters, resolve_api_mode
 
 
 def iter_model_refs(providers: Mapping[str, ProviderDefinition]) -> list[str]:
@@ -70,9 +70,8 @@ def resolve_model(providers: Mapping[str, ProviderDefinition], model_ref: str) -
     budget = context_budget(context_window, max_output_tokens)
     if max_output_tokens is not None and max_output_tokens >= context_window:
         raise ConfigError(f"{prefix}.max_output_tokens 必须小于上下文窗口 context_window。")
-    validate_effort(protocol, metadata, model.reasoning_effort, path=f"{prefix}.reasoning_effort")
     reasoning_parameters(protocol=protocol, metadata=metadata,
-                         effort=model.reasoning_effort, max_tokens=budget.output_tokens)
+                         effort="auto", max_tokens=budget.output_tokens)
     return ProviderConfig(
         protocol=protocol,
         model=model_name,
@@ -81,7 +80,6 @@ def resolve_model(providers: Mapping[str, ProviderDefinition], model_ref: str) -
         timeout_seconds=float(timeout),
         context_window=context_window,
         max_output_tokens=max_output_tokens,
-        reasoning_effort=model.reasoning_effort,
         metadata=metadata,
         api_mode=resolve_api_mode(protocol, metadata, model.api_mode if model.api_mode is not None else provider.api_mode),
     )

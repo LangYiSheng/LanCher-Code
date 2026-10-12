@@ -24,7 +24,7 @@ Claude 兼容协议保存 `thinking` 的文字和 `signature`，也保存不可�
 
 `ui.show_thinking_status` 只控制界面是否显示思考轨迹，关闭后模型请求、推理能力和思考协议历史不变，工具活动也继续显示。模型是否推理、能否控制推理及其强度，由具体模型与端点决定；不能用一个通用“思考开关”概括所有深度思考模型。
 
-模型推理设置使用 `reasoning_effort`，默认 `auto`。供应商发现得到的模型信息明确声明 adaptive 时自动启用自适应推理；仅声明旧版 enabled 时由应用分配接口额度。effort 范围及默认值读取端点声明，缺失字段保持未知；不根据型号、品牌或域名推断。详情见[模型发现](model-discovery.md)。
+聊天通过 `/effort <档位>` 切换会话推理强度，默认 `auto`；从下一条消息开始沿用，恢复会话时保留。命令只切换档位，消息正文单独发送。设置页不提供强度配置，旧模型 `reasoning_effort` 读取时忽略、保存时移除。供应商发现得到的模型信息明确声明 adaptive 时自动启用自适应推理；仅声明旧版 enabled 时由应用分配接口额度。effort 范围及默认值读取端点声明，缺失字段保持未知；不根据型号、品牌或域名推断。详情见[模型发现](model-discovery.md)。
 
 effort 调整速度与深度的取舍，不是硬 token 预算；所有推理输出都包含在 `max_output_tokens` 总额度内。旧 `thinking.enabled` / `thinking.budget_tokens` 读取时忽略、保存时移除。详细配置与具体模型支持范围见 [配置](../configuration.md#自动推理与-effort)。
 

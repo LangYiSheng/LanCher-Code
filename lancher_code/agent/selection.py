@@ -74,9 +74,14 @@ class ModelSelection:
 
     def switch_model(self, model_ref: str) -> None:
         resolved, provider = self._prepare_model(self._require_model_config(), model_ref)
+        effort = self._session.reasoning_effort
         self._session.set_model(resolved, model_ref)
         self.provider = provider
-        self._model_notice = ""
+        self._model_notice = self._effort_notice(effort)
+
+    def _effort_notice(self, previous: str) -> str:
+        return (f'当前模型不支持先前的 {previous} 档位，推理强度已恢复 auto。'
+                if previous != self._session.reasoning_effort else '')
 
     def reload_models(self, config: AgentConfig | AppConfig) -> bool:
         """热更新目录；修改默认值不会覆盖会话中已经选择的模型。"""
@@ -87,6 +92,7 @@ class ModelSelection:
         target = snapshot.default_model if fallback else self.model_ref
         assert target is not None
         resolved = resolve_model(snapshot.providers, target)
+        effort = self._session.reasoning_effort
         if target != self.model_ref or resolved != self._session.provider_config:
             resolved, provider = self._prepare_model(snapshot, target)
             self._session.set_model(resolved, target)
@@ -96,13 +102,14 @@ class ModelSelection:
             f"当前模型已被删除，已切换到默认模型：{model_display_name(snapshot.providers, target)}。"
             if fallback else ""
         )
+        self._model_notice = ' '.join(filter(None, (self._model_notice, self._effort_notice(effort))))
         return fallback
 
     def resume_session(self, session_id: str) -> int:
         if self._model_config is None:
             self._model_notice = ''
             return self._session.resume_session(session_id)
-        saved_ref = self._session.read_session_model_ref(session_id)
+        saved_ref, effort = self._session.read_session_selection(session_id)
         config = self._require_model_config()
         target = saved_ref if saved_ref in iter_model_refs(config.providers) else config.default_model
         resolved, provider = self._prepare_model(config, target)
@@ -116,6 +123,7 @@ class ModelSelection:
             self._model_notice = f"会话原模型已不存在，已使用默认模型：{model_display_name(config.providers, target)}。"
         else:
             self._model_notice = ""
+        self._model_notice = ' '.join(filter(None, (self._model_notice, self._effort_notice(effort))))
         return permission_count
 
     def new_session(self) -> None:
