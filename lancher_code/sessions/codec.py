@@ -451,7 +451,7 @@ class SessionCodec:
         if type(response_output_limited) is not bool or response_output_limited and value['role'] != 'assistant':
             raise ValueError('输出截断标记只能属于助手消息。')
         control_kind = value.get('control_kind')
-        if control_kind is not None and (value['role'] != 'user' or control_kind != 'output_continuation'):
+        if control_kind is not None and (value['role'] != 'user' or control_kind not in {'output_continuation', 'process_notification'}):
             raise ValueError('模型上下文控制消息无效。')
         if response_stop_reason is not None and (
             value['role'] != 'assistant' or not isinstance(response_stop_reason, str) or not response_stop_reason

@@ -630,7 +630,8 @@ class LanCherTextualApp(App[int]):
             self._status_hint = event.progress_message or "已停止"
             return
         if event.kind == "turn_failed":
-            self._status_hint = event.error_text or "未完成"
+            # 详细错误由消息区保存，状态栏只显示结果。
+            self._status_hint = "未完成"
             return
         if event.kind == "turn_completed":
             self._turn_succeeded = True

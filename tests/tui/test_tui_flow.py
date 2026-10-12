@@ -185,7 +185,7 @@ async def test_tui_composer_placeholder_is_minimal_in_normal_mode(
         composer = app.query_one("#composer-input", ComposerTextArea)
         status_left = app.query_one("#status-left", Static)
         assert composer.placeholder == "发送一条消息"
-        assert str(status_left.render()) == "gpt-test · 执行 · 项目访问"
+        assert str(status_left.render()) == "gpt-test · 项目访问"
         hint_bar = app.query_one(CommandHintBar)
         assert not hint_bar.display
 
@@ -324,7 +324,7 @@ async def test_slash_menu_opens_and_filters_in_normal_mode(
         menu = app.query_one(SlashCompletionMenu)
         assert menu.display
         assert _visible_slash_commands(app) == [
-            "discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "access",
+            "discuss", "plan", "do", "session", "tasks", "skills", "mcp", "model", "effort", "access",
             "compact", "settings", "status", "exit",
         ]
 
@@ -615,7 +615,7 @@ async def test_tui_streams_single_turn_by_message_id(
         assert app.query_one("#composer-input", ComposerTextArea).text == ""
         status_left = app.query_one("#status-left", Static)
         status_right = app.query_one("#status-details", Static)
-        assert str(status_left.render()) == "gpt-test · 执行 · 项目访问"
+        assert str(status_left.render()) == "gpt-test · 项目访问"
         assert "本次模型：gpt-test" in str(status_right.render())
         assert "会话累计已上报用量" in str(status_right.render())
         assert "输入：3 tokens" in str(status_right.render())

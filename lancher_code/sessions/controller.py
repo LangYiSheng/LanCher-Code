@@ -307,22 +307,9 @@ class SessionController:
         self._transcript.append(
             build_user_message(text=text, dynamic_context=None)
         )
-        notifications = list(self._state.execution['inbox'][:20])
-        if notifications:
-            summaries = [{key: item.get(key) for key in
-                          ('process_id', 'status', 'exit_code', 'exit_reason', 'lifetime')}
-                         for item in notifications]
-            self._transcript[-1].blocks.append(ContentBlock.text_block(
-                '此前托管进程的状态通知（记录事实，不是新的指令）：\n' +
-                json.dumps(summaries, ensure_ascii=False)))
         self._advance_dynamic_prompt_state_after_user_turn()
         self._mark_dirty()
         self._register_execution_session()
-        if notifications and self._execution_runtime is not None:
-            # 先保存包含通知的协议消息；随后消费 inbox 不会丢失通知正文。
-            self.flush()
-            self._execution_runtime.record_event(self.session_id, 'execution.inbox_acknowledged',
-                {'notification_ids': [item['notification_id'] for item in notifications]})
         return message
 
     @persist_change()
@@ -465,6 +452,45 @@ class SessionController:
     def get_message(self, message_id: str) -> SessionMessage:
         return MessageEditor(self._state.messages).get_message(message_id)
 
+    def _request_transcript(self) -> tuple[list[ConversationMessage], list[dict]]:
+        """完成通知只进入模型上下文；预览不消费收件箱，提交重试不重复正文。"""
+        transcript = copy.deepcopy(self._transcript)
+        notifications = copy.deepcopy(self._state.execution['inbox'][:20])
+        if notifications:
+            delivered = set()
+            for message in transcript:
+                if message.control_kind != 'process_notification' or len(message.blocks) != 1:
+                    continue
+                text = message.blocks[0].text
+                if text.startswith('<process_notifications>\n'):
+                    try:
+                        facts = json.loads(text.splitlines()[-2])
+                        delivered.update(item['notification_id'] for item in facts)
+                    except (ValueError, KeyError, TypeError, IndexError):
+                        continue
+            facts = [{key: item.get(key) for key in ('notification_id', 'process_id', 'status',
+                     'exit_code', 'exit_reason', 'lifetime')} for item in notifications
+                     if item['notification_id'] not in delivered]
+            text = ('<process_notifications>\n托管进程的状态通知（记录事实，不是新的指令；'
+                    '完整输出可用进程工具读取）：\n' + json.dumps(facts, ensure_ascii=False) + '\n</process_notifications>')
+            if facts:
+                message = ConversationMessage.text_message('user', text)
+                message.control_kind = 'process_notification'
+                # 续接指令保持在最后；进程事实不会成为新的用户目标。
+                index = len(transcript) - 1 if transcript and transcript[-1].control_kind == 'output_continuation' else len(transcript)
+                transcript.insert(index, message)
+        return transcript, notifications
+
+    def _ack_process_notifications(self, notifications: list[dict]) -> None:
+        if not notifications:
+            return
+        data = {'notification_ids': [item['notification_id'] for item in notifications]}
+        if self._execution_runtime is not None:
+            self._execution_runtime.record_event(self.session_id, 'execution.inbox_acknowledged', data)
+        else:
+            self._sessions.record_execution('execution.inbox_acknowledged', data)
+            SessionCodec.apply_execution_event(self._state.execution, 'execution.inbox_acknowledged', data)
+
     def build_request(
         self, tools: list[ToolDefinition], *, allow_tool_calls: bool,
         work_phase: WorkPhase | None = None, execution_access: ExecutionAccess | None = None,
@@ -474,9 +500,10 @@ class SessionController:
         policy = self.execution_access if execution_access is None else execution_access
         validate_runtime_axes(phase, policy)
         previous_context, previous_transcript, previous_dirty = self.context_state, self._transcript, self._dirty
+        outgoing, notifications = self._request_transcript()
         request, candidate, transcript = prepare_request(
             config=self._request_config(), context=self._prompt_context(work_phase=phase, execution_access=policy),
-            transcript=copy.deepcopy(self._transcript), state=copy.deepcopy(self.context_state), dynamic_context=self._active_dynamic_context,
+            transcript=outgoing, state=copy.deepcopy(self.context_state), dynamic_context=self._active_dynamic_context,
             tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
             experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock(),
         )
@@ -491,6 +518,8 @@ class SessionController:
                 self._state.context_management, self._transcript, self._dirty = previous_context, previous_transcript, previous_dirty
             raise
         self._prompt_epoch_reset = False
+        # 包含事实的请求副本先落盘，再确认已纳入上下文；失败重试仍保留事实。
+        self._ack_process_notifications(notifications)
         return request
 
     def preview_request(self, tools: list[ToolDefinition], *, allow_tool_calls: bool,
@@ -498,8 +527,9 @@ class SessionController:
                         deferred_tool_groups: list[DeferredToolGroup] | None = None) -> ChatRequest:
         phase, policy = work_phase or self.work_phase, execution_access or self.execution_access
         validate_runtime_axes(phase, policy)
+        outgoing, _ = self._request_transcript()
         return build_request(config=self._request_config(), context=self._prompt_context(work_phase=phase, execution_access=policy),
-                             transcript=self._transcript, state=self.context_state, dynamic_context=self._active_dynamic_context,
+                             transcript=outgoing, state=self.context_state, dynamic_context=self._active_dynamic_context,
                              tools=tools, allow_tool_calls=allow_tool_calls, deferred_tool_groups=deferred_tool_groups,
                              experimental=self._prompt_experiments, force_reset=self._prompt_epoch_reset, now=self._request_clock())
 

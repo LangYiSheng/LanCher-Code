@@ -95,7 +95,7 @@ class ConversationMessage:
     response_model: str | None = None
     response_stop_reason: str | None = None
     response_output_limited: bool = False
-    control_kind: Literal["output_continuation"] | None = None
+    control_kind: Literal["output_continuation", "process_notification"] | None = None
 
     @classmethod
     def text_message(cls, role: ConversationRole, text: str) -> ConversationMessage:

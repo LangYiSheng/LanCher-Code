@@ -462,7 +462,8 @@ def test_request_ledger_restores_partial_usage_without_importing_history_into_ne
         assert summary.request_count == 1
         assert summary.input_tokens == 12
         assert summary.usage.output_tokens is None
-        assert summary.cache_hit_ratio is None
+        assert summary.cache_hit_ratio == pytest.approx(4 / 12)
+        assert summary.cache_ratio_estimated
         assert summary.incomplete_request_count == 1
         assert restored.state.messages[-1].usage.output_tokens is None
         assert restored._usage_tracker.snapshot().request_count == 0

@@ -166,7 +166,8 @@ async def test_cancelled_provider_keeps_usage_in_both_ledgers_and_after_restore(
         assert before == tracker.snapshot()
         assert before.input_tokens == 40
         assert before.incomplete_request_count == 1
-        assert before.cache_hit_ratio is None
+        assert before.cache_hit_ratio == (0.75 if config.protocol == 'openai' else 0.625)
+        assert before.cache_ratio_estimated
         assert tracker.records[0].status == "cancelled"
         session_id = controller.session_id
     finally:

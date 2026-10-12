@@ -40,18 +40,28 @@ def usage_lines(summary: RunUsageSummary) -> tuple[str, ...]:
             total += "（部分上报）"
     lines.append("总计：" + total)
     if summary.cache_hit_ratio is not None:
-        ratio = f"{summary.cache_hit_ratio:.1%}"
+        ratio = f"{summary.cache_hit_ratio:.1%}" + ('（估算，可能不准）' if summary.cache_ratio_estimated else '')
     elif not summary.request_count:
         ratio = "--（无请求）"
     elif summary.invalid_request_count:
         ratio = "--（上报数据异常）"
-    elif not summary.incomplete_request_count and not summary.input_tokens:
+    elif summary.cache_ratio_request_count and not summary.input_tokens:
         ratio = "--（输入为 0）"
     else:
         ratio = "--（未完整提供）"
     lines.append("缓存比：" + ratio)
     if summary.incomplete_request_count:
         lines.append(f"有 {summary.incomplete_request_count} 次请求未返回完整用量，以上为已上报统计。")
+    if summary.cache_ratio_estimated:
+        lines.append(f'缓存比按 {summary.cache_ratio_request_count}/{summary.request_count} 次请求的已知输入与缓存量计算。')
     if summary.invalid_request_count:
-        lines.append(f"有 {summary.invalid_request_count} 次请求上报数据异常；缓存比暂不可用。")
+        lines.append(f"有 {summary.invalid_request_count} 次请求上报数据异常；已排除这些请求的缓存比样本。")
     return tuple(lines)
+
+
+def cache_ratio_label(summary: RunUsageSummary) -> str:
+    """状态栏只保留缓存率与估算标记，统计范围在详情中解释。"""
+    if summary.cache_hit_ratio is None:
+        return '缓存 --'
+    prefix = '≈' if summary.cache_ratio_estimated else ''
+    return f'缓存 {prefix}{summary.cache_hit_ratio:.1%}'

@@ -211,10 +211,11 @@ async def test_native_layout_keeps_composer_and_phase_inside_terminal(openai_pro
         assert app.theme == f"lancher-{theme}"
         assert app.screen.styles.background.hex.lower() == theme_palette(theme)["background"]
         hud = str(app.query_one("#status-left" if size[0] < 64 else "#status-center").render())
-        assert "预计 " in hud
-        assert "就绪" in hud
+        assert "上下文 " in hud and '缓存' in hud
         if size[0] < 64:
-            assert "Enter 发送" in hud
+            assert '就绪' in hud and 'Enter 发送' not in hud
+        else:
+            assert '就绪' in str(app.query_one('#status-right').render())
         assert app.query_one("#status-bar").region.bottom <= size[1]
 
 
@@ -279,8 +280,8 @@ async def test_narrow_permission_and_queue_leave_editor_and_hud_visible(openai_p
         assert len(panel._options()) == 2
         hud = str(app.query_one("#status-left").render())
         assert "等待确认" in hud
-        assert "预计 " in hud
-        assert "Enter 排队" in hud
+        assert "上下文 " in hud
+        assert "Enter 排队" not in hud
         for target in ("#chat-steer", "#chat-queue"):
             assert app.query_one(target).region.right <= 32
             assert app.query_one(target).region.bottom <= 16
@@ -389,7 +390,7 @@ async def test_discussion_context_estimate_preserves_phase(openai_provider_confi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 40), (160, 40)])
-async def test_long_model_hud_keeps_phase_and_policy_when_status_width_changes(openai_provider_config, tmp_path, size):
+async def test_long_model_hud_keeps_policy_without_repeating_stage(openai_provider_config, tmp_path, size):
     openai_provider_config.model = "用于复杂代码任务的长中文模型名称" * 4
     app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
     session.set_work_phase("plan")
@@ -400,7 +401,7 @@ async def test_long_model_hud_keeps_phase_and_policy_when_status_width_changes(o
             await pilot.pause()
             label = app.query_one("#status-left", Static)
             text = label.render().plain
-            assert "计划 · 只读" in text
+            assert '只读' in text and '计划' not in text
             assert cell_len(text) <= label.region.width
 
 

@@ -9,7 +9,7 @@ from textual.widget import Widget
 from textual.widgets import Static, Button
 from lancher_code.providers.catalog import model_display_name
 from lancher_code.usage.ledger import RunUsageSummary
-from lancher_code.tui.usage import usage_lines
+from lancher_code.tui.usage import cache_ratio_label, usage_lines
 from lancher_code.tui.message import BannerWidget
 from lancher_code.tui.composer import ComposerTextArea
 from lancher_code.tui.chat_controls import StageBar
@@ -49,90 +49,55 @@ class HudPresenter:
 
     def refresh(self, widgets: HudWidgets, state: HudState) -> None:
         usage = self.agent.total_usage()
-        center_text = state.hint or ("正在处理" if state.streaming else "就绪")
+        activity = self.activity_label(state)
         execution = self.agent.execution_summary()
-        badges = []
-        if execution["background"]:
-            badges.append(f"后台 {execution['background']}")
-        if execution["notifications"]:
-            badges.append(f"通知 {execution['notifications']} /tasks")
-        process_badges = " · ".join(badges)
-        right_text = process_badges
-        status_center = widgets.center
-        status_right = widgets.right
-
         banner = widgets.banner
-        estimate = banner.context_usage_status.replace("上下文 ", "预计 ")
+        metrics = f'{banner.context_usage_status} · {cache_ratio_label(usage)}'
         action = state.busy_enter_action
         enter_action = {"follow_up": "排队", "steer": "补充", "draft": "草稿"}[action] if state.streaming else "发送"
         composer = widgets.composer
         is_command = composer.text.lstrip().startswith("/")
         if is_command:
             enter_action = "等待" if state.streaming and not self.command_allowed(composer.text) else "填入" if composer.slash_menu_active and composer.slash_enter_accepts else "执行"
-        compact_state = center_text.split(" · ", 1)[0]
-        if state.pending_permissions:
-            compact_state = "等待确认"
-        elif self.agent.queue_paused:
-            compact_state = "队列暂停"
-        elif state.streaming:
-            compact_state = "正在停止" if "停止" in compact_state else "处理中"
-        compact_state = compact_state[:6]
         label = self.status_left_text()
         model, phase, policy = label.rsplit(" · ", 2)
+        effort = self.agent.reasoning_effort
+        preference = f' · {effort}' if effort != 'auto' else ''
+        settings = f'{policy}{preference}'
         if state.width < 64:
-            available = max(8, state.width - 4)
-            model_limit = max(5, available - (10 if state.width < 48 else 28))
-            if process_badges:
-                model_limit = max(5, model_limit - cell_len(f" · {compact_state}"))
-            model_text = Text(model)
-            model_text.truncate(model_limit, overflow="ellipsis")
-            model = model_text.plain
+            available = max(1, state.width - 4)
+            identity_width = available if state.width < 48 else max(1, available - cell_len(activity) - 3)
+            model = self.fit_text(model, max(1, identity_width - cell_len(f' · {settings}')))
+            identity = self.fit_text(f'{model} · {settings}', identity_width)
             if state.width < 48:
-                first = f"{model} · {phase}" + (f" · {compact_state}" if process_badges else "")
-                last = process_badges or f"{compact_state} · Enter {enter_action}"
-                label = f"{first}\n{policy} · {estimate}\n{last}"
+                label = f'{identity}\n{self.fit_text(metrics, available)}\n{activity}'
             else:
-                first = f"{model} · {phase} · {policy}" + (f" · {compact_state}" if process_badges else "")
-                last = process_badges or f"{compact_state} · Enter {enter_action}"
-                label = f"{first}\n{estimate} · {last}"
+                label = f'{identity} · {activity}\n{metrics}'
+                label = '\n'.join(self.fit_text(line, available) for line in label.splitlines())
         else:
-            # 模型名按终端格宽截断，给阶段与权限保留位置。
-            # 使用本轮状态的宽度，不能沿用状态变化前上一帧的布局。
             hud_width = max(1, min(state.width, 112) - 4)
-            center_width = min(cell_len(f"{estimate} · {center_text}"), (hud_width * 35 + 99) // 100)
-            available = hud_width - center_width - cell_len(right_text) - 1
-            model_text = Text(model)
-            model_text.truncate(max(1, available - cell_len(f" · {phase} · {policy}")), overflow="ellipsis")
-            model = model_text.plain
-            label = f"{model} · {phase} · {policy}"
+            available = hud_width - cell_len(metrics) - cell_len(activity) - 2
+            model = self.fit_text(model, max(1, available - cell_len(f' · {settings}')))
+            label = f'{model} · {settings}'
         colors = theme_palette(state.theme)
         summary = Text(label, style=colors["muted"])
         summary.stylize("bold " + colors["text"], 0, len(model))
-        phase_start = len(model) + 3
-        summary.stylize(colors["primary"], phase_start, phase_start + len(phase))
         widgets.left.update(summary)
-
-        status_center.update(f"{estimate} · {center_text}")
-        status_right.update(right_text)
+        widgets.center.update(metrics)
+        widgets.right.update(activity)
         widgets.stage.update_phase(self.agent.work_phase, busy=state.streaming)
-        config = self.agent.model_config
-        ref = self.agent.model_ref
-        notification_hint = " · /tasks 查看任务与输出" if execution["notifications"] else ""
         details = (
-            f"本次模型：{self.status_left_text()}\n"
+            f"本次模型：{self.model_label()}\n"
+            f"阶段：{phase} · 访问：{policy} · 推理：{effort}\n"
             f"工作目录：{self.agent.project_root}\n"
-            f"执行访问范围：{'项目访问' if self.agent.execution_access == 'project' else '完全访问'} · 讨论和计划只读\n"
-            f"会话：{self.agent.session_title or '新对话'} · {self.agent.session_id or '首条消息后创建'}\n"
-            f"会话工作目录：{self.agent.paths.workspace if self.agent.paths else '尚未创建'}\n"
-            f"模型引用：{ref or self.provider_model}\n"
-            f"推理强度：{self.agent.reasoning_effort} · /effort 调整，后续回合沿用\n"
-            f"新对话默认：{config.default_model if config is not None else '当前配置'}\n"
-            f"会话累计已上报用量：\n{self.format_usage_text(usage)}\n"
+            f"会话：{self.agent.session_title or '新对话'}\n"
             f"当前{banner.context_usage_status} · {state.context_estimate_label}\n"
-            f"托管进程：运行 {execution['running']} · 会话后台 {execution['background']} · 排队 {execution['waiting']}\n"
-            f"未读完成通知：{execution['notifications']}{notification_hint}\n"
-            f"{banner.mcp_status}"
+            f"会话累计已上报用量：\n{self.format_usage_text(usage)}\n"
         )
+        if execution['running'] or execution['waiting']:
+            details += f"托管进程：运行 {execution['running']} · 后台 {execution['background']} · 排队 {execution['waiting']} · /tasks 查看\n"
+        if banner.mcp_status != 'MCP：未配置':
+            details += banner.mcp_status
         widgets.details.update(details)
         for button in (widgets.model, widgets.policy):
             button.disabled = state.streaming
@@ -146,14 +111,45 @@ class HudPresenter:
         )
 
     def status_left_text(self) -> str:
-        config = self.agent.model_config
-        if config is not None and self.agent.model_ref:
-            model = model_display_name(config.providers, self.agent.model_ref)
-        else:
-            model = self.provider_model
+        model = self.model_label()
         policy = "只读" if self.agent.work_phase in {"discuss", "plan"} else {"project": "项目访问", "full": "完全访问"}[self.agent.execution_access]
         phase = {"discuss": "讨论", "plan": "计划", "execute": "执行"}[self.agent.work_phase]
         return f"{model} · {phase} · {policy}"
+
+    def model_label(self) -> str:
+        config = self.agent.model_config
+        if config is not None and self.agent.model_ref:
+            return model_display_name(config.providers, self.agent.model_ref)
+        return self.provider_model
+
+    @staticmethod
+    def fit_text(text: str, width: int) -> str:
+        rendered = Text(text)
+        rendered.truncate(width, overflow='ellipsis')
+        return rendered.plain
+
+    def activity_label(self, state: HudState) -> str:
+        """过程细节留在消息内，状态栏只表达当前需要关注的状态。"""
+        hint = state.hint
+        if self.agent.is_stopping:
+            return '正在停止'
+        if state.pending_permissions:
+            return '等待确认'
+        if self.agent.is_compacting:
+            return '压缩上下文'
+        if state.streaming:
+            if '思考' in hint:
+                return '正在思考'
+            if '工具' in hint:
+                return '执行工具'
+            return '正在处理'
+        if self.agent.queue_paused:
+            return '队列暂停'
+        if any(word in hint for word in ('失败', '未完成', '不可用')):
+            return '未完成'
+        if any(word in hint for word in ('停止', '取消')):
+            return '已停止'
+        return '就绪'
 
     @staticmethod
     def format_usage_text(usage: RunUsageSummary) -> str:

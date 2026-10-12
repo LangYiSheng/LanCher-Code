@@ -115,7 +115,8 @@ async def test_partial_stream_cancellation_keeps_usage_already_received(request,
     assert snapshot.cached_input_tokens == 6
     assert snapshot.completed_request_count == 0
     assert snapshot.incomplete_request_count == 1
-    assert snapshot.cache_hit_ratio is None
+    assert snapshot.cache_hit_ratio == pytest.approx(6 / snapshot.input_tokens)
+    assert snapshot.cache_ratio_estimated
 
 
 @pytest.mark.asyncio
@@ -144,7 +145,8 @@ async def test_claude_initial_zero_without_final_delta_is_not_final_usage(claude
     assert events[-1].usage.output_tokens == 0
     assert not events[-1].usage.is_final
     assert tracker.snapshot().incomplete_request_count == 1
-    assert tracker.snapshot().cache_hit_ratio is None
+    assert tracker.snapshot().cache_hit_ratio == pytest.approx(6 / 18)
+    assert tracker.snapshot().cache_ratio_estimated
 
 
 @pytest.mark.asyncio
@@ -395,7 +397,8 @@ async def test_missing_usage_and_unterminated_stream_are_visible(openai_provider
     assert snapshot.completed_request_count == 1
     assert snapshot.input_reported_request_count == 1
     assert snapshot.incomplete_request_count == 2
-    assert snapshot.cache_hit_ratio is None
+    assert snapshot.cache_hit_ratio == 0.6
+    assert snapshot.cache_ratio_estimated
 
 
 @pytest.mark.asyncio

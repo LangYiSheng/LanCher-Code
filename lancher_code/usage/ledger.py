@@ -96,6 +96,8 @@ class RunUsageSummary:
     reasoning_reported_request_count: int = 0
     invalid_request_count: int = 0
     usage: MessageUsage = field(default_factory=MessageUsage)
+    cache_ratio_estimated: bool = False
+    cache_ratio_request_count: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -115,17 +117,22 @@ def summarize_records(records: Iterable[RequestUsageRecord]) -> RunUsageSummary:
                            or not request.usage.is_valid or not required <= request.usage.known_fields
                            or bool(required & request.usage.partial_fields) for request in requests)
     invalid_count = sum(not request.usage.is_valid for request in requests)
-    cache_complete = (bool(requests) and completed_count == len(requests) and not invalid_count
-                      and all(request.usage.is_final for request in requests)
-                      and counts["input"] == len(requests) and counts["cache"] == len(requests))
+    # 分子分母必须来自同一批请求；缺失或异常记录不能把缓存率压成零。
+    cache_samples = [request for request in requests if request.usage.is_valid
+                     and request.usage.input_tokens is not None
+                     and request.usage.cached_input_tokens is not None]
+    cache_input = sum(request.usage.input_tokens for request in cache_samples)
+    cache_read = sum(request.usage.cached_input_tokens for request in cache_samples)
+    cache_ratio = cache_read / cache_input if cache_input else None
     return RunUsageSummary(
         input_tokens=usage.input_tokens or 0, output_tokens=usage.output_tokens or 0,
         cached_input_tokens=usage.cached_input_tokens or 0, request_count=len(requests),
         completed_request_count=completed_count, incomplete_request_count=incomplete_count,
         input_reported_request_count=counts["input"], output_reported_request_count=counts["output"],
         cache_reported_request_count=counts["cache"],
-        cache_hit_ratio=(usage.cached_input_tokens or 0) / usage.input_tokens
-        if cache_complete and usage.input_tokens else None,
+        cache_hit_ratio=cache_ratio,
+        cache_ratio_estimated=cache_ratio is not None and bool(incomplete_count),
+        cache_ratio_request_count=len(cache_samples),
         cache_creation_input_tokens=usage.cache_creation_input_tokens or 0,
         reasoning_output_tokens=usage.reasoning_output_tokens or 0,
         cache_creation_reported_request_count=counts["cache_creation"],

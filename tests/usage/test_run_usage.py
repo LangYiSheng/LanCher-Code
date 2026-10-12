@@ -64,7 +64,8 @@ def test_unfinished_request_keeps_observed_tokens_without_claiming_complete_usag
     assert snapshot.cached_input_tokens == 5
     assert snapshot.output_reported_request_count == 0
     assert snapshot.incomplete_request_count == 1
-    assert snapshot.cache_hit_ratio is None
+    assert snapshot.cache_hit_ratio == pytest.approx(5 / 12)
+    assert snapshot.cache_ratio_estimated
 
 
 def test_missing_cache_is_distinct_from_reported_zero() -> None:
@@ -81,7 +82,8 @@ def test_missing_cache_is_distinct_from_reported_zero() -> None:
     snapshot = tracker.snapshot()
     assert snapshot.cache_reported_request_count == 1
     assert snapshot.incomplete_request_count == 1
-    assert snapshot.cache_hit_ratio is None
+    assert snapshot.cache_hit_ratio == 0
+    assert snapshot.cache_ratio_estimated and snapshot.cache_ratio_request_count == 1
 
 
 def test_zero_input_has_no_cache_ratio_and_other_fields_retain_coverage() -> None:
@@ -155,7 +157,7 @@ def test_optional_subcounts_do_not_repeat_in_total_or_reduce_completeness() -> N
     assert snapshot.incomplete_request_count == 0
 
 
-def test_partial_input_has_known_subtotal_but_no_reported_coverage_or_ratio() -> None:
+def test_partial_input_keeps_observed_cache_ratio_as_estimated() -> None:
     tracker = RunUsageTracker()
     identity = tracker.start_request(protocol="claude", model="first")
     tracker.update_request(identity, MessageUsage(input_tokens=100, cached_input_tokens=20, output_tokens=10,
@@ -163,7 +165,25 @@ def test_partial_input_has_known_subtotal_but_no_reported_coverage_or_ratio() ->
     tracker.finish_request(identity, status="completed")
     assert tracker.snapshot().input_tokens == 100
     assert tracker.snapshot().input_reported_request_count == 0
-    assert tracker.snapshot().cache_hit_ratio is None
+    assert tracker.snapshot().cache_hit_ratio == 0.2
+    assert tracker.snapshot().cache_ratio_estimated
+
+
+def test_cache_ratio_uses_paired_samples_and_survives_unknown_or_invalid_requests():
+    tracker = RunUsageTracker()
+    for usage, status in (
+        (MessageUsage(input_tokens=100, cached_input_tokens=80, output_tokens=10), 'completed'),
+        (MessageUsage(input_tokens=10000, output_tokens=5), 'completed'),
+        (MessageUsage(cached_input_tokens=900), 'failed'),
+        (MessageUsage(input_tokens=10, cached_input_tokens=99, output_tokens=2), 'completed'),
+    ):
+        identity = tracker.start_request(protocol='openai', model='test')
+        tracker.update_request(identity, usage)
+        tracker.finish_request(identity, status=status)
+    summary = tracker.snapshot()
+    assert summary.cache_hit_ratio == 0.8
+    assert summary.cache_ratio_estimated and summary.cache_ratio_request_count == 1
+    assert summary.cached_input_tokens == 1079 and summary.input_tokens == 10110
 
 
 def test_serialized_records_retain_scope_and_do_not_import_another_run() -> None:

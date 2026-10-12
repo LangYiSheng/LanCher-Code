@@ -112,7 +112,8 @@ async def compact_transcript(
             logger.warning("event=compaction_summary_format_retry reason=%s", format_error)
             continue
         recent = select_recent_history(transcript, token_budget=budget.recent_history_tokens)
-        latest_user = next((message for message in reversed(transcript) if message.role == "user"), None)
+        latest_user = next((message for message in reversed(transcript)
+                            if message.role == "user" and message.control_kind is None), None)
         if latest_user is not None and not any(message is latest_user for message in recent):
             # 大工具交换可以整组交给摘要，但当前用户原话仍是后续工作的
             # 直接约束。只补回用户消息，不带孤立的工具调用或结果。
@@ -143,7 +144,7 @@ def group_complete_turns(transcript: list[ConversationMessage]) -> list[list[Con
     leading: list[ConversationMessage] = []
     pending_call_ids: set[str] = set()
     for message in transcript:
-        if message.role == "user" and not pending_call_ids:
+        if message.role == "user" and message.control_kind != 'process_notification' and not pending_call_ids:
             if not groups:
                 groups.append([*leading, message])
                 leading = []

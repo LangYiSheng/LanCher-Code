@@ -274,11 +274,70 @@ async def test_switch_keeps_original_writer_and_background_event_owner(tmp_path,
         # 退出只生成独立执行事件，原调用只有一条 tool_result。
         assert sum(block.kind == 'tool_result' for item in session.transcript for block in item.blocks) == 0
         session.create_user_message('查看此前任务')
+        assert len(session.state.execution['inbox']) == 1
+        request = session.build_request([], allow_tool_calls=True)
         assert session.state.execution['inbox'] == []
-        assert '状态通知' in session.transcript[-1].blocks[-1].text
+        assert any('状态通知' in block.text for item in request.messages for block in item.blocks)
         events = session._sessions.repository.read(original)
         assert sum(event['type'] == 'process.exited' for event in events) == 1
         assert not any(event['type'].startswith('process.') for event in session._sessions.repository.read(other))
+    finally:
+        await runner.shutdown()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_process_notifications_reach_next_model_request_without_user_turn(tmp_path, openai_provider_config):
+    runtime, session, _, runner = setup_runtime(tmp_path, openai_provider_config)
+    session.create_user_message('当前任务')
+    session.build_request([], allow_tool_calls=True)
+    fact = {'notification_id': 'completion-first', 'process_id': 'process-first', 'status': 'exited',
+            'exit_code': 0, 'exit_reason': 'completed', 'lifetime': 'session'}
+    session.state.execution['inbox'].append(fact)
+    try:
+        messages = len(session.state.messages)
+        preview = session.preview_request([], allow_tool_calls=True)
+        assert session.state.execution['inbox'] == [fact]
+        assert 'completion-first' in str(preview.messages)
+        request = session.build_request([], allow_tool_calls=True)
+        assert session.state.execution['inbox'] == []
+        assert 'completion-first' in str(request.messages)
+        assert len(session.state.messages) == messages
+        again = session.build_request([], allow_tool_calls=True)
+        assert str(again.messages).count('completion-first') == 1
+        from lancher_code.sessions.codec import SessionCodec
+        saved = SessionCodec.project(session._sessions.repository.read(session.session_id))
+        _, transcript, _, _ = SessionCodec.decode(saved, session.session_id)
+        assert sum(item.control_kind == 'process_notification' for item in transcript) == 1
+    finally:
+        await runner.shutdown()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_process_notification_ack_failure_does_not_duplicate_a_growing_batch(tmp_path, openai_provider_config, monkeypatch):
+    runtime, session, _, runner = setup_runtime(tmp_path, openai_provider_config)
+    session.create_user_message('继续当前任务')
+    fact = lambda identity: {'notification_id': identity, 'process_id': identity, 'status': 'exited',
+                            'exit_code': 0, 'exit_reason': 'completed', 'lifetime': 'session'}
+    session.state.execution['inbox'].append(fact('first-completion'))
+    record = runtime.record_event
+    def fail_ack(owner, kind, data, **kwargs):
+        if kind == 'execution.inbox_acknowledged':
+            raise SessionRepositoryError('确认写入失败')
+        return record(owner, kind, data, **kwargs)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, 'record_event', fail_ack)
+            with pytest.raises(SessionRepositoryError, match='确认写入失败'):
+                session.build_request([], allow_tool_calls=True)
+        assert len(session.state.execution['inbox']) == 1
+        session.state.execution['inbox'].append(fact('second-completion'))
+        session.build_request([], allow_tool_calls=True)
+        assert not session.state.execution['inbox']
+        facts = [json.loads(item.blocks[0].text.splitlines()[-2]) for item in session.transcript
+                 if item.blocks[0].text.startswith('<process_notifications>\n')]
+        assert [item['notification_id'] for batch in facts for item in batch] == ['first-completion', 'second-completion']
     finally:
         await runner.shutdown()
         session.close()

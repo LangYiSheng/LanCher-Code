@@ -86,7 +86,7 @@ CHAT_CSS = """
     #plan-execute:focus { color: $background; }
     #status-bar { margin: 0 2 1 2; height: 1; color: $text-muted; background: $surface; }
     #status-left { color: $text-muted; width: 1fr; }
-    #status-center { width: auto; max-width: 35%; }
+    #status-center { width: auto; max-width: 100%; }
     #status-right { width: auto; margin-left: 1; color: $text-muted; }
     #status-details-scroll { display: none; height: auto; max-height: 8; margin: 0 2; overflow-x: hidden; }
     #status-details { height: auto; color: $text-muted; }

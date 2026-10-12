@@ -8,10 +8,12 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from lancher_code.usage.models import MessageUsage
+from lancher_code.agent.events import TurnEvent
 from lancher_code.config.models import UIConfig
 from lancher_code.usage.ledger import RequestUsageRecord
 from lancher_code.tui.chat_controls import ReadOnlyDetailsScreen
 from lancher_code.tui.composer import ComposerTextArea
+from lancher_code.tui.message import BannerWidget
 from test_tui_flow import FakeProvider, _build_app
 
 
@@ -79,7 +81,8 @@ async def test_usage_details_are_scrollable_and_leave_the_composer_reachable(
             await pilot.pause()
             assert viewport.scroll_y == viewport.max_scroll_y
             bottom = rendered_text(app)
-            assert "未读完成通知" in bottom
+            assert '未读完成通知' not in bottom
+            assert '托管进程' in bottom
             (tmp_path / f"details-{size[0]}x{size[1]}-{entry}.svg").write_text(
                 app.export_screenshot(), encoding="utf-8",
             )
@@ -102,5 +105,44 @@ async def test_usage_details_are_scrollable_and_leave_the_composer_reachable(
             if size[1] < 24:
                 await pilot.press("x")
             assert composer.text == "还没发送的草稿x"
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize('size', [(32, 16), (60, 24), (64, 24), (100, 40)])
+async def test_status_bar_shows_estimated_cache_ratio_without_process_alerts(
+    openai_provider_config, tmp_path, monkeypatch, size,
+):
+    app, session = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
+    session.create_user_message('状态展示')
+    request = session.bind_usage_request(session.build_request([], allow_tool_calls=True))
+    for identity, usage, status in (
+        ('known', MessageUsage(input_tokens=100, output_tokens=20, cached_input_tokens=60), 'completed'),
+        ('failed', MessageUsage(), 'failed'),
+    ):
+        request.usage_callback(RequestUsageRecord(
+            request_id=identity, run_id=request.run_id, protocol='openai', model=request.model,
+            session_id=session.session_id, status=status, usage=usage,
+        ).to_dict())
+    monkeypatch.setattr(app._agent, 'execution_summary', lambda: {
+        'running': 0, 'background': 0, 'waiting': 0, 'notifications': 7})
+    try:
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            app.query_one(BannerWidget).update_context_usage(session.context_window, session.context_window)
+            app._refresh_status_bar()
+            await pilot.pause()
+            screen = rendered_text(app)
+            assert '缓存 ≈60.0%' in screen.replace('\u00a0', ' ')
+            assert '上下文 100%' in screen.replace('\u00a0', ' ')
+            assert '通知' not in screen
+            assert str(app.query_one('#status-left', Static).render()).count('执行') == 0
+            assert 'MCP：未配置' not in str(app.query_one('#status-details', Static).render())
+            app._apply_turn_event(TurnEvent(kind='turn_failed', error_text='服务端错误详情' * 20))
+            app._refresh_status_bar()
+            await pilot.pause()
+            screen = rendered_text(app)
+            assert '未完成' in screen and '服务端错误详情' not in screen
+            assert app.query_one(ComposerTextArea).region.bottom <= size[1]
     finally:
         session.close()

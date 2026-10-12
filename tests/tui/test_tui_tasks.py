@@ -168,27 +168,28 @@ async def test_task_screen_facade_binds_session_before_later_switch(openai_provi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size", [(100, 40), (60, 24), (32, 16)])
-async def test_hud_keeps_background_and_notification_visible(openai_provider_config, tmp_path, monkeypatch, size):
+async def test_hud_keeps_processes_in_details_and_no_user_notification(openai_provider_config, tmp_path, monkeypatch, size):
     app, _ = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
     counts = {"background": 2, "running": 2, "notifications": 1, "waiting": 3}
     monkeypatch.setattr(app._agent, "execution_summary", lambda session_id=None: counts)
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        selector = "#status-right" if size[0] >= 64 else "#status-left"
+        selector = "#status-left"
         widget = app.query_one(selector, Static)
         visible_status = str(widget.render())
-        assert "后台 2" in visible_status
-        assert "通知 1 /tasks" in visible_status
+        assert '后台' not in visible_status and '通知' not in visible_status
+        assert '通知' not in str(app.query_one('#status-right', Static).render())
         if size[0] < 64:
             assert all(cell_len(line) <= size[0] - 4 for line in widget.content.plain.splitlines())
         assert widget.region.right <= size[0]
         details = str(app.query_one("#status-details", Static).render())
-        assert "托管进程：运行 2 · 会话后台 2 · 排队 3" in details
-        assert "未读完成通知：1 · /tasks 查看任务与输出" in details
-        counts.update(background=0, notifications=0)
+        assert "托管进程：运行 2 · 后台 2 · 排队 3" in details
+        assert '未读完成通知' not in details
+        counts.update(background=0, notifications=0, running=0, waiting=0)
         app._refresh_status_bar()
         assert "后台" not in str(widget.render())
         assert "通知" not in str(widget.render())
+        assert '托管进程' not in str(app.query_one('#status-details', Static).render())
 
 
 @pytest.mark.asyncio

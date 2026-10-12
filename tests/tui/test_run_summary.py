@@ -195,7 +195,7 @@ def test_cancelled_request_with_reported_usage_still_warns_about_incomplete_tota
 
     assert "输入：12,340 tokens" in text
     assert "输出：2,156 tokens" in text
-    assert "缓存比：--" in text
+    assert "缓存比：64.8%（估算，可能不准）" in text
     assert "有 1 次请求未返回完整用量" in text
     assert "已上报统计" in text
 
@@ -266,4 +266,4 @@ def test_summary_marks_partial_totals_when_only_one_request_reported_input():
     assert "输入：100 tokens（部分上报）" in text
     assert "输出：50 tokens" in text
     assert "总计：150 tokens（部分上报）" in text
-    assert "缓存比：--" in text
+    assert "缓存比：0.0%（估算，可能不准）" in text

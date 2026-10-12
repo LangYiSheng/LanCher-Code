@@ -331,7 +331,7 @@ def test_request_does_not_inflate_total_output_by_reasoning_effort(claude_provid
     claude_provider_config.max_output_tokens = 12000
     session = SessionController(claude_provider_config)
     for effort in ("auto", "low", "high", "max"):
-        claude_provider_config.reasoning_effort = effort
+        session.set_effort(effort)
         request = session.build_request([], allow_tool_calls=True)
         assert request.max_output_tokens == 12000
         assert request.reasoning_effort == effort
@@ -450,11 +450,16 @@ async def test_compaction_never_drops_last_oversized_user_group_to_succeed() -> 
 
 
 @pytest.mark.asyncio
-async def test_large_recent_tool_group_preserves_current_user_without_orphan_results() -> None:
+@pytest.mark.parametrize('process_notification', [False, True])
+async def test_large_recent_tool_group_preserves_current_user_without_orphan_results(process_notification) -> None:
     original = [ConversationMessage.text_message("user", "x" * 8000),
                 ConversationMessage.text_message("assistant", "旧任务完成"),
                 ConversationMessage.text_message("user", "不要改数据库，只分析错误"),
                 *_tool_exchange(["x" * 7000])]
+    if process_notification:
+        notification = ConversationMessage.text_message('user', '托管进程已退出，退出码 0。')
+        notification.control_kind = 'process_notification'
+        original.append(notification)
     result = await compact_transcript(provider=_SummaryProvider(_valid_summary()), model="test", transcript=original,
                                       visible_tools=[], state=ContextManagementState(), context_window=8192)
     assert result.transcript[-1].blocks[0].text == "不要改数据库，只分析错误"

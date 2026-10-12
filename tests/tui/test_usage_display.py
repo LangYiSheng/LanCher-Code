@@ -36,7 +36,7 @@ def test_known_partial_field_is_retained_when_no_request_has_a_complete_field():
     assert summary.input_reported_request_count == 0
     assert "输入：12 tokens（部分上报）" in text
     assert "总计：15 tokens（部分上报）" in text
-    assert "缓存比：--" in text
+    assert "缓存比：41.7%（估算，可能不准）" in text
 
 
 def test_details_and_terminal_use_the_same_usage_format():
@@ -61,7 +61,7 @@ def test_initial_snapshot_is_labelled_as_incomplete_even_if_numbers_are_known():
 
     assert "输入：10 tokens" in text
     assert "有 1 次请求未返回完整用量" in text
-    assert "缓存比：--" in text
+    assert "缓存比：0.0%（估算，可能不准）" in text
 
 
 @pytest.mark.parametrize(("usage", "total"), [
