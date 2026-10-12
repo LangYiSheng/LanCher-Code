@@ -5,14 +5,17 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 import yaml
-from textual import on
+from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Static
 
-from lancher_code.providers.catalog import iter_model_refs
+from lancher_code.providers.catalog import iter_model_refs, merge_discovered_models, models_on_connection
+from lancher_code.providers.discovery import discovery_connection
+from lancher_code.providers.metadata import connection_fingerprint
+from lancher_code.tui.model_discovery import ModelDiscoveryScreen
 from lancher_code.config.models import AppConfig, RuntimeConfig, UIConfig
 from lancher_code.config.settings import SettingsError, SettingsService, SettingsSnapshot
 from lancher_code.tui.model_picker import ModelPickerScreen
@@ -65,6 +68,9 @@ class SettingsScreen(Screen[SettingsResult]):
         self._mcp_pending = service.mcp_restart_required if on_mcp_saved is None else False
         self._runtime_applied = False
         self._system_pending = False
+        self._discovery_generation = 0
+        self._discovery_worker = None
+        self._discovery_revision = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="settings-root"):
@@ -102,6 +108,11 @@ class SettingsScreen(Screen[SettingsResult]):
 
     def on_resize(self) -> None:
         self._refresh_responsive_layout()
+
+    def on_unmount(self) -> None:
+        self._discovery_generation += 1
+        if self._discovery_worker is not None:
+            self._discovery_worker.cancel()
 
     def _refresh_responsive_layout(self) -> None:
         compact = self.size.width < 60
@@ -155,6 +166,12 @@ class SettingsScreen(Screen[SettingsResult]):
 
     @on(ModelSettingsEditor.ViewChanged)
     def model_view_changed(self) -> None:
+        revision = self.query_one(ModelSettingsEditor).view_revision
+        if self._discovery_worker is not None and self._discovery_revision != revision:
+            self._discovery_worker.cancel()
+            self._discovery_generation += 1
+            self._discovery_worker = None
+            self.query_one('#provider-discover', Button).disabled = False
         self._refresh_actions()
         self.query_one("#settings-pages", VerticalScroll).scroll_home(animate=False)
 
@@ -199,14 +216,14 @@ class SettingsScreen(Screen[SettingsResult]):
             except Exception as exc:
                 self._show_error(f"本次模型切换失败：{exc}")
 
-    def _commit_models(self, config: AppConfig, notice: str) -> None:
+    def _commit_models(self, config: AppConfig, notice: str) -> bool:
         try:
             committed = self.service.save_models(config)
         except (SettingsError, ValueError) as exc:
             self._show_error(str(exc))
             for selector in ("#provider-advanced", "#model-advanced"):
                 self.query_one(selector, Collapsible).collapsed = False
-            return
+            return False
         self.snapshot.config = committed
         self._saved = True
         callback_error = None
@@ -226,6 +243,71 @@ class SettingsScreen(Screen[SettingsResult]):
         self._notice(notice)
         if callback_error:
             self._show_error(callback_error)
+        return True
+
+    @on(ModelSettingsEditor.DiscoveryRequested)
+    def discovery_requested(self) -> None:
+        editor = self.query_one(ModelSettingsEditor)
+        try:
+            candidate = editor.collect()
+            provider_id = editor.provider_id or editor._draft_provider_id
+            discovery_connection(candidate.providers[provider_id])
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+        self._start_discovery(candidate, provider_id, editor._values(), refresh=True)
+
+    def _start_discovery(self, candidate: AppConfig, provider_id: str,
+                         draft_values: dict | None, *, refresh: bool) -> None:
+        self._discovery_generation += 1
+        generation = self._discovery_generation
+        revision = self.query_one(ModelSettingsEditor).view_revision
+        self._discovery_revision = revision
+        self.query_one('#provider-discover', Button).disabled = True
+        self.query_one('#settings-notice', Static).update('正在读取供应商的模型列表…')
+        self.query_one('#settings-notice').display = True
+        self._discovery_worker = self._discover_models(candidate, provider_id, revision, draft_values,
+                                                       generation, refresh)
+
+    def _discovery_current(self, revision: int, draft_values: dict | None, generation: int) -> bool:
+        if not self.is_mounted or self._active_tab != 'model' or generation != self._discovery_generation:
+            return False
+        editor = self.query_one(ModelSettingsEditor)
+        return editor.view_revision == revision and (draft_values is None or editor._values() == draft_values)
+
+    @work(group='model-discovery', exclusive=True, exit_on_error=False)
+    async def _discover_models(self, candidate: AppConfig, provider_id: str, revision: int,
+                               draft_values: dict | None, generation: int, refresh: bool) -> None:
+        try:
+            result = await self.service.discover_models(candidate.providers[provider_id], refresh=refresh)
+        except Exception as exc:
+            if self._discovery_current(revision, draft_values, generation):
+                self._show_error(str(exc))
+                self.query_one('#settings-notice').display = False
+            return
+        finally:
+            if self.is_mounted and generation == self._discovery_generation:
+                self.query_one('#provider-discover', Button).disabled = False
+        if not self._discovery_current(revision, draft_values, generation) or self.app.screen is not self:
+            if self.is_mounted and generation == self._discovery_generation:
+                self.query_one('#settings-notice', Static).update('当前编辑已变化，未采用刚才的发现结果；可重新发现模型。')
+            return
+        if not result.models:
+            self.query_one('#settings-notice', Static).update(result.notice or '端点返回了空的模型列表；可以继续手动添加模型。')
+            return
+        provider = candidate.providers[provider_id]
+        existing = set(models_on_connection(provider, result.fingerprint))
+
+        def selected(ids: list[str] | None) -> None:
+            if ids is None or not self._discovery_current(revision, draft_values, generation):
+                return
+            try:
+                provider, added, updated = merge_discovered_models(candidate.providers[provider_id], result.models, ids)
+                candidate.providers[provider_id] = provider
+                self._commit_models(candidate, f'已加入 {added} 个模型，更新 {updated} 个模型的信息；本次模型和新对话默认不变。')
+            except Exception as exc:
+                self._show_error(str(exc))
+        self.app.push_screen(ModelDiscoveryScreen(result, existing, provider_name=provider.name), selected)
 
     @on(ModelSettingsEditor.DeleteRequested)
     def delete_model_entry(self) -> None:
@@ -268,7 +350,18 @@ class SettingsScreen(Screen[SettingsResult]):
         if self.snapshot is None or not self._editing: return
         def save() -> None:
             if self._active_tab == "model":
-                self._commit_models(self.query_one(ModelSettingsEditor).collect(), "已保存；本次模型与新对话默认分别管理。")
+                editor = self.query_one(ModelSettingsEditor)
+                candidate = editor.collect()
+                provider_id = editor.provider_id or editor._draft_provider_id
+                discover = False
+                if editor.kind == 'provider':
+                    provider = candidate.providers[provider_id]
+                    original = editor._provider_original
+                    discover = editor.is_new or (provider.protocol, provider.base_url, provider.api_key) != (
+                        original.protocol, original.base_url, original.api_key)
+                committed = self._commit_models(candidate, "已保存；本次模型与新对话默认分别管理。")
+                if committed and discover:
+                    self._start_discovery(deepcopy(self.snapshot.config), provider_id, None, refresh=True)
             elif self._active_tab == "runtime":
                 editor = self.query_one(SystemSettingsEditor)
                 runtime = editor.collect()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -13,9 +14,11 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Collapsible, Input, Select, Static, Tree
 
-from lancher_code.providers.catalog import iter_model_refs, model_display_name, new_entry_id
+from lancher_code.providers.catalog import iter_model_refs, model_display_name, new_entry_id, resolve_model
 from lancher_code.config.models import AppConfig
-from lancher_code.providers.models import ModelDefinition, ProviderDefinition, ThinkingConfig
+from lancher_code.providers.models import ModelDefinition, ProviderDefinition
+from lancher_code.providers.reasoning import API_MODE_OPTIONS, EFFORT_LABELS, EFFORT_LEVELS, reasoning_capabilities
+from lancher_code.providers.metadata import bound_metadata
 from lancher_code.tui.theme import theme_palette
 
 PROTOCOLS = (("OpenAI 兼容", "openai"), ("Anthropic", "claude"))
@@ -88,6 +91,9 @@ class ModelSettingsEditor(Vertical):
     class DeleteRequested(Message):
         pass
 
+    class DiscoveryRequested(Message):
+        pass
+
     def __init__(self, show_error=None) -> None:
         super().__init__(id="page-model", classes="settings-page")
         self.config: AppConfig | None = None
@@ -98,6 +104,8 @@ class ModelSettingsEditor(Vertical):
         self.is_new = False
         self._baseline: dict[str, Any] = {}
         self._show_error = show_error or (lambda _message: None)
+        self.view_revision = 0
+        self._draft_provider_id: str | None = None
 
     @property
     def editing(self) -> bool:
@@ -127,15 +135,18 @@ class ModelSettingsEditor(Vertical):
             yield from self._field("Base URL", Input(id="provider-base-url"))
             yield from self._field("API Key", Input(password=True, placeholder="留空保留原值；支持环境变量引用", id="provider-api-key"))
             with Collapsible(title="高级：请求超时与引用", collapsed=True, id="provider-advanced"):
+                yield from self._field("OpenAI 接口形式", Select(API_MODE_OPTIONS, value="auto", allow_blank=False, id="provider-api-mode"))
                 yield from self._field("超时（秒）", Input(id="provider-timeout", type="number"))
                 yield Static("", id="provider-id", classes="entry-id", markup=False)
             yield Button("＋ 为这个供应商添加模型", id="model-new", classes="link-button")
+            yield Button("发现模型…", id="provider-discover", classes="link-button")
             yield Button("删除供应商…", id="provider-delete", classes="danger-button")
         with Vertical(id="model-fields", classes="model-section"):
             yield Static("", id="model-title", classes="editor-title", markup=False)
             yield Static("", id="model-connection-summary", classes="connection-summary", markup=False)
             yield from self._field("API 模型名", Input(id="model-name"))
             yield from self._field("显示名称（可选）", Input(id="model-display-name"))
+            yield Static("", id="model-metadata-info", classes="inherit-note", markup=False)
             yield Static("保存参数不改变本次模型或新对话默认选择。", classes="inherit-note")
             with Collapsible(title="高级：独立连接与模型参数", collapsed=True, id="model-advanced"):
                 for name, label, widget in (
@@ -143,6 +154,7 @@ class ModelSettingsEditor(Vertical):
                     ("base-url", "Base URL", Input(id="model-base-url")),
                     ("api-key", "API Key（留空保留）", Input(password=True, id="model-api-key")),
                     ("timeout", "超时（秒）", Input(id="model-timeout", type="number")),
+                    ("api-mode", "OpenAI 接口形式", Select(API_MODE_OPTIONS, value="auto", allow_blank=False, id="model-api-mode")),
                 ):
                     with Vertical(classes="field"):
                         yield Static(label, classes="field-label")
@@ -151,11 +163,9 @@ class ModelSettingsEditor(Vertical):
                 yield from self._field("上下文窗口", Input(id="model-context-window", type="integer"))
                 yield from self._field("单次总输出额度（token）", Input(id="model-max-output-tokens", type="integer", placeholder="默认 32768；小窗口自动适配"))
                 yield Static("总输出额度包含思考、正文和工具参数，需符合供应商支持的上限。", classes="inherit-note")
-                yield Static("思考轨迹的显示在“外观与输入”中设置；OpenAI 兼容协议使用模型和服务端的推理默认行为。", classes="inherit-note")
-                with Vertical(id="model-thinking-fields", classes="model-section"):
-                    yield Checkbox("启用 Anthropic 手动思考预算", id="model-thinking")
-                    yield Static("仅用于支持手动 thinking 的模型；这是请求参数，不控制思考轨迹显示。", classes="inherit-note")
-                    yield from self._field("手动思考预算（token）", Input(id="model-thinking-budget", type="integer"))
+                yield Static("思考轨迹的显示在“外观与输入”中设置。", classes="inherit-note")
+                yield from self._field("推理强度（effort）", Select([(EFFORT_LABELS["auto"], "auto")], value="auto", allow_blank=False, id="model-reasoning-effort"))
+                yield Static("", id="model-reasoning-help", classes="inherit-note", markup=False)
                 yield Static("", id="model-id", classes="entry-id", markup=False)
             yield Button("删除模型", id="model-delete", classes="danger-button")
 
@@ -184,6 +194,7 @@ class ModelSettingsEditor(Vertical):
         self.show_catalog()
 
     def show_catalog(self) -> None:
+        self.view_revision += 1
         self.kind = None
         self.is_new = False
         self._show_sections()
@@ -229,6 +240,9 @@ class ModelSettingsEditor(Vertical):
         label = Text(model.display_name or model.model_name, style="bold")
         if model.display_name and not compact:
             label.append(f"  {model.model_name}", style=secondary)
+        metadata = resolve_model(self.config.providers, reference).metadata
+        if metadata and metadata.owned_by and not compact:
+            label.append(f'  {metadata.owned_by}', style=secondary)
         flags = []
         if reference == self.current_ref:
             flags.append("本次" if compact else "本次使用")
@@ -248,10 +262,12 @@ class ModelSettingsEditor(Vertical):
                 self.open_model(provider_id, model_id)
 
     def open_provider(self, provider_id: str | None = None) -> None:
+        self.view_revision += 1
         self.kind, self.provider_id, self.model_id = "provider", provider_id, None
         self.is_new = provider_id is None
         provider = self.config.providers[provider_id] if provider_id else ProviderDefinition(name="", protocol="openai", base_url="https://api.openai.com/v1", api_key="", models={})
         self._provider_original = deepcopy(provider)
+        self._draft_provider_id = provider_id or new_entry_id(f"provider-{uuid4().hex[:12]}", self.config.providers)
         self.query_one("#provider-title", Static).update("添加供应商" if self.is_new else f"编辑供应商 · {provider.name}")
         names = [m.display_name or m.model_name for m in provider.models.values()]
         self.query_one("#provider-impact", Static).update("保存后可添加第一个模型。" if not names else "以下模型共用连接：" + "、".join(names) + "\n继承参数从下一次请求生效。")
@@ -259,6 +275,7 @@ class ModelSettingsEditor(Vertical):
             for key, value in {"name":provider.name, "base-url":provider.base_url, "api-key":"", "timeout":str(provider.timeout_seconds)}.items():
                 self.query_one(f"#provider-{key}", Input).value = value
             self.query_one("#provider-protocol", Select).value = provider.protocol
+            self.query_one("#provider-api-mode", Select).value = provider.api_mode
         self.query_one("#provider-id", Static).update(f"稳定 ID：{provider_id or '保存时生成'}")
         self.query_one("#model-new").display = not self.is_new
         self.query_one("#provider-delete").display = not self.is_new
@@ -266,6 +283,7 @@ class ModelSettingsEditor(Vertical):
         self._finish_open()
 
     def open_model(self, provider_id: str, model_id: str | None = None) -> None:
+        self.view_revision += 1
         self.kind, self.provider_id, self.model_id = "model", provider_id, model_id
         self.is_new = model_id is None
         provider = self.config.providers[provider_id]
@@ -276,18 +294,18 @@ class ModelSettingsEditor(Vertical):
         with self.prevent(Select.Changed, Checkbox.Changed):
             self.query_one("#model-name", Input).value = model.model_name
             self.query_one("#model-display-name", Input).value = model.display_name
-            for field, attribute in (("protocol", "protocol"), ("base-url", "base_url"), ("api-key", "api_key"), ("timeout", "timeout_seconds")):
+            for field, attribute in (("protocol", "protocol"), ("base-url", "base_url"), ("api-key", "api_key"), ("timeout", "timeout_seconds"), ("api-mode", "api_mode")):
                 own = getattr(model, attribute)
                 self.query_one(f"#inherit-{field}", Checkbox).value = own is None
                 self.query_one(f"#model-{field}").value = "" if field == "api-key" else str(own if own is not None else getattr(provider, attribute))
             self.query_one("#model-context-window", Input).value = str(model.context_window or "")
             self.query_one("#model-max-output-tokens", Input).value = str(model.max_output_tokens or "")
-            self.query_one("#model-thinking", Checkbox).value = bool(model.thinking and model.thinking.enabled)
-            self.query_one("#model-thinking-budget", Input).value = str(model.thinking.budget_tokens or "") if model.thinking else ""
         self.query_one("#model-id", Static).update(f"稳定引用：{provider_id}/{model_id or '保存时生成'}")
         self.query_one("#model-delete").display = not self.is_new
         self.query_one("#model-advanced", Collapsible).collapsed = False if any(getattr(model, key) is not None for key in ("protocol", "base_url", "api_key", "timeout_seconds")) else True
         self._sync_inheritance()
+        with self.prevent(Select.Changed):
+            self.query_one("#model-reasoning-effort", Select).value = model.reasoning_effort
         self._finish_open()
 
     def _finish_open(self) -> None:
@@ -312,14 +330,42 @@ class ModelSettingsEditor(Vertical):
             return
         provider = self.config.providers[self.provider_id]
         with self.prevent(Select.Changed):
-            for name, attr in (("protocol", "protocol"), ("base-url", "base_url"), ("api-key", "api_key"), ("timeout", "timeout_seconds")):
+            for name, attr in (("protocol", "protocol"), ("base-url", "base_url"), ("api-key", "api_key"), ("timeout", "timeout_seconds"), ("api-mode", "api_mode")):
                 inherited = self.query_one(f"#inherit-{name}", Checkbox).value
                 widget = self.query_one(f"#model-{name}")
                 widget.disabled = inherited
                 if inherited:
                     widget.value = "" if name == "api-key" else str(getattr(provider, attr))
-        protocol = self.config.providers[self.provider_id].protocol if self.query_one("#inherit-protocol", Checkbox).value else self.query_one("#model-protocol", Select).value
-        self.query_one("#model-thinking-fields").display = protocol == "claude"
+        self._sync_reasoning()
+
+    @on(Input.Changed, "#model-name")
+    @on(Input.Changed, "#model-base-url")
+    @on(Input.Changed, "#model-api-key")
+    def reasoning_model_changed(self) -> None:
+        self._sync_reasoning()
+
+    def _sync_reasoning(self) -> None:
+        if self.kind != "model":
+            return
+        protocol = self.query_one("#model-protocol", Select).value
+        provider = self.config.providers[self.provider_id]
+        api_key = provider.api_key if self.query_one("#inherit-api-key", Checkbox).value else (
+            self.query_one("#model-api-key", Input).value.strip() or self._model_original.api_key or '')
+        metadata = bound_metadata(self._model_original.metadata, protocol=str(protocol),
+            model=os.path.expandvars(self.query_one("#model-name", Input).value).strip(),
+            base_url=os.path.expandvars(self.query_one("#model-base-url", Input).value).strip().rstrip('/'),
+            api_key=os.path.expandvars(api_key).strip())
+        capabilities = reasoning_capabilities(str(protocol), metadata)
+        selector = self.query_one("#model-reasoning-effort", Select)
+        levels = ("auto", *(capabilities.levels if capabilities.levels is not None else EFFORT_LEVELS[1:]))
+        selected = selector.value if selector.value in levels else "auto"
+        with self.prevent(Select.Changed):
+            selector.set_options([(EFFORT_LABELS.get(level, level), level) for level in levels])
+            selector.value = selected
+        selector.disabled = capabilities.levels == ()
+        self.query_one("#model-reasoning-help", Static).update(capabilities.description)
+        self.query_one("#model-metadata-info", Static).update(
+            f'归属：{metadata.owned_by or "未声明"} · 模型信息获取于 {metadata.fetched_at}' if metadata else '尚未获取此连接的模型信息；可在供应商页面发现模型。')
 
     @on(Button.Pressed, "#provider-new")
     def new_provider(self) -> None:
@@ -329,6 +375,10 @@ class ModelSettingsEditor(Vertical):
     def new_model(self) -> None:
         # 由设置页统一处理未保存的供应商草稿。
         self.post_message(self.PickRequested("add-model"))
+
+    @on(Button.Pressed, "#provider-discover")
+    def discover_models(self) -> None:
+        self.post_message(self.DiscoveryRequested())
 
     @on(Button.Pressed, "#pick-current")
     def pick_current(self) -> None:
@@ -349,16 +399,17 @@ class ModelSettingsEditor(Vertical):
             provider = deepcopy(self._provider_original)
             provider.name = self.query_one("#provider-name", Input).value.strip()
             provider.protocol = self.query_one("#provider-protocol", Select).value
+            provider.api_mode = str(self.query_one("#provider-api-mode", Select).value)
             provider.base_url = self.query_one("#provider-base-url", Input).value.strip()
             provider.api_key = self.query_one("#provider-api-key", Input).value.strip() or provider.api_key
             provider.timeout_seconds = self._positive_number("provider-timeout", "供应商超时")
-            provider_id = self.provider_id or new_entry_id(f"provider-{uuid4().hex[:12]}", candidate.providers)
+            provider_id = self.provider_id or self._draft_provider_id
             candidate.providers[provider_id] = provider
         elif self.kind == "model":
             model = deepcopy(self._model_original)
             model.model_name = self.query_one("#model-name", Input).value.strip()
             model.display_name = self.query_one("#model-display-name", Input).value.strip()
-            for field, attr in (("protocol", "protocol"), ("base-url", "base_url"), ("api-key", "api_key"), ("timeout", "timeout_seconds")):
+            for field, attr in (("protocol", "protocol"), ("base-url", "base_url"), ("api-key", "api_key"), ("timeout", "timeout_seconds"), ("api-mode", "api_mode")):
                 if self.query_one(f"#inherit-{field}", Checkbox).value:
                     value = None
                 elif field == "timeout":
@@ -370,9 +421,7 @@ class ModelSettingsEditor(Vertical):
                 setattr(model, attr, value)
             model.context_window = self._positive_number("model-context-window", "上下文窗口", integer=True) if self.query_one("#model-context-window", Input).value.strip() else None
             model.max_output_tokens = self._positive_number("model-max-output-tokens", "单次总输出额度", integer=True) if self.query_one("#model-max-output-tokens", Input).value.strip() else None
-            enabled = self.query_one("#model-thinking", Checkbox).value
-            budget = self.query_one("#model-thinking-budget", Input).value.strip()
-            model.thinking = ThinkingConfig(enabled=enabled, budget_tokens=self._positive_number("model-thinking-budget", "Thinking budget", integer=True) if budget else None) if enabled or budget or model.thinking is not None else None
+            model.reasoning_effort = str(self.query_one("#model-reasoning-effort", Select).value)
             models = candidate.providers[self.provider_id].models
             model_id = self.model_id or new_entry_id(f"model-{uuid4().hex[:12]}", models)
             models[model_id] = model

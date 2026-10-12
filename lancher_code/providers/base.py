@@ -18,6 +18,7 @@ from lancher_code.errors import (
 from lancher_code.contracts.messages import ChatRequest, StreamEvent
 from lancher_code.usage.models import MessageUsage, merge_usage
 from lancher_code.providers.models import ProviderConfig
+from lancher_code.providers.metadata import ModelMetadata, bound_metadata
 from lancher_code.usage.ledger import RequestUsageRecord, RequestUsageStatus, RunUsageTracker, UsageField, UsageObserver
 
 
@@ -42,6 +43,10 @@ class BaseChatProvider:
         self._usage_observer = usage_observer
         self._usage_run_id = uuid4().hex
         self._usage_requests: dict[str, tuple[ChatRequest, RequestUsageRecord]] = {}
+
+    def _model_metadata(self, request: ChatRequest) -> ModelMetadata | None:
+        return bound_metadata(self.config.metadata, protocol=self.config.protocol, model=request.model,
+                              base_url=self.config.base_url, api_key=self.config.api_key)
 
     def _prepare_usage_attempt(self, request: ChatRequest) -> ChatRequest:
         """每次执行使用独立副本；只消费上层为本次尝试准备的一次性 ID。"""

@@ -78,7 +78,6 @@ async def compact_transcript(
             messages=[*summary_messages, ConversationMessage.text_message("user", instruction)],
             tools=[],
             allow_tool_calls=False,
-            thinking=None,
             cancellation_token=cancellation_token,
             max_output_tokens=budget.output_tokens,
             purpose="compaction",

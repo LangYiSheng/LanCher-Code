@@ -430,20 +430,14 @@ async def test_openai_provider_classifies_only_known_prompt_too_long_error(opena
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", ["o3", "ordinary-model-without-name-inference"])
-@pytest.mark.parametrize("base_url, limit_field", [
-    ("https://api.openai.com/v1", "max_completion_tokens"),
-    ("https://API.OPENAI.COM/v1", "max_completion_tokens"),
-    ("https://api.openai.com:443/v1", "max_completion_tokens"),
-    ("https://api.deepseek.com", "max_tokens"),
-    ("https://api.deepseek.com/v1", "max_tokens"),
-    ("https://unknown.example/v1", "max_tokens"),
-    ("https://api.openai.com.example/v1", "max_tokens"),
-    ("https://unknown.example/api.openai.com/v1", "max_tokens"),
-])
-async def test_openai_output_limit_uses_exact_endpoint_host_without_model_name_inference(
-    openai_provider_config, base_url, limit_field, model,
+@pytest.mark.parametrize("base_url", ["https://api.openai.com/v1", "https://api.deepseek.com/v1",
+                                      "https://unknown.example/v1", "https://api.openai.com.example/v1"])
+@pytest.mark.parametrize("api_mode,limit_field", [('auto', 'max_tokens'),
+    ('chat_completions', 'max_completion_tokens'), ('chat_completions_legacy', 'max_tokens')])
+async def test_openai_output_limit_uses_selected_api_mode_without_host_or_model_inference(
+    openai_provider_config, base_url, limit_field, model, api_mode,
 ) -> None:
-    config = replace(openai_provider_config, base_url=base_url)
+    config = replace(openai_provider_config, base_url=base_url, api_mode=api_mode)
     model_request = _request()
     model_request.model = model
     model_request.max_output_tokens = 1536

@@ -9,7 +9,7 @@ import pytest
 from lancher_code.context.compaction import _collect_summary
 from lancher_code.errors import ProviderRequestError, ProviderResponseError
 from lancher_code.contracts.messages import ChatRequest
-from lancher_code.providers.models import ThinkingConfig
+
 from lancher_code.providers.factory import create_provider
 from lancher_code.usage.ledger import RunUsageTracker
 
@@ -307,11 +307,12 @@ async def test_output_cap_is_sent_to_actual_provider(request, config_fixture):
     _ = [event async for event in provider.stream_chat(ChatRequest(model="first", max_output_tokens=512))]
 
 
-def test_claude_rejects_thinking_budget_that_cannot_fit_output_cap(claude_provider_config):
+def test_adaptive_claude_has_no_fixed_thinking_budget(claude_provider_config):
     provider = create_provider(claude_provider_config)
-    with pytest.raises(ProviderRequestError, match="思考"):
-        provider._build_payload(ChatRequest(model="first", max_output_tokens=512,
-                                            thinking=ThinkingConfig(enabled=True, budget_tokens=512)))
+    payload = provider._build_payload(ChatRequest(model=claude_provider_config.model, max_output_tokens=512,
+                                                  reasoning_effort="auto"))
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["max_tokens"] == 512
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,6 @@ from lancher_code.context.prompt_models import PromptContext
 from lancher_code.context.prefix import prepare_prefix
 from lancher_code.contracts.messages import ChatRequest, ConversationMessage
 from lancher_code.contracts.tools import DeferredToolGroup, ToolDefinition
-from lancher_code.errors import ConfigError
 from lancher_code.providers.models import ProviderConfig
 
 
@@ -36,11 +35,7 @@ def prepare_request(*, config: ProviderConfig, context: PromptContext,
                     deferred_tool_groups: list[DeferredToolGroup] | None = None,
                     experimental: bool = False, force_reset: bool = False,
                     now: datetime | None = None) -> tuple[ChatRequest, ContextManagementState, list[ConversationMessage]]:
-    thinking = config.thinking if config.protocol == "claude" else None
     output_tokens = context_budget(config.context_window, config.max_output_tokens).output_tokens
-    if thinking is not None and thinking.enabled:
-        if thinking.effective_budget_tokens >= output_tokens:
-            raise ConfigError(f"思考预算必须小于总输出额度（当前 {output_tokens} token），请调整模型 max_output_tokens 或 thinking.budget_tokens。")
     system, transcript, emitted_tools, updates = prepare_prefix(
         state=state, context=context, transcript=transcript, tools=tools,
         deferred_tool_groups=deferred_tool_groups, dynamic_context=dynamic_context,
@@ -52,7 +47,8 @@ def prepare_request(*, config: ProviderConfig, context: PromptContext,
             projected[:update['at_message']], protocol=config.protocol, model=config.model))
     messages = project_historical_tool_exchanges(projected, protocol=config.protocol, model=config.model)
     request = ChatRequest(model=config.model, system=system, messages=messages, tools=emitted_tools,
-                       allow_tool_calls=allow_tool_calls, thinking=thinking, work_phase=context.work_phase,
+                       allow_tool_calls=allow_tool_calls, reasoning_effort=config.reasoning_effort, api_mode=config.api_mode,
+                       work_phase=context.work_phase,
                        execution_access=context.execution_access, session_id=context.session_id,
                         max_output_tokens=output_tokens, experimental_mcp_tool_append=experimental,
                         tool_updates=updates, prompt_cache_enabled=(experimental or config.protocol == 'claude'

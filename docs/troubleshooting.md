@@ -95,7 +95,7 @@ Test-Path $HOME\.lancher\lancher.yaml
 
 `ui.show_thinking_status` 只改变界面显示，不改变请求、模型能力或保存的思考协议。不同模型可以使用固定推理策略、默认推理或端点支持的可调策略，不能把界面开关理解成所有模型都支持的“深度思考开关”。
 
-Claude 协议未配置 `thinking` 时省略该请求参数，使用服务端的模型默认行为。`thinking.enabled` 与 `thinking.budget_tokens` 是给支持这套参数的兼容模型手动配置的：启用时预算包含在总输出额度内且必须更小；显式 `enabled: false` 才发送禁用请求。遇到模型拒绝该参数，应按端点支持的配置处理，不能通过切换界面的思考显示解决。配置入口见 [配置](configuration.md)。
+模型参数统一使用 `reasoning_effort`，默认 `auto`；在供应商设置中“发现模型”可读取实际能力，设置页会注明信息获取时间。支持自适应推理的声明触发 adaptive，未知字段沿用服务端默认；没有型号、归属或域名推断。未声明档位范围时，显式档位由端点校验。需要 Responses 的 OpenAI 端点可在高级连接选项中明确选择。旧 `thinking.enabled` 与 `thinking.budget_tokens` 读取时忽略、保存时移除；界面的思考显示开关仍只影响显示。详见 [模型发现](workflows/model-discovery.md)及[配置](configuration.md#自动推理与-effort)。
 
 ### 工具执行失败（结构化错误）
 

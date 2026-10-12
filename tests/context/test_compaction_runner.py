@@ -111,7 +111,7 @@ async def test_format_retry_uses_two_accounted_requests_and_completes_same_manua
         assert first.max_output_tokens == retry.max_output_tokens
         assert first.cancellation_token is retry.cancellation_token
         assert all(request.purpose == "compaction" and not request.allow_tool_calls
-                   and request.tools == [] and request.thinking is None for request in provider.requests)
+                   and request.tools == [] and request.reasoning_effort == "auto" for request in provider.requests)
         assert session.usage_summary().request_count == 2
         assert session.usage_summary().total_tokens == session._usage_tracker.snapshot().total_tokens == 410
     finally:

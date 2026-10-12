@@ -14,6 +14,8 @@ from lancher_code.config.models import AppConfig, RuntimeConfig, UIConfig
 from lancher_code.permissions.models import PermissionRule
 from lancher_code.permissions.storage import PermissionStorage
 from lancher_code.mcp.config import MCPConfigValidationError, validate_server_config
+from lancher_code.providers.discovery import ModelDiscoveryClient, ModelDiscoveryResult
+from lancher_code.providers.models import ProviderDefinition
 
 
 class SettingsError(ValueError):
@@ -41,6 +43,7 @@ class SettingsService:
         global_mcp_path: Path,
         project_mcp_path: Path,
         permission_storage: PermissionStorage,
+        model_discovery: ModelDiscoveryClient | None = None,
     ) -> None:
         self.config_path = config_path
         self.global_mcp_path = global_mcp_path
@@ -48,6 +51,10 @@ class SettingsService:
         self.permission_storage = permission_storage
         # 服务与本次应用运行同寿命；关闭设置页不会清除待重启状态。
         self.mcp_restart_required = False
+        self.model_discovery = model_discovery or ModelDiscoveryClient()
+
+    async def discover_models(self, provider: ProviderDefinition, *, refresh: bool = False) -> ModelDiscoveryResult:
+        return await self.model_discovery.discover(provider, refresh=refresh)
 
     def load(self) -> SettingsSnapshot:
         try:

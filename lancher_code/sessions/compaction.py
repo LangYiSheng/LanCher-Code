@@ -43,6 +43,8 @@ async def prepare_compaction(
     class SummaryProvider:
         def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
             outgoing = copy.copy(request)
+            outgoing.reasoning_effort = config.reasoning_effort
+            outgoing.api_mode = config.api_mode
             outgoing.experimental_mcp_tool_append = experimental
             outgoing.prompt_cache_enabled = experimental or (
                 config.protocol == 'claude' and urlsplit(config.base_url).hostname == 'api.anthropic.com')

@@ -11,6 +11,7 @@ import yaml
 from lancher_code.config.loader import load_config_data
 from lancher_code.errors import ConfigError
 from lancher_code.config.models import AppConfig
+from lancher_code.providers.metadata import serialize_metadata
 
 
 def serialize_config(config: AppConfig) -> dict[str, Any]:
@@ -22,15 +23,14 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
             if model.display_name:
                 model_data["display_name"] = model.display_name
             # 缺省覆盖继续缺省，避免把继承结果固化为模型自己的配置。
-            for key in ("protocol", "base_url", "api_key", "timeout_seconds", "context_window", "max_output_tokens"):
+            for key in ("protocol", "base_url", "api_key", "timeout_seconds", "context_window", "max_output_tokens", "api_mode"):
                 value = getattr(model, key)
                 if value is not None:
                     model_data[key] = value
-            if model.thinking is not None:
-                thinking_data: dict[str, Any] = {"enabled": model.thinking.enabled}
-                if model.thinking.budget_tokens is not None:
-                    thinking_data["budget_tokens"] = model.thinking.budget_tokens
-                model_data["thinking"] = thinking_data
+            if model.reasoning_effort != "auto":
+                model_data["reasoning_effort"] = model.reasoning_effort
+            if model.metadata is not None:
+                model_data["metadata"] = serialize_metadata(model.metadata)
             models_data[model_id] = model_data
         providers_data[provider_id] = {
             "name": provider.name,
@@ -40,6 +40,8 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
             "timeout_seconds": provider.timeout_seconds,
             "models": models_data,
         }
+        if provider.api_mode != "auto":
+            providers_data[provider_id]["api_mode"] = provider.api_mode
 
     return {
         "providers": providers_data,

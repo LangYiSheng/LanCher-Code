@@ -24,9 +24,9 @@ Claude 兼容协议保存 `thinking` 的文字和 `signature`，也保存不可�
 
 `ui.show_thinking_status` 只控制界面是否显示思考轨迹，关闭后模型请求、推理能力和思考协议历史不变，工具活动也继续显示。模型是否推理、能否控制推理及其强度，由具体模型与端点决定；不能用一个通用“思考开关”概括所有深度思考模型。
 
-Claude 协议的模型未配置 `thinking` 时，请求省略这个参数，由服务端按该模型的默认策略处理。需要手动配置的兼容模型可以使用 `thinking.enabled` 与 `thinking.budget_tokens`：启用时发送手动思考预算，显式配置 `enabled: false` 时发送禁用请求。它们只适用于支持这套参数的端点，不保证任意模型都支持启用或禁用，也不代表开启界面显示就会启用模型思考。
+模型推理设置使用 `reasoning_effort`，默认 `auto`。供应商发现得到的模型信息明确声明 adaptive 时自动启用自适应推理；仅声明旧版 enabled 时由应用分配接口额度。effort 范围及默认值读取端点声明，缺失字段保持未知；不根据型号、品牌或域名推断。详情见[模型发现](model-discovery.md)。
 
-手动思考预算包含在单次总输出额度内，必须小于 `max_output_tokens`，不会额外叠加在正文额度之上。详细配置见 [配置](../configuration.md)。
+effort 调整速度与深度的取舍，不是硬 token 预算；所有推理输出都包含在 `max_output_tokens` 总额度内。旧 `thinking.enabled` / `thinking.budget_tokens` 读取时忽略、保存时移除。详细配置与具体模型支持范围见 [配置](../configuration.md#自动推理与-effort)。
 
 ## JSON 被截断时，怎样继续
 

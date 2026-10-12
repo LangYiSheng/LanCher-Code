@@ -7,7 +7,7 @@ import pytest
 
 from lancher_code.errors import ProviderPromptTooLongError, ProviderResponseError
 from lancher_code.contracts.messages import ChatRequest, ContentBlock, ConversationMessage
-from lancher_code.providers.models import ThinkingConfig
+
 from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.providers.claude import ClaudeProvider
 from lancher_code.usage.ledger import RunUsageTracker
@@ -77,7 +77,7 @@ async def test_claude_preserves_complete_thinking_exchange_and_original_tool_id(
     transport = httpx.MockTransport(handler)
     provider = ClaudeProvider(claude_provider_config,
                               client_factory=lambda: httpx.AsyncClient(transport=transport))
-    request = _request(thinking=ThinkingConfig(enabled=True, budget_tokens=512))
+    request = _request(reasoning_effort="auto")
     events = [event async for event in provider.stream_chat(request)]
     blocks = events[-1].assistant_blocks
     assert events[-1].response_complete is True
@@ -185,20 +185,20 @@ async def test_claude_output_limit_delivers_terminal_when_tool_identity_is_trunc
     assert tracker.records[0].status == "incomplete"
 
 
-def _request(*, thinking: ThinkingConfig | None = None, allow_tool_calls: bool = True) -> ChatRequest:
+def _request(*, reasoning_effort: str | None = None, allow_tool_calls: bool = True) -> ChatRequest:
     return ChatRequest(
-        model="claude-test",
+        model="claude-sonnet-4-6",
         system=["稳定系统提示词", "环境提示词"],
         messages=[ConversationMessage.text_message("user", "你好")],
         tools=[ToolDefinition(name="read_file", description="读取文件", input_schema={"type": "object"})],
         allow_tool_calls=allow_tool_calls,
-        thinking=thinking,
+        reasoning_effort=reasoning_effort,
     )
 
 
-def test_claude_omits_unconfigured_thinking_and_uses_roomy_output_default(claude_provider_config):
+def test_claude_defaults_to_adaptive_thinking_and_roomy_output(claude_provider_config):
     payload = ClaudeProvider(claude_provider_config)._build_payload(_request())
-    assert "thinking" not in payload
+    assert payload["thinking"] == {"type": "adaptive"}
     assert payload["max_tokens"] == 32768
 
 
@@ -206,7 +206,7 @@ def test_claude_omits_unconfigured_thinking_and_uses_roomy_output_default(claude
 async def test_claude_provider_streams_text_thinking_and_usage(claude_provider_config) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
-        assert payload["thinking"]["type"] == "enabled"
+        assert payload["thinking"]["type"] == "adaptive"
         assert payload["system"] == "稳定系统提示词\n\n环境提示词"
         assert payload["tools"][0]["name"] == "read_file"
         body = _build_sse_payload(
@@ -241,7 +241,7 @@ async def test_claude_provider_streams_text_thinking_and_usage(claude_provider_c
         client_factory=lambda: httpx.AsyncClient(transport=transport, timeout=30.0),
     )
 
-    events = [event async for event in provider.stream_chat(_request(thinking=ThinkingConfig(enabled=True, budget_tokens=512)))]
+    events = [event async for event in provider.stream_chat(_request(reasoning_effort="auto"))]
 
     assert [event.kind for event in events] == ["message_start", "thinking_delta", "text_delta", "message_end"]
     assert "".join(event.text or "" for event in events if event.kind == "text_delta") == "你好"
@@ -353,7 +353,7 @@ async def test_claude_provider_parses_tool_call_deltas(claude_provider_config) -
 @pytest.mark.asyncio
 async def test_claude_provider_serializes_multi_block_user_content(claude_provider_config) -> None:
     request = ChatRequest(
-        model="claude-test",
+        model="claude-sonnet-4-6",
         system=["稳定系统提示词"],
         messages=[
             ConversationMessage(
@@ -408,7 +408,7 @@ async def test_claude_provider_serializes_parallel_tool_results_in_next_user_mes
     claude_provider_config,
 ) -> None:
     request = ChatRequest(
-        model="claude-test",
+        model="claude-sonnet-4-6",
         messages=[
             ConversationMessage(
                 role="assistant",
@@ -482,10 +482,10 @@ async def test_claude_provider_serializes_parallel_tool_results_in_next_user_mes
 
 
 @pytest.mark.asyncio
-async def test_claude_provider_disables_thinking_when_config_disabled(claude_provider_config) -> None:
+async def test_claude_provider_uses_adaptive_thinking_without_user_toggle(claude_provider_config) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
-        assert payload["thinking"]["type"] == "disabled"
+        assert payload["thinking"]["type"] == "adaptive"
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -513,7 +513,7 @@ async def test_claude_provider_disables_thinking_when_config_disabled(claude_pro
         client_factory=lambda: httpx.AsyncClient(transport=transport, timeout=30.0),
     )
 
-    events = [event async for event in provider.stream_chat(_request(thinking=ThinkingConfig(enabled=False, budget_tokens=512)))]
+    events = [event async for event in provider.stream_chat(_request(reasoning_effort="auto"))]
 
     assert [event.kind for event in events] == ["message_start", "text_delta", "message_end"]
     assert events[1].text == "正常正文"

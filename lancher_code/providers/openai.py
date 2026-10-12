@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from copy import deepcopy
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -16,6 +15,7 @@ from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
 from lancher_code.providers.native_tools import grouped_tool_updates
 from lancher_code.providers.responses import ResponsesProvider
+from lancher_code.providers.reasoning import reasoning_parameters, resolve_api_mode
 from lancher_code.usage.ledger import RequestUsageStatus
 
 logger = get_logger("providers.openai")
@@ -23,7 +23,7 @@ logger = get_logger("providers.openai")
 
 class OpenAIProvider(BaseChatProvider):
     async def stream_chat(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
-        if request.experimental_mcp_tool_append:
+        if self._use_responses(request):
             provider = self._responses()
             stream = provider.stream_chat(request)
             try:
@@ -205,7 +205,7 @@ class OpenAIProvider(BaseChatProvider):
         return deepcopy(blocks)
 
     def _build_payload(self, request: ChatRequest) -> dict[str, object]:
-        if request.experimental_mcp_tool_append:
+        if self._use_responses(request):
             return self._responses()._build_payload(request)
         grouped_tool_updates(request)
         payload: dict[str, object] = {
@@ -222,11 +222,17 @@ class OpenAIProvider(BaseChatProvider):
         if request.max_output_tokens is not None:
             if type(request.max_output_tokens) is not int or request.max_output_tokens <= 0:
                 raise ProviderRequestError("输出 token 上限必须为正整数。")
-            # 官方接口的新参数包含推理输出；兼容端点继续使用其通用旧字段。
-            limit_field = ("max_completion_tokens" if urlsplit(self.config.base_url).hostname == "api.openai.com"
-                           else "max_tokens")
-            payload[limit_field] = request.max_output_tokens
+            mode = resolve_api_mode('openai', self._model_metadata(request),
+                                    request.api_mode if request.api_mode is not None else self.config.api_mode)
+            payload['max_completion_tokens' if mode == 'chat_completions' else 'max_tokens'] = request.max_output_tokens
+        payload.update(reasoning_parameters(protocol="openai", metadata=self._model_metadata(request),
+                       effort=self.config.reasoning_effort if request.reasoning_effort is None else request.reasoning_effort,
+                       max_tokens=request.max_output_tokens or 32768))
         return payload
+
+    def _use_responses(self, request: ChatRequest) -> bool:
+        return request.experimental_mcp_tool_append or resolve_api_mode(
+            "openai", self._model_metadata(request), request.api_mode if request.api_mode is not None else self.config.api_mode) == "responses"
 
     def _responses(self) -> ResponsesProvider:
         provider = getattr(self, "_responses_provider", None)

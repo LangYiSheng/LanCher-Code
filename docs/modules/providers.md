@@ -9,7 +9,7 @@
 ## 配置与模型解析
 
 - `providers.models.ProviderDefinition` 保存供应商名称、公共协议、Base URL、API Key、超时和模型目录。
-- `providers.models.ModelDefinition` 保存 API 模型名、可选显示名、连接覆盖以及上下文窗口/thinking。`None` 表示继承供应商的对应连接字段。
+- `providers.models.ModelDefinition` 保存 API 模型名、可选显示名、连接覆盖以及上下文窗口/推理强度。`None` 表示继承供应商的对应连接字段。
 - `config.models.AppConfig.providers` 与 `default_model` 是配置源；不再维护单供应商快照。
 - `providers.catalog.resolve_model(providers, ref)` 逐字段合并覆盖、展开环境变量，产生独立的 `ProviderConfig`。原配置保留变量原文和缺省字段，`ref` 为稳定的 `供应商ID/模型ID`。
 - `model_display_name()` 优先显示模型的 `display_name`，否则显示 `model_name (供应商名称)`；显示名称不发送给 API。
@@ -21,7 +21,11 @@
 | 文件 | 内容 |
 |---|---|
 | `base.py` | `ChatProvider` 协议、`BaseChatProvider` 基类（SSE 解析、错误分类、用量统计、消息序列化辅助） |
-| `openai.py` | `OpenAIProvider`：`POST {base_url}/chat/completions` |
+| `openai.py` | `OpenAIProvider`：依据配置或能力声明选择 Chat Completions / Responses |
+| `reasoning.py` | 端点声明的模型能力、effort 校验与各协议推理字段，不使用型号表 |
+| `metadata.py` | 身份与能力信息的统一格式、连接绑定及配置快照 |
+| `discovery.py` | 模型列表读取、分页、连接隔离缓存和明确错误 |
+| `responses.py` | Responses 流式请求、推理签名、工具调用与用量 |
 | `claude.py` | `ClaudeProvider`：`POST {base_url}/messages` |
 | `factory.py` | `create_provider(config)`：按 `config.protocol` 返回对应实现 |
 
@@ -44,7 +48,8 @@
 
 - URL：`{base_url}/chat/completions`，Header：`Authorization: Bearer <api_key>`
 - Payload：`model`、`messages`（system 提示作为独立 system 消息）、`stream: true`、`stream_options: {include_usage: true}`、本次请求预算对应的输出上限、可选 `tools`（`type: function`）
-- 输出上限按 URL 主机精确选择字段：官方 `api.openai.com` 使用 `max_completion_tokens`，其他兼容端点使用 `max_tokens`，不根据模型名字猜测；原因是 [OpenAI 已弃用 `max_tokens`，且推理模型存在兼容限制](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)，而 [DeepSeek 明确使用 `max_tokens`](https://api-docs.deepseek.com/quick_start/agent_integrations/oh_my_pi/)。两种字段都发送同一个内部请求预算，只发送其中一种。
+- 输出字段按接口形式选择：标准聊天发送 `max_completion_tokens`、兼容聊天发送 `max_tokens`、Responses 发送 `max_output_tokens`。接口由 `api_mode` 或端点的 `supported_endpoints` 声明决定，没有品牌、域名或型号分支。缺少声明时 auto 使用兼容聊天；需要 Responses 的端点可在设置中明确选择。
+- effort 读取端点声明的范围与默认值，或使用用户显式设置。聊天协议发送 `reasoning_effort`，Responses 发送 `reasoning.effort`；未声明且没有显式设置时不发送推理参数。
 - 工具调用：`delta.tool_calls[].function.{name, arguments}`，参数为 JSON 字符串分片
 - 思考：`delta.reasoning_content` 或 `delta.reasoning`
 - 结束标记：SSE 数据 `[DONE]`；用量从 `chunk.usage` 读取，保留字段是否上报，支持缓存与推理子项。没有 usage 不能补为零。
@@ -52,7 +57,7 @@
 ### Anthropic（内部协议值 `claude`，`claude.py`）
 
 - URL：`{base_url}/messages`，Header：`x-api-key: <api_key>`、`anthropic-version: 2023-06-01`
-- Payload：`model`、`system`（字符串拼接）、`max_tokens`（本次请求的实际总输出预算）、`stream: true`、可选 `thinking`（显式手动配置时发送 enabled/disabled + budget_tokens；省略则使用服务端默认）、可选 `tools`（`input_schema`）
+- Payload：`model`、`system`（字符串拼接）、`max_tokens`（本次请求的实际总输出预算）、`stream: true`、可选 `thinking`（声明 adaptive 则启用自适应；仅声明 enabled 时内部自动分配额度；未知则省略）、可选 `output_config.effort`、可选 `tools`（`input_schema`）
 - 事件类型：`message_start` / `content_block_start`（tool_use 整体给出 input 时直接产出完整参数）/ `content_block_delta`（text_delta / thinking_delta / input_json_delta）/ `message_delta`（usage）/ `message_stop` / `error`
 - 用量合并：`input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 记为总输入，缓存读取/创建同时作为子项保存。缺少输入分量则保留部分上报标记；开始帧的输出不当作最终确认。
 
@@ -80,7 +85,7 @@
 
 | 方向 | 说明 |
 |---|---|
-| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / thinking / work_phase / execution_access / cancellation_token / max_output_tokens / 请求归属） |
+| 输入 | `ChatRequest`（model / system / messages / tools / allow_tool_calls / reasoning_effort / work_phase / execution_access / cancellation_token / max_output_tokens / 请求归属） |
 | 输出 | `StreamEvent` 异步迭代器 |
 
 正常结束事件必须显式携带 `response_complete=True` 和非空缺的 `assistant_blocks`；未设置完成标记默认不完整，不从文本增量补造终态。`assistant_blocks` 是单次完整助手响应，包含原始思考、签名或加密数据、正文和真实工具调用。`response_complete` 区分完整结束与提前 EOF。Claude 兼容协议按内容块顺序回传；OpenAI 兼容协议保留 `reasoning_content`／`reasoning` 的字段来源，避免把展示思考误当完整协议。
@@ -93,9 +98,9 @@
 - ← `TurnRunner.configure_models/switch_model/reload_models`：协调模型目录、协议适配器和会话有效配置的切换；正在响应或压缩时禁止切换
 - ← `agent/streaming.py`：`collect_response()` 消费流事件并验证完整响应
 - ← `context/compaction.py`：摘要压缩请求也走 `stream_chat()`
-- ← `context/request.py`：`build_request()` 只在 claude 协议下启用 thinking
+- ← `context/request.py`：`build_request()` 携带当前模型的 reasoning_effort；供应商按已确认能力适配请求
 
-切换保留协议无关 transcript、消息、工具结果和权限；模型、thinking、context_window 一起更新，同时清除旧模型的 token 校准锚点和压缩失败计数。工具历史由当前协议重新序列化，OpenAI 会把同一批工具结果逐条展开为 `tool` 消息。摘要压缩也使用当前主模型，不另设摘要模型。
+切换保留协议无关 transcript、消息、工具结果和权限；模型、reasoning_effort、context_window 一起更新，同时清除旧模型的 token 校准锚点和压缩失败计数。工具历史由当前协议重新序列化，OpenAI 会把同一批工具结果逐条展开为 `tool` 消息。摘要压缩也使用当前主模型，不另设摘要模型。
 
 ## 如何新增一个协议
 
@@ -108,5 +113,5 @@
 ## 注意事项
 
 - 每个请求都会用 `client_factory()` 新建一个 `httpx.AsyncClient`（默认按 `timeout_seconds` 配置）。
-- 输出上限使用当前请求预算；thinking 开启时，思考预算也必须适合实际输出额度。
+- 输出上限包含推理、正文和工具参数，effort 不额外增加总额度。模型能力与档位见 [配置说明](../configuration.md#自动推理与-effort)。
 - 流式解析基于逐行 SSE（`iter_sse_events`），兼容 `event:` / `data:` 分段与 `:` 注释行。

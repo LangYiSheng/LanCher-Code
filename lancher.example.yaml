@@ -16,6 +16,7 @@ providers:
         # 单次总输出额度包含思考、正文和工具参数；小窗口缺省会自动适配。
         # 显式额度需符合供应商上限，并为上下文输入留出空间。
         max_output_tokens: 32768
+        reasoning_effort: auto # 读取端点声明的能力，缺少字段时使用服务端默认
         # 未填写的连接参数继承供应商。
       reasoner:
         model_name: deepseek-reasoner
@@ -39,10 +40,8 @@ providers:
         api_key: ${ANTHROPIC_GATEWAY_API_KEY}
         context_window: 200000
         max_output_tokens: 32768
-        thinking:
-          enabled: false
-          # 启用时必须小于 max_output_tokens，思考预算包含在总输出内。
-          budget_tokens: 2048
+        # 在供应商设置中“发现模型”可读取别名对应的身份和能力，不按型号猜测。
+        reasoning_effort: auto
 
 # 新会话默认主模型；/model 切换当前会话不会修改这里。
 default_model: deepseek/chat

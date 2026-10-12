@@ -2,20 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
+from lancher_code.providers.metadata import ModelMetadata
 
 
 ProviderProtocol = Literal["openai", "claude"]
-
-
-@dataclass(slots=True)
-class ThinkingConfig:
-    enabled: bool = False
-    budget_tokens: int | None = None
-
-    @property
-    def effective_budget_tokens(self) -> int:
-        """容量预算与协议发送共享默认值，省略配置也不能预留成零。"""
-        return self.budget_tokens if self.budget_tokens is not None else 2048
 
 
 @dataclass(slots=True)
@@ -25,9 +15,11 @@ class ProviderConfig:
     base_url: str
     api_key: str
     timeout_seconds: float = 60.0
-    thinking: ThinkingConfig | None = None
+    reasoning_effort: str = "auto"
     context_window: int = 128000
     max_output_tokens: int | None = None
+    metadata: ModelMetadata | None = None
+    api_mode: str = "auto"
 
 
 @dataclass(slots=True)
@@ -41,8 +33,10 @@ class ModelDefinition:
     api_key: str | None = None
     timeout_seconds: float | None = None
     context_window: int | None = None
-    thinking: ThinkingConfig | None = None
+    reasoning_effort: str = "auto"
     max_output_tokens: int | None = None
+    metadata: ModelMetadata | None = None
+    api_mode: str | None = None
 
 
 @dataclass(slots=True)
@@ -53,3 +47,4 @@ class ProviderDefinition:
     api_key: str
     timeout_seconds: float = 60.0
     models: dict[str, ModelDefinition] = field(default_factory=dict)
+    api_mode: str = "auto"

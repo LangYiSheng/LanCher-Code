@@ -16,7 +16,7 @@ from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.errors import ContextCompactionError
 from lancher_code.providers.claude import ClaudeProvider
 from lancher_code.providers.factory import create_provider
-from lancher_code.providers.models import ThinkingConfig
+
 from lancher_code.sessions.codec import SessionCodec
 from lancher_code.sessions.controller import SessionController
 from lancher_code.sessions.storage import SessionRepositoryError
@@ -387,12 +387,13 @@ def test_context_details_are_read_only_for_runtime_anchor(openai_provider_config
 def test_thinking_output_cap_and_input_budget_share_actual_allowance(claude_provider_config):
     claude_provider_config.context_window = 16_000
     claude_provider_config.max_output_tokens = 12_000
-    claude_provider_config.thinking = ThinkingConfig(enabled=True, budget_tokens=8_000)
+    claude_provider_config.reasoning_effort = "high"
     session = SessionController(claude_provider_config)
     request = session.build_request([], allow_tool_calls=True)
     budget = context_budget(session.context_window, request.max_output_tokens)
 
-    assert request.max_output_tokens == 12_000 > request.thinking.budget_tokens
+    assert request.max_output_tokens == 12_000
+    assert request.reasoning_effort == "high"
     assert budget.output_tokens == request.max_output_tokens
     assert budget.input_limit + budget.output_tokens < session.context_window
 
@@ -401,15 +402,15 @@ def test_thinking_output_cap_and_input_budget_share_actual_allowance(claude_prov
     assert context_budget(session.context_window, request.max_output_tokens).input_limit == 0
 
 
-def test_default_thinking_budget_is_shared_by_capacity_and_provider(claude_provider_config):
+def test_adaptive_thinking_uses_total_output_allowance(claude_provider_config):
     claude_provider_config.context_window = 8_000
-    claude_provider_config.thinking = ThinkingConfig(enabled=True)
+    claude_provider_config.reasoning_effort = "auto"
     session = SessionController(claude_provider_config)
     request = session.build_request([], allow_tool_calls=True)
     payload = ClaudeProvider(claude_provider_config)._build_payload(request)
 
-    assert payload['thinking']['budget_tokens'] == request.thinking.effective_budget_tokens == 2_048
-    assert payload['max_tokens'] == request.max_output_tokens > 2_048
+    assert payload['thinking'] == {"type": "adaptive"}
+    assert payload['max_tokens'] == request.max_output_tokens
 
 
 @pytest.mark.asyncio

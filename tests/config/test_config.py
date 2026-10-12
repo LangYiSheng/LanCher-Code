@@ -65,8 +65,7 @@ def test_load_config_reads_thinking_defaults() -> None:
     config = load_config_data(raw)
     provider = _resolved(config)
     assert provider.protocol == "claude"
-    assert provider.thinking.enabled is True
-    assert provider.thinking.budget_tokens is None
+    assert provider.reasoning_effort == "auto"
     assert config.runtime.tool_loop_limit == 50
 
 

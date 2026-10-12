@@ -6,7 +6,6 @@ from lancher_code.contracts.control import ExecutionAccess, WorkPhase
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.providers.models import ProviderProtocol
-from lancher_code.providers.models import ThinkingConfig
 from lancher_code.usage.models import MessageUsage
 from typing import Callable
 from typing import Literal
@@ -114,7 +113,8 @@ class ChatRequest:
     messages: list[ConversationMessage] = field(default_factory=list)
     tools: list[ToolDefinition] = field(default_factory=list)
     allow_tool_calls: bool = True
-    thinking: ThinkingConfig | None = None
+    reasoning_effort: str | None = None
+    api_mode: str | None = None
     cancellation_token: CancellationToken | None = None
     work_phase: WorkPhase = "execute"
     execution_access: ExecutionAccess = "project"

@@ -154,7 +154,7 @@ async def test_config_bootstrap_error_scrolls_back_into_view(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_bootstrap_app_can_save_claude_thinking_settings(tmp_path) -> None:
+async def test_config_bootstrap_app_can_save_claude_reasoning_effort(tmp_path) -> None:
     config_path = tmp_path / "home" / ".lancher" / "lancher.yaml"
     app = ConfigBootstrapApp(config_path)
 
@@ -163,10 +163,10 @@ async def test_config_bootstrap_app_can_save_claude_thinking_settings(tmp_path) 
         protocol_select.value = "claude"
         await pilot.pause(0.05)
 
-        app.query_one("#model-input", Input).value = "claude-sonnet"
+        app.query_one("#model-input", Input).value = "claude-sonnet-4-6"
         app.query_one("#api-key-input", Input).value = "test-key"
-        app.query_one("#thinking-enabled", Checkbox).value = True
-        app.query_one("#thinking-budget-input", Input).value = "2048"
+        await pilot.pause()
+        app.query_one("#reasoning-effort-select", Select).value = "high"
         app.query_one("#max-output-tokens-input", Input).value = "65536"
         app._save()
         await pilot.pause(0.05)
@@ -175,9 +175,7 @@ async def test_config_bootstrap_app_can_save_claude_thinking_settings(tmp_path) 
     active = resolve_model(config.providers, config.default_model)
     assert active.protocol == "claude"
     assert active.base_url == "https://api.anthropic.com/v1"
-    assert active.thinking is not None
-    assert active.thinking.enabled is True
-    assert active.thinking.budget_tokens == 2048
+    assert active.reasoning_effort == "high"
     assert active.max_output_tokens == 65536
 
 
@@ -249,7 +247,7 @@ async def test_bootstrap_can_return_to_invalid_model_draft_after_editing_connect
         await pilot.press("ctrl+s")
         assert app._step == 1
         app.query_one("#model-input", Input).value = "sample-model"
-        app.query_one("#thinking-budget-input", Input).value = "invalid"
+        app.query_one("#max-output-tokens-input", Input).value = "invalid"
         await pilot.press("escape")
         assert app._step == 0
         await pilot.press("ctrl+s")

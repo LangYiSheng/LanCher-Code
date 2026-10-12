@@ -3,12 +3,14 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from collections.abc import Iterable, Mapping
 
 from lancher_code.context.budget import context_budget
 from lancher_code.errors import ConfigError
 from lancher_code.providers.models import ModelDefinition, ProviderConfig, ProviderDefinition
+from lancher_code.providers.metadata import ModelMetadata, bound_metadata, connection_fingerprint
+from lancher_code.providers.reasoning import validate_effort, reasoning_parameters, resolve_api_mode
 
 
 def iter_model_refs(providers: Mapping[str, ProviderDefinition]) -> list[str]:
@@ -51,27 +53,37 @@ def resolve_model(providers: Mapping[str, ProviderDefinition], model_ref: str) -
     timeout = model.timeout_seconds if model.timeout_seconds is not None else provider.timeout_seconds
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise ConfigError(f"{prefix}.timeout_seconds 必须是有限正数。")
-    context_window = model.context_window if model.context_window is not None else (200000 if protocol == "claude" else 128000)
+    model_name = _connection_string(model.model_name, f"{prefix}.model_name")
+    metadata = bound_metadata(model.metadata, protocol=protocol, model=model_name, base_url=base_url, api_key=api_key)
+    context_window = model.context_window if model.context_window is not None else (
+        metadata.context_window if metadata and metadata.context_window else (200000 if protocol == "claude" else 128000))
     if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window <= 0:
         raise ConfigError(f"{prefix}.context_window 必须是正整数。")
     max_output_tokens = model.max_output_tokens
     if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens <= 0):
         raise ConfigError(f"{prefix}.max_output_tokens 必须是正整数。")
+    if metadata and metadata.max_output_tokens:
+        if max_output_tokens is not None and max_output_tokens > metadata.max_output_tokens:
+            raise ConfigError(f"{prefix}.max_output_tokens 超过端点声明的单次输出上限 {metadata.max_output_tokens}。")
+        if max_output_tokens is None:
+            max_output_tokens = min(context_budget(context_window).output_tokens, metadata.max_output_tokens)
     budget = context_budget(context_window, max_output_tokens)
     if max_output_tokens is not None and max_output_tokens >= context_window:
         raise ConfigError(f"{prefix}.max_output_tokens 必须小于上下文窗口 context_window。")
-    thinking = deepcopy(model.thinking) if protocol == "claude" else None
-    if thinking is not None and thinking.enabled and thinking.effective_budget_tokens >= budget.output_tokens:
-        raise ConfigError(f"{prefix}.thinking.budget_tokens 必须小于总输出额度 max_output_tokens（当前 {budget.output_tokens}）。")
+    validate_effort(protocol, metadata, model.reasoning_effort, path=f"{prefix}.reasoning_effort")
+    reasoning_parameters(protocol=protocol, metadata=metadata,
+                         effort=model.reasoning_effort, max_tokens=budget.output_tokens)
     return ProviderConfig(
         protocol=protocol,
-        model=_connection_string(model.model_name, f"{prefix}.model_name"),
+        model=model_name,
         base_url=base_url,
         api_key=api_key,
         timeout_seconds=float(timeout),
         context_window=context_window,
         max_output_tokens=max_output_tokens,
-        thinking=thinking,
+        reasoning_effort=model.reasoning_effort,
+        metadata=metadata,
+        api_mode=resolve_api_mode(protocol, metadata, model.api_mode if model.api_mode is not None else provider.api_mode),
     )
 
 
@@ -91,3 +103,41 @@ def new_entry_id(name: str, existing_ids: Iterable[str]) -> str:
         candidate = f"{base}-{suffix}"
         suffix += 1
     return candidate
+
+
+def models_on_connection(provider: ProviderDefinition, fingerprint: str) -> dict[str, list[str]]:
+    """只认同一实际连接的 API 模型名；独立连接覆盖不被父供应商发现覆盖。"""
+    matches: dict[str, list[str]] = {}
+    for model_id, model in provider.models.items():
+        protocol = model.protocol if model.protocol is not None else provider.protocol
+        base_url = os.path.expandvars(model.base_url if model.base_url is not None else provider.base_url).strip().rstrip('/')
+        api_key = os.path.expandvars(model.api_key if model.api_key is not None else provider.api_key).strip()
+        if connection_fingerprint(protocol, base_url, api_key) == fingerprint:
+            matches.setdefault(os.path.expandvars(model.model_name).strip(), []).append(model_id)
+    return matches
+
+
+def merge_discovered_models(provider: ProviderDefinition, discovered: Iterable[ModelMetadata],
+                           selected: Iterable[str]) -> tuple[ProviderDefinition, int, int]:
+    """批量加入所选模型并刷新同源已有模型的信息，保留稳定 ID 和全部手动覆盖。"""
+    candidate = deepcopy(provider)
+    fingerprint = connection_fingerprint(provider.protocol, os.path.expandvars(provider.base_url).strip().rstrip('/'),
+                                         os.path.expandvars(provider.api_key).strip())
+    records = {model.id: model for model in discovered}
+    selected_ids = set(selected)
+    if not selected_ids <= records.keys() or any(model.source_fingerprint != fingerprint for model in records.values()):
+        raise ConfigError('模型发现结果与当前连接不一致，请重新发现后加入。')
+    existing = models_on_connection(candidate, fingerprint)
+    updated = added = 0
+    for model_name, metadata in records.items():
+        for model_id in existing.get(model_name, []):
+            model = candidate.models[model_id]
+            if model.metadata != metadata:
+                model.metadata = metadata
+                updated += 1
+        if model_name in selected_ids and model_name not in existing:
+            model_id = new_entry_id(model_name, candidate.models)
+            candidate.models[model_id] = ModelDefinition(model_name=model_name, display_name=metadata.display_name,
+                                                         metadata=metadata)
+            added += 1
+    return candidate, added, updated

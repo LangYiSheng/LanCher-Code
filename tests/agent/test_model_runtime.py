@@ -14,7 +14,8 @@ from lancher_code.providers.catalog import resolve_model
 from lancher_code.config.models import AppConfig
 from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent
 from lancher_code.context.models import ContextUsageAnchor
-from lancher_code.providers.models import ModelDefinition, ProviderConfig, ProviderDefinition, ThinkingConfig
+from lancher_code.providers.models import ModelDefinition, ProviderConfig, ProviderDefinition
+from lancher_code.providers.metadata import connection_fingerprint, parse_model_metadata
 from lancher_code.contracts.tools import ToolCall, ToolDefinition, ToolExecutionResult
 from lancher_code.providers.claude import ClaudeProvider
 from lancher_code.providers.openai import OpenAIProvider
@@ -46,9 +47,14 @@ def _catalog() -> AppConfig:
                 api_key="anthropic-secret-key",
                 models={
                     "sonnet": ModelDefinition(
-                        model_name="claude-sonnet",
+                        model_name="claude-sonnet-4-6",
                         context_window=200000,
-                        thinking=ThinkingConfig(enabled=True, budget_tokens=1024),
+                        reasoning_effort="auto",
+                        metadata=parse_model_metadata({'id': 'claude-sonnet-4-6', 'capabilities': {
+                            'thinking': {'types': {'adaptive': {'supported': True}}},
+                            'effort': {'supported_levels': ['low', 'medium', 'high', 'max']}}},
+                            fingerprint=connection_fingerprint('claude', 'https://anthropic.example/v1', 'anthropic-secret-key'),
+                            fetched_at='test'),
                     )
                 },
             ),
@@ -114,6 +120,21 @@ def _history(session: SessionController) -> None:
     ])
 
 
+def test_effort_reload_updates_provider_session_and_request_atomically(tmp_path):
+    runner, session, _, created, config = _runner(tmp_path)
+    runner.switch_model("anthropic/sonnet")
+    config.providers["anthropic"].models["sonnet"].reasoning_effort = "high"
+    assert not runner.reload_models(config)
+    assert created[-1].config.reasoning_effort == session.provider_config.reasoning_effort == "high"
+    assert session.build_request([], allow_tool_calls=True).reasoning_effort == "high"
+    invalid = deepcopy(config)
+    invalid.providers["anthropic"].models["sonnet"].reasoning_effort = "xhigh"
+    with pytest.raises(ConfigError, match="推理档位"):
+        runner.reload_models(invalid)
+    assert runner._models.provider is created[-1]
+    assert session.build_request([], allow_tool_calls=True).reasoning_effort == "high"
+
+
 def _quoted_tool_history(texts: list[str]) -> tuple[list[dict], list[dict]]:
     calls, results = [], []
     for text in texts:
@@ -172,8 +193,8 @@ async def test_switch_preserves_history_and_uses_new_model_for_next_request(tmp_
     assert session.context_window == 200000
     _ = [event async for event in runner.run_user_turn("继续")]
     assert initial.requests == []
-    assert created[0].requests[0].model == "claude-sonnet"
-    assert created[0].requests[0].thinking.enabled
+    assert created[0].requests[0].model == "claude-sonnet-4-6"
+    assert created[0].requests[0].reasoning_effort == "auto"
     request = created[0].requests[0]
     assert all(message.role != "tool" and all(block.kind == "text" for block in message.blocks)
                for message in request.messages)
@@ -257,7 +278,9 @@ async def test_switch_is_rejected_during_active_turn(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_manual_compaction_uses_new_model_and_prevents_switch(tmp_path: Path) -> None:
-    runner, session, _, created, _ = _runner(tmp_path)
+    runner, session, _, created, config = _runner(tmp_path)
+    config.providers["anthropic"].models["sonnet"].reasoning_effort = "high"
+    runner.reload_models(config)
     _history(session)
     # 已结束的长旧轮次可交给摘要，最新短请求仍须保留。
     completed = session.create_assistant_message()
@@ -277,7 +300,8 @@ async def test_manual_compaction_uses_new_model_and_prevents_switch(tmp_path: Pa
     finally:
         provider.release.set()
         result = await task
-    assert provider.requests[0].model == "claude-sonnet"
+    assert provider.requests[0].model == "claude-sonnet-4-6"
+    assert provider.requests[0].reasoning_effort == "high"
     assert not runner._manual_compaction
     assert result.after_tokens < result.before_tokens
     assert session.transcript[-1].blocks[-1].text == "继续检查下一项。"
@@ -409,7 +433,7 @@ async def test_http_switch_uses_inherited_and_overridden_connection_and_keeps_to
         ("deepseek/chat", "https://deepseek.example/v1/chat/completions", "openai", "deepseek-secret-key", "deepseek-chat"),
         ("deepseek/reasoner", "https://model-override.example/custom/messages", "claude", "model-override-secret", "custom-anthropic-model"),
         ("deepseek/chat", "https://deepseek.example/v1/chat/completions", "openai", "deepseek-secret-key", "deepseek-chat"),
-        ("anthropic/sonnet", "https://anthropic.example/v1/messages", "claude", "anthropic-secret-key", "claude-sonnet"),
+        ("anthropic/sonnet", "https://anthropic.example/v1/messages", "claude", "anthropic-secret-key", "claude-sonnet-4-6"),
     ]
     seen: list[httpx.Request] = []
 
@@ -489,7 +513,7 @@ async def test_interrupted_tools_are_paired_before_cross_protocol_switch(tmp_pat
             event = {"choices": [{"delta": {"tool_calls": [tool_call]}}]}
             content = f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n"
         else:
-            assert payload["model"] == "claude-sonnet"
+            assert payload["model"] == "claude-sonnet-4-6"
             calls = [block["id"] for message in payload["messages"] for block in message["content"] if block["type"] == "tool_use"]
             results = [block for message in payload["messages"] for block in message["content"] if block["type"] == "tool_result"]
             assert calls == results == []

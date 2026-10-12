@@ -11,7 +11,8 @@ from lancher_code.errors import ConfigError
 from lancher_code.execution.contracts import CommandProfile, ExecutionConfig, ExecutionLimits, ReadinessProbe, ResourceClaim
 from lancher_code.providers.catalog import iter_model_refs, resolve_model
 from lancher_code.config.models import AppConfig, RuntimeConfig, UIConfig
-from lancher_code.providers.models import ModelDefinition, ProviderDefinition, ProviderProtocol, ThinkingConfig
+from lancher_code.providers.models import ModelDefinition, ProviderDefinition, ProviderProtocol
+from lancher_code.providers.metadata import API_MODES, load_metadata
 
 SUPPORTED_PROTOCOLS: tuple[ProviderProtocol, ...] = ("openai", "claude")
 
@@ -177,6 +178,7 @@ def _load_provider(raw: Any, path: str) -> ProviderDefinition:
         api_key=_require_non_empty_string(raw, "api_key", f"{path}.api_key"),
         timeout_seconds=_read_positive_float(raw.get("timeout_seconds", 60.0), f"{path}.timeout_seconds"),
         models=models,
+        api_mode=_load_api_mode(raw.get("api_mode", "auto"), f"{path}.api_mode"),
     )
 
 
@@ -195,27 +197,17 @@ def _load_model(raw: Any, path: str) -> ModelDefinition:
         timeout_seconds=_read_positive_float(raw["timeout_seconds"], f"{path}.timeout_seconds") if raw.get("timeout_seconds") is not None else None,
         context_window=_read_positive_int(raw["context_window"], f"{path}.context_window") if raw.get("context_window") is not None else None,
         max_output_tokens=_read_positive_int(raw["max_output_tokens"], f"{path}.max_output_tokens") if raw.get("max_output_tokens") is not None else None,
-        thinking=_load_thinking(raw.get("thinking"), f"{path}.thinking"),
+        # 旧 thinking.enabled/budget_tokens 不再生效；保存时移除，统一使用自动推理。
+        reasoning_effort=raw.get("reasoning_effort", "auto"),
+        metadata=load_metadata(raw.get("metadata"), f"{path}.metadata"),
+        api_mode=_load_api_mode(raw["api_mode"], f"{path}.api_mode") if raw.get("api_mode") is not None else None,
     )
 
 
-def _load_thinking(raw_value: Any, path: str = "thinking") -> ThinkingConfig | None:
-    if raw_value is None:
-        return None
-    if not isinstance(raw_value, dict):
-        raise ConfigError(f"{path} 配置必须是对象。")
-
-    enabled = raw_value.get("enabled", False)
-    if not isinstance(enabled, bool):
-        raise ConfigError(f"{path}.enabled 必须是布尔值。")
-    budget_tokens_raw = raw_value.get("budget_tokens")
-    budget_tokens: int | None = None
-    if budget_tokens_raw is not None:
-        if isinstance(budget_tokens_raw, bool) or not isinstance(budget_tokens_raw, int) or budget_tokens_raw <= 0:
-            raise ConfigError(f"{path}.budget_tokens 必须是正整数。")
-        budget_tokens = budget_tokens_raw
-
-    return ThinkingConfig(enabled=enabled, budget_tokens=budget_tokens)
+def _load_api_mode(value: Any, path: str) -> str:
+    if not isinstance(value, str) or value not in API_MODES:
+        raise ConfigError(f"{path} 必须是 auto、chat_completions、chat_completions_legacy 或 responses。")
+    return value
 
 
 def _load_ui(raw_value: dict[str, Any]) -> UIConfig:

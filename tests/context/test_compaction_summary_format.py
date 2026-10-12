@@ -178,7 +178,7 @@ async def test_bad_structure_regenerates_once_from_same_history_and_binds_each_r
     assert first.max_output_tokens == second.max_output_tokens == context_budget(8192, purpose="compaction").output_tokens
     for request in bound:
         assert request.purpose == "compaction"
-        assert request.tools == [] and not request.allow_tool_calls and request.thinking is None
+        assert request.tools == [] and not request.allow_tool_calls and request.reasoning_effort is None
         assert request.cancellation_token is token
 
 
@@ -263,7 +263,7 @@ async def test_format_retry_cannot_exceed_input_budget() -> None:
     history = _history()
     request = ChatRequest(model="test", system=[SUMMARY_SYSTEM_PROMPT],
                           messages=[*history, ConversationMessage.text_message("user", SUMMARY_REQUEST_PROMPT)],
-                          tools=[], allow_tool_calls=False, thinking=None,
+                          tools=[], allow_tool_calls=False, reasoning_effort=None,
                           max_output_tokens=budget.output_tokens, purpose="compaction")
     # 为首次请求留下极少余量，新增的重试反馈必须被真实预算检查拦住。
     current = estimate_request_tokens(request, ContextManagementState())

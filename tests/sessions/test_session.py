@@ -378,9 +378,7 @@ def test_session_controller_for_claude_includes_thinking(claude_provider_config)
 
     request = controller.build_request([], allow_tool_calls=True)
 
-    assert request.thinking is not None
-    assert request.thinking.enabled is True
-    assert request.thinking.budget_tokens == 512
+    assert request.reasoning_effort == "auto"
 
 
 def test_session_controller_totals_usage(openai_provider_config) -> None:

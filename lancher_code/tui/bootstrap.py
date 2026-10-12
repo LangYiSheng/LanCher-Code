@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from math import isfinite
+import os
 from pathlib import Path
 from typing import Any
 
-from textual import on
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Checkbox, Collapsible, Input, Select, Static
@@ -15,6 +16,11 @@ from lancher_code.tui.theme import apply_theme
 from lancher_code.errors import ConfigError
 from lancher_code.mcp.template import ensure_user_mcp_config
 from lancher_code.providers.catalog import new_entry_id
+from lancher_code.providers.reasoning import API_MODE_OPTIONS, EFFORT_LABELS, EFFORT_LEVELS, reasoning_capabilities
+from lancher_code.providers.discovery import ModelDiscoveryClient, discovery_connection
+from lancher_code.providers.models import ProviderDefinition
+from lancher_code.providers.metadata import bound_metadata, serialize_metadata
+from lancher_code.tui.model_discovery import ModelDiscoveryScreen
 
 PROTOCOL_OPTIONS = [("OpenAI", "openai"), ("Anthropic", "claude")]
 DEFAULT_BASE_URLS = {
@@ -63,7 +69,6 @@ class ConfigBootstrapApp(App[int]):
     Checkbox { height: 1; border: none; padding: 0; color: $text; background: transparent; }
     Checkbox:focus { border: none; color: $background; background: $foreground; background-tint: transparent; }
     Checkbox:focus > .toggle--label { color: $background; background: $foreground; text-style: none; }
-    #claude-thinking { height: auto; }
     #bootstrap-summary, #bootstrap-path { height: auto; margin-bottom: 1; }
     #bootstrap-path { color: $text-muted; }
     #bootstrap-footer { width: 100%; height: auto; align-horizontal: center; }
@@ -80,10 +85,15 @@ class ConfigBootstrapApp(App[int]):
 
     NARROW_WIDTH = 48
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, *, model_discovery: ModelDiscoveryClient | None = None) -> None:
         super().__init__()
         self._config_path = config_path
         self._step = 0
+        self._model_discovery = model_discovery or ModelDiscoveryClient()
+        self._discovered_models = []
+        self._discovery_generation = 0
+        self._discovery_worker = None
+        self._bootstrap_screen = None
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="bootstrap-scroll"):
@@ -104,10 +114,14 @@ class ConfigBootstrapApp(App[int]):
                     yield Static("API Key", classes="field-label")
                     yield Input(password=True, placeholder="支持 ${环境变量名}", id="api-key-input", classes="field-input")
                     with Collapsible(title="高级连接选项", collapsed=True, id="advanced-panel"):
+                        yield Static("OpenAI 接口形式", classes="field-label")
+                        yield Select(API_MODE_OPTIONS, value="auto", allow_blank=False, id="api-mode-select", classes="field-input")
                         yield Static("请求超时（秒）", classes="field-label")
                         yield Input(value="60", id="timeout-input", classes="field-input")
                 with Vertical(id="setup-model", classes="setup-page"):
                     yield Static("", id="setup-model-parent", classes="setup-hint", markup=False)
+                    yield Button("发现模型…", id="bootstrap-discover")
+                    yield Static("", id="bootstrap-discovery-status", classes="setup-hint", markup=False)
                     yield Static("API 模型名称", classes="field-label")
                     yield Input(placeholder=MODEL_PLACEHOLDERS["openai"], id="model-input", classes="field-input")
                     yield Static("显示名称（可选）", classes="field-label")
@@ -116,12 +130,10 @@ class ConfigBootstrapApp(App[int]):
                         yield Static("以后可在设置中添加模型，或为单个模型覆盖连接参数。", classes="setup-hint")
                         yield Static("单次总输出额度（token，可选）", classes="field-label")
                         yield Input(placeholder="默认 32768；包含思考、正文和工具参数", id="max-output-tokens-input", classes="field-input")
-                        yield Static("OpenAI 兼容协议使用模型和服务端的推理默认行为；思考轨迹显示可在外观设置中调整。", classes="setup-hint")
-                        with Vertical(id="claude-thinking"):
-                            yield Checkbox("启用 Anthropic 手动思考预算", id="thinking-enabled")
-                            yield Static("仅适用于支持手动 thinking 的模型，不控制思考轨迹显示。", classes="setup-hint")
-                            yield Static("手动思考预算（可选）", classes="field-label")
-                            yield Input(placeholder="例如 2048", id="thinking-budget-input", classes="field-input")
+                        yield Static("推理强度（effort）", classes="field-label")
+                        yield Select([("自动（推荐）", "auto")], value="auto", allow_blank=False, id="reasoning-effort-select", classes="field-input")
+                        yield Static("", id="reasoning-help", classes="setup-hint", markup=False)
+                        yield Static("思考轨迹显示可在外观设置中调整。", classes="setup-hint")
                 with Vertical(id="setup-confirm", classes="setup-page"):
                     yield Static("", id="bootstrap-summary", markup=False)
                     yield Static("首次对话和新对话默认都会使用这个模型。以后可以分别更改。", classes="setup-hint")
@@ -135,6 +147,7 @@ class ConfigBootstrapApp(App[int]):
             yield Static("Esc 返回 · Ctrl+S 继续", id="bootstrap-help")
 
     def on_mount(self) -> None:
+        self._bootstrap_screen = self.screen
         apply_theme(self, "dark")
         self._sync_protocol_fields("openai")
         self._show_step(0)
@@ -142,6 +155,11 @@ class ConfigBootstrapApp(App[int]):
 
     def on_resize(self) -> None:
         self._refresh_responsive_layout()
+
+    def on_unmount(self) -> None:
+        self._discovery_generation += 1
+        if self._discovery_worker is not None:
+            self._discovery_worker.cancel()
 
     def _refresh_responsive_layout(self) -> None:
         self.query_one("#actions", Horizontal).set_class(self.size.width < self.NARROW_WIDTH, "-narrow")
@@ -159,7 +177,8 @@ class ConfigBootstrapApp(App[int]):
         model = self.query_one("#model-input", Input).value.strip()
         display = self.query_one("#model-display-input", Input).value.strip() or model
         self.query_one("#setup-model-parent", Static).update(f"所属供应商：{provider}\n此模型共用该供应商的地址和 API Key。")
-        self.query_one("#bootstrap-summary", Static).update(f"供应商  {provider}\n  地址  {self.query_one('#base-url-input', Input).value}\n  └ 模型  {display}\n      API 名称  {model}\n\n本次对话使用  {display}\n新对话默认    {display}")
+        count = len(self._build_raw_config()['providers'][new_entry_id(provider, ())]['models']) if step == 2 else 0
+        self.query_one("#bootstrap-summary", Static).update(f"供应商  {provider}\n  地址  {self.query_one('#base-url-input', Input).value}\n  已选择 {count} 个模型\n  首个模型  {display}\n      API 名称  {model}\n\n本次对话使用  {display}\n新对话默认    {display}")
         self.query_one("#bootstrap-scroll", VerticalScroll).scroll_home(animate=False)
         self.query_one(("#provider-name-input", "#model-input", "#save-button")[step]).focus()
 
@@ -179,10 +198,17 @@ class ConfigBootstrapApp(App[int]):
         except ConfigError as exc:
             self._show_error(exc.user_message)
             return
+        connection_step = self._step == 0
         self._show_step(self._step + 1)
+        if connection_step:
+            self.discover_models()
 
     @on(Button.Pressed, "#back-button")
     def action_back(self) -> None:
+        self._discovery_generation += 1
+        if self._discovery_worker is not None:
+            self._discovery_worker.cancel()
+        self.query_one('#bootstrap-discover', Button).disabled = False
         if self._step:
             self._show_step(self._step - 1)
         else:
@@ -195,15 +221,100 @@ class ConfigBootstrapApp(App[int]):
     def _sync_protocol_fields(self, protocol: str) -> None:
         model_input = self.query_one("#model-input", Input)
         base_url_input = self.query_one("#base-url-input", Input)
-        thinking_group = self.query_one("#claude-thinking", Vertical)
 
         model_input.placeholder = MODEL_PLACEHOLDERS[protocol]
         if not base_url_input.value.strip() or base_url_input.value in DEFAULT_BASE_URLS.values():
             base_url_input.value = DEFAULT_BASE_URLS[protocol]
-        thinking_group.display = protocol == "claude"
-        if protocol != "claude":
-            self.query_one("#thinking-enabled", Checkbox).value = False
-            self.query_one("#thinking-budget-input", Input).value = ""
+        self._sync_reasoning()
+
+    @on(Input.Changed, "#model-input")
+    @on(Input.Changed, "#base-url-input")
+    def reasoning_model_changed(self) -> None:
+        self._sync_reasoning()
+
+    def _sync_reasoning(self) -> None:
+        model = os.path.expandvars(self.query_one("#model-input", Input).value).strip()
+        metadata = next((item for item in self._discovered_models if item.id == model), None)
+        metadata = bound_metadata(metadata, protocol=self._read_select_value(), model=model,
+            base_url=os.path.expandvars(self.query_one("#base-url-input", Input).value).strip().rstrip('/'),
+            api_key=os.path.expandvars(self.query_one("#api-key-input", Input).value).strip())
+        capabilities = reasoning_capabilities(self._read_select_value(), metadata)
+        selector = self.query_one("#reasoning-effort-select", Select)
+        levels = ("auto", *(capabilities.levels if capabilities.levels is not None else EFFORT_LEVELS[1:]))
+        selected = selector.value if selector.value in levels else "auto"
+        with self.prevent(Select.Changed):
+            selector.set_options([(EFFORT_LABELS.get(level, level), level) for level in levels])
+            selector.value = selected
+        selector.disabled = capabilities.levels == ()
+        self.query_one("#reasoning-help", Static).update(capabilities.description)
+
+    @on(Input.Changed, '#base-url-input')
+    @on(Input.Changed, '#api-key-input')
+    @on(Input.Changed, '#timeout-input')
+    @on(Select.Changed, '#protocol-select')
+    @on(Select.Changed, '#api-mode-select')
+    def discovery_connection_changed(self) -> None:
+        self._discovery_generation += 1
+        self._discovered_models = []
+        if self._discovery_worker is not None:
+            self._discovery_worker.cancel()
+        self.query_one('#bootstrap-discover', Button).disabled = False
+        self._sync_reasoning()
+
+    def _discovery_provider(self) -> ProviderDefinition:
+        return ProviderDefinition(name=self.query_one('#provider-name-input', Input).value.strip(),
+            protocol=self._read_select_value(), base_url=self.query_one('#base-url-input', Input).value.strip(),
+            api_key=self.query_one('#api-key-input', Input).value.strip(),
+            timeout_seconds=self._parse_positive_float(self.query_one('#timeout-input', Input).value, 'timeout_seconds'),
+            api_mode=str(self.query_one('#api-mode-select', Select).value))
+
+    @on(Button.Pressed, '#bootstrap-discover')
+    def discover_models(self) -> None:
+        try:
+            provider = self._discovery_provider()
+            discovery_connection(provider)
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+        self._discovery_generation += 1
+        self.query_one('#bootstrap-discover', Button).disabled = True
+        self.query_one('#bootstrap-discovery-status', Static).update('正在读取供应商的模型列表…')
+        draft = (self.query_one('#model-input', Input).value, self.query_one('#model-display-input', Input).value)
+        self._discovery_worker = self._discover_models(provider, self._discovery_generation, draft)
+
+    @work(group='bootstrap-model-discovery', exclusive=True, exit_on_error=False)
+    async def _discover_models(self, provider: ProviderDefinition, generation: int, draft: tuple[str, str]) -> None:
+        try:
+            result = await self._model_discovery.discover(provider, refresh=True)
+        except Exception as exc:
+            if self.is_mounted and generation == self._discovery_generation and self._step == 1:
+                self.query_one('#bootstrap-discovery-status', Static).update(str(exc))
+            return
+        finally:
+            if self.is_mounted and generation == self._discovery_generation:
+                self.query_one('#bootstrap-discover', Button).disabled = False
+        if not self.is_mounted or self._step != 1 or generation != self._discovery_generation or self.screen is not self._bootstrap_screen:
+            return
+        if not result.models:
+            self.query_one('#bootstrap-discovery-status', Static).update(result.notice or '端点返回了空列表，可以手动填写 API 模型名称。')
+            return
+        model_name = self.query_one('#model-input', Input).value.strip()
+        if draft != (self.query_one('#model-input', Input).value, self.query_one('#model-display-input', Input).value):
+            self.query_one('#bootstrap-discovery-status', Static).update(f'已发现 {len(result.models)} 个模型；保留当前填写，点击发现模型查看。')
+            return
+
+        def selected(ids: list[str] | None) -> None:
+            if ids is None or generation != self._discovery_generation:
+                return
+            self._discovered_models = [item for item in result.models if item.id in ids]
+            if self._discovered_models:
+                first = self._discovered_models[0]
+                self.query_one('#model-input', Input).value = first.id
+                self.query_one('#model-display-input', Input).value = first.display_name
+            self._sync_reasoning()
+            self.query_one('#bootstrap-discovery-status', Static).update(f'已选择 {len(ids)} 个模型，首个模型用于首次对话。')
+        self.push_screen(ModelDiscoveryScreen(result, provider_name=provider.name,
+                                              initial={model_name} if model_name else set()), selected)
 
     def _save(self) -> None:
         try:
@@ -238,6 +349,7 @@ class ConfigBootstrapApp(App[int]):
             "api_key": self.query_one("#api-key-input", Input).value,
             "timeout_seconds": timeout_seconds,
             "models": {model_id: model},
+            "api_mode": self.query_one('#api-mode-select', Select).value,
         }
 
         if not connection_only:
@@ -245,14 +357,20 @@ class ConfigBootstrapApp(App[int]):
             if output_raw:
                 model["max_output_tokens"] = self._parse_positive_int(output_raw, "max_output_tokens")
 
-        if protocol == "claude" and not connection_only:
-            thinking_enabled = self.query_one("#thinking-enabled", Checkbox).value
-            budget_raw = self.query_one("#thinking-budget-input", Input).value.strip()
-            if thinking_enabled or budget_raw:
-                thinking: dict[str, Any] = {"enabled": thinking_enabled}
-                if budget_raw:
-                    thinking["budget_tokens"] = self._parse_positive_int(budget_raw, "thinking.budget_tokens")
-                model["thinking"] = thinking
+        if not connection_only:
+            model["reasoning_effort"] = self.query_one("#reasoning-effort-select", Select).value
+            for metadata in self._discovered_models:
+                metadata = bound_metadata(metadata, protocol=protocol, model=metadata.id,
+                    base_url=os.path.expandvars(provider['base_url']).strip().rstrip('/'),
+                    api_key=os.path.expandvars(provider['api_key']).strip())
+                if metadata is None:
+                    continue
+                if metadata.id == model_name:
+                    model['metadata'] = serialize_metadata(metadata)
+                else:
+                    discovered_id = new_entry_id(metadata.id, provider['models'])
+                    provider['models'][discovered_id] = {'model_name': metadata.id, 'display_name': metadata.display_name,
+                                                       'metadata': serialize_metadata(metadata)}
 
         return {"providers": {provider_id: provider}, "default_model": f"{provider_id}/{model_id}"}
 

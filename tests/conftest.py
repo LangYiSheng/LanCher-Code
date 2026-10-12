@@ -6,7 +6,8 @@ import httpx
 import pytest
 from rich.console import Console
 
-from lancher_code.providers.models import ProviderConfig, ThinkingConfig
+from lancher_code.providers.models import ProviderConfig
+from lancher_code.providers.metadata import connection_fingerprint, parse_model_metadata
 from lancher_code.config.models import UIConfig
 
 
@@ -25,11 +26,15 @@ def openai_provider_config() -> ProviderConfig:
 def claude_provider_config() -> ProviderConfig:
     return ProviderConfig(
         protocol="claude",
-        model="claude-test",
+        model="claude-sonnet-4-6",
         base_url="https://example.com",
         api_key="test-key",
         timeout_seconds=30.0,
-        thinking=ThinkingConfig(enabled=True, budget_tokens=512),
+        reasoning_effort="auto",
+        metadata=parse_model_metadata({'id': 'claude-sonnet-4-6', 'capabilities': {
+            'thinking': {'types': {'adaptive': {'supported': True}}},
+            'effort': {'supported_levels': ['low', 'medium', 'high', 'max']}}},
+            fingerprint=connection_fingerprint('claude', 'https://example.com', 'test-key'), fetched_at='test'),
     )
 
 
@@ -63,6 +68,7 @@ def app_config_for(provider: ProviderConfig, **overrides):
         name="测试", protocol=provider.protocol, base_url=provider.base_url,
         api_key=provider.api_key, timeout_seconds=provider.timeout_seconds,
         models={"default": ModelDefinition(model_name=provider.model,
-            context_window=provider.context_window, thinking=provider.thinking,
-            max_output_tokens=provider.max_output_tokens)},
+            context_window=provider.context_window, reasoning_effort=provider.reasoning_effort,
+            max_output_tokens=provider.max_output_tokens, metadata=provider.metadata)},
+        api_mode=provider.api_mode,
     )}, default_model="test/default", **overrides)

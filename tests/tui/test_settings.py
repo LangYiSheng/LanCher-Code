@@ -11,6 +11,7 @@ from lancher_code.config.loader import load_config
 from lancher_code.errors import ConfigError
 from lancher_code.permissions.models import PermissionRule
 from lancher_code.providers.models import ModelDefinition
+from lancher_code.providers.metadata import connection_fingerprint, parse_model_metadata
 from lancher_code.permissions.storage import PermissionStorage
 from lancher_code.config.settings import SettingsService, SettingsError
 from lancher_code.tui.settings.models import DeleteProviderScreen, ModelSettingsEditor
@@ -352,14 +353,15 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
         screen.query_one("#model-timeout", Input).value = "91"
         screen.query_one("#model-context-window", Input).value = "12345"
         screen.query_one("#model-max-output-tokens", Input).value = "8192"
-        screen.query_one("#model-thinking", Checkbox).value = True
-        screen.query_one("#model-thinking-budget", Input).value = "2048"
+        screen.query_one("#model-name", Input).value = "claude-sonnet-4-6"
+        await pilot.pause()
+        screen.query_one("#model-reasoning-effort", Select).value = "high"
         screen.action_save_settings()
         await pilot.pause()
         await pilot.pause()
         model = service.load().config.providers["test"].models["default"]
         assert (model.protocol, model.base_url, model.api_key, model.timeout_seconds) == ("claude", "${CUSTOM_URL}", "${CUSTOM_KEY}", 91)
-        assert model.context_window == 12345 and model.thinking.budget_tokens == 2048
+        assert model.context_window == 12345 and model.reasoning_effort == "high"
         assert model.max_output_tokens == 8192
         editor.open_model("test", "default")
         assert screen.query_one("#model-max-output-tokens", Input).value == "8192"
@@ -371,7 +373,7 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
         for field in ("protocol", "base-url", "api-key", "timeout"):
             screen.query_one(f"#inherit-{field}", Checkbox).value = True
         await pilot.pause()
-        assert not screen.query_one("#model-thinking-fields").display
+        assert not screen.query_one("#model-reasoning-effort", Select).disabled
         screen.action_save_settings()
         await pilot.pause()
         model = service.load().config.providers["test"].models["default"]
@@ -383,6 +385,35 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
         assert service.load().config.providers["test"].api_key == "secret"
         node = screen.query_one("#model-tree", Tree).root.children[0]
         assert "[bold]供应商[/bold]" in node.label.plain
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 40), (32, 16)])
+async def test_reasoning_selector_follows_effective_model_connection(tmp_path, size):
+    service = _service(tmp_path)
+    config = service.load().config
+    config.providers['test'].models['default'].metadata = parse_model_metadata(
+        {'id': 'gpt-test', 'effort': {'supported_levels': ['low', 'high', 'max']}},
+        fingerprint=connection_fingerprint('openai', 'https://example.test/v1', 'secret'), fetched_at='test')
+    service.save_models(config)
+    app = _settings_app(service)
+    async with app.run_test(size=size) as pilot:
+        screen = app.screen
+        editor = screen.query_one(ModelSettingsEditor)
+        editor.open_model("test", "default")
+        selector = screen.query_one("#model-reasoning-effort", Select)
+        assert not selector.disabled and selector.value == "auto"
+        screen.query_one("#inherit-base-url", Checkbox).value = False
+        screen.query_one("#model-base-url", Input).value = "https://changed.test/v1"
+        await pilot.pause()
+        assert not selector.disabled
+        selector.value = "max"
+        await pilot.pause()
+        assert editor.collect().providers["test"].models["default"].reasoning_effort == "max"
+        screen.query_one("#inherit-base-url", Checkbox).value = True
+        await pilot.pause()
+        assert not selector.disabled and selector.value == "max"
+        assert editor.collect().providers["test"].models["default"].reasoning_effort == "max"
 
 
 @pytest.mark.asyncio

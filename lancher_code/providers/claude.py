@@ -13,6 +13,7 @@ from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEve
 from lancher_code.usage.models import MessageUsage
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
+from lancher_code.providers.reasoning import reasoning_parameters
 from lancher_code.providers.native_tools import (
     INLINE_TOOLS_BETA, claude_update_blocks, grouped_tool_updates, raise_native_error_status,
 )
@@ -250,8 +251,9 @@ class ClaudeProvider(BaseChatProvider):
             "max_tokens": max_tokens,
             "stream": True,
         }
-        if request.thinking is not None:
-            payload["thinking"] = self._build_thinking_payload(request)
+        payload.update(reasoning_parameters(protocol="claude", metadata=self._model_metadata(request),
+                       effort=self.config.reasoning_effort if request.reasoning_effort is None else request.reasoning_effort,
+                       max_tokens=max_tokens))
         if request.system:
             payload["system"] = "\n\n".join(request.system)
         if request.tools:
@@ -272,18 +274,6 @@ class ClaudeProvider(BaseChatProvider):
             if index < len(request.messages):
                 messages.append(self._serialize_message(request.messages[index]))
         return messages
-
-    def _build_thinking_payload(self, request: ChatRequest) -> dict[str, object]:
-        if request.thinking and request.thinking.enabled:
-            budget = request.thinking.effective_budget_tokens
-            max_tokens = request.max_output_tokens if request.max_output_tokens is not None else DEFAULT_MAX_TOKENS
-            if type(budget) is not int or budget <= 0 or budget >= max_tokens:
-                raise ProviderRequestError("思考 token 预算必须为正整数，且小于本次输出上限。")
-            return {
-                "type": "enabled",
-                "budget_tokens": budget,
-            }
-        return {"type": "disabled"}
 
     def _serialize_message(self, message) -> dict[str, object]:
         if message.role == "tool":

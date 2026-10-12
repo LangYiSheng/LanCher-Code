@@ -209,7 +209,7 @@ async def test_compaction_uses_isolated_request_and_builds_recovery_transcript()
     request = provider.requests[0]
     assert request.tools == []
     assert request.allow_tool_calls is False
-    assert request.thinking is None
+    assert request.reasoning_effort is None
     assert [message.role for message in result.transcript[:3]] == ["user", "assistant", "user"]
     assert "read_file: 读取文件" in result.transcript[2].blocks[0].text
 
@@ -325,18 +325,16 @@ def test_model_output_limit_is_the_actual_request_and_capacity_allowance(openai_
     assert session.build_request([], allow_tool_calls=True).max_output_tokens == 32768
 
 
-def test_request_does_not_inflate_total_output_by_thinking_budget(claude_provider_config) -> None:
-    from lancher_code.errors import ConfigError
-    from lancher_code.providers.models import ThinkingConfig
+def test_request_does_not_inflate_total_output_by_reasoning_effort(claude_provider_config) -> None:
     from lancher_code.sessions.controller import SessionController
 
     claude_provider_config.max_output_tokens = 12000
-    claude_provider_config.thinking = ThinkingConfig(enabled=True, budget_tokens=8000)
     session = SessionController(claude_provider_config)
-    assert session.build_request([], allow_tool_calls=True).max_output_tokens == 12000
-    claude_provider_config.thinking.budget_tokens = 12000
-    with pytest.raises(ConfigError, match="思考预算必须小于总输出额度"):
-        session.build_request([], allow_tool_calls=True)
+    for effort in ("auto", "low", "high", "max"):
+        claude_provider_config.reasoning_effort = effort
+        request = session.build_request([], allow_tool_calls=True)
+        assert request.max_output_tokens == 12000
+        assert request.reasoning_effort == effort
 
 
 def test_bounded_recent_history_never_splits_tool_exchange() -> None:

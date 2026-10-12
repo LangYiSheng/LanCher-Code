@@ -1,4 +1,4 @@
-"""实验工具追加使用真实 Responses 协议，常规请求保持 Chat Completions。"""
+"""Responses 协议承载官方推理模型与实验工具追加。"""
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +14,7 @@ from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
 from lancher_code.providers.base import BaseChatProvider
+from lancher_code.providers.reasoning import reasoning_parameters
 from lancher_code.providers.native_tools import (
     APPEND_FALLBACK, grouped_tool_updates, raise_native_error_status, responses_tool,
 )
@@ -58,7 +59,9 @@ class ResponsesProvider(BaseChatProvider):
             if type(request.max_output_tokens) is not int or request.max_output_tokens <= 0:
                 raise ProviderRequestError("输出 token 上限必须为正整数。")
             payload["max_output_tokens"] = request.max_output_tokens
-        # 不把 Claude 的 token 思考预算硬映射成 Responses 的 reasoning.effort。
+        payload.update(reasoning_parameters(protocol="openai", metadata=self._model_metadata(request),
+                       effort=self.config.reasoning_effort if request.reasoning_effort is None else request.reasoning_effort,
+                       max_tokens=request.max_output_tokens or 32768, responses=True))
         return payload
 
     @staticmethod
@@ -111,7 +114,7 @@ class ResponsesProvider(BaseChatProvider):
             async with self._client_factory() as client:
                 usage_request_id = self._start_usage_request(request)
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    await raise_native_error_status(response, experimental=True)
+                    await raise_native_error_status(response, experimental=request.experimental_mcp_tool_append)
                     yield StreamEvent(kind="message_start")
                     async for event_name, data in self.iter_sse_events(response):
                         if data == "[DONE]":
@@ -157,7 +160,7 @@ class ResponsesProvider(BaseChatProvider):
                                 usage.is_final = True
                                 self._report_usage(usage_request_id, usage, fields)
                             if kind == "response.failed":
-                                self._raise_error(final.get("error"))
+                                self._raise_error(final.get("error"), experimental=request.experimental_mcp_tool_append)
                             if kind == "response.incomplete":
                                 usage_status = "incomplete"
                                 details = final.get("incomplete_details")
@@ -207,7 +210,7 @@ class ResponsesProvider(BaseChatProvider):
                                               assistant_blocks=blocks, response_complete=True, terminal_received=True)
                             return
                         elif kind == "error":
-                            self._raise_error(event)
+                            self._raise_error(event, experimental=request.experimental_mcp_tool_append)
                     usage_status = "incomplete"
                     yield StreamEvent(kind="message_end", usage=usage, response_complete=False)
         except (asyncio.CancelledError, GeneratorExit):
@@ -267,14 +270,14 @@ class ResponsesProvider(BaseChatProvider):
                 blocks.append(block)
             else:
                 # 服务端其他工具既未声明也未接入执行器，不能悄悄冒充完整可执行响应。
-                raise ProviderResponseError(f"暂不支持 Responses output 类型：{kind}。{APPEND_FALLBACK}")
+                raise ProviderResponseError(f"暂不支持 Responses output 类型：{kind}。")
         return blocks
 
     @staticmethod
-    def _raise_error(error: object) -> None:
+    def _raise_error(error: object, *, experimental: bool = False) -> None:
         payload = error if isinstance(error, dict) else {}
         message = payload.get("message", "Responses 返回了错误事件。")
         code = payload.get("code") or payload.get("type")
         if BaseChatProvider.is_prompt_too_long(str(message), code=code if isinstance(code, str) else None):
             raise ProviderPromptTooLongError(str(message))
-        raise ProviderResponseError(f"{message} {APPEND_FALLBACK}")
+        raise ProviderResponseError(f"{message} {APPEND_FALLBACK}" if experimental else str(message))

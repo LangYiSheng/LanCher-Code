@@ -26,12 +26,12 @@ def _catalog_data() -> dict:
                     "chat": {"model_name": "deepseek-chat", "display_name": "日常模型"},
                     "reasoner": {"model_name": "deepseek-reasoner"},
                     "claude": {
-                        "model_name": "claude-compatible",
+                        "model_name": "claude-sonnet-4-6",
                         "protocol": "claude",
                         "base_url": "https://claude.example.test/v1",
                         "api_key": "other-key",
                         "timeout_seconds": 45,
-                        "thinking": {"enabled": True, "budget_tokens": 1024},
+                        "reasoning_effort": "high",
                     },
                 },
             },
@@ -64,7 +64,7 @@ def test_catalog_resolves_inheritance_overrides_and_display_names(monkeypatch) -
     assert alternate.api_key == "other-key"
     assert alternate.timeout_seconds == 45.0
     assert alternate.context_window == 200000
-    assert alternate.thinking is not None and alternate.thinking.budget_tokens == 1024
+    assert alternate.reasoning_effort == "high"
     assert model_display_name(config.providers, "deepseek/chat") == "日常模型"
     assert model_display_name(config.providers, "deepseek/reasoner") == "deepseek-reasoner (DeepSeek)"
     assert iter_model_refs(config.providers) == ["deepseek/chat", "deepseek/reasoner", "deepseek/claude", "backup/chat"]
@@ -77,14 +77,14 @@ def test_resolved_snapshot_never_overwrites_raw_values_or_inheritance(monkeypatc
     default_snapshot = resolve_model(config.providers, config.default_model)
     default_snapshot.model = "not-persisted"
     snapshot = resolve_model(config.providers, "deepseek/claude")
-    snapshot.thinking.budget_tokens = 5
+    snapshot.reasoning_effort = "low"
     assert serialize_config(config) == original
     assert original["providers"]["deepseek"]["api_key"] == "${L_CODE_TEST_KEY}"
     assert "api_key" not in original["providers"]["deepseek"]["models"]["chat"]
     config.providers["deepseek"].api_key = "changed-parent-key"
     assert resolve_model(config.providers, config.default_model).api_key == "changed-parent-key"
     assert resolve_model(config.providers, "deepseek/claude").api_key == "other-key"
-    assert resolve_model(config.providers, "deepseek/claude").thinking.budget_tokens == 1024
+    assert resolve_model(config.providers, "deepseek/claude").reasoning_effort == "high"
 
 
 @pytest.mark.parametrize("include_current", [False, True])
@@ -125,7 +125,7 @@ def test_catalog_rejects_invalid_default_reference(reference: str) -> None:
     ("timeout_seconds", True), ("timeout_seconds", float("inf")),
     ("context_window", False), ("context_window", 0),
     ("max_output_tokens", False), ("max_output_tokens", 0), ("max_output_tokens", "32768"),
-    ("thinking", {"enabled": "false"}), ("thinking", {"budget_tokens": True}),
+    ("reasoning_effort", False), ("reasoning_effort", "off"),
 ])
 def test_invalid_nondefault_model_reports_qualified_path(field: str, value: object) -> None:
     raw = _catalog_data()
@@ -145,15 +145,15 @@ def test_catalog_rejects_mixed_schema_and_invalid_ids() -> None:
         load_config_data(raw)
 
 
-def test_explicit_context_window_and_disabled_thinking_round_trip() -> None:
+def test_explicit_context_window_and_auto_effort_round_trip() -> None:
     raw = _catalog_data()
     raw["providers"]["deepseek"]["models"]["claude"].update({
-        "context_window": 32000, "thinking": {"enabled": False},
+        "context_window": 32000, "reasoning_effort": "auto",
     })
     config = load_config_data(serialize_config(load_config_data(raw)))
     resolved = resolve_model(config.providers, "deepseek/claude")
     assert resolved.context_window == 32000
-    assert resolved.thinking is not None and not resolved.thinking.enabled
+    assert resolved.reasoning_effort == "auto"
 
 
 def test_explicit_output_limit_round_trips_without_changing_default_models() -> None:
@@ -177,14 +177,14 @@ def test_output_limit_must_fit_configured_context_window(output: int) -> None:
         load_config_data(raw)
 
 
-def test_enabled_thinking_budget_must_be_inside_total_output_limit() -> None:
+def test_retired_thinking_fields_are_ignored_and_removed_on_save() -> None:
     raw = _catalog_data()
     model = raw["providers"]["deepseek"]["models"]["claude"]
-    model["max_output_tokens"] = 1024
-    with pytest.raises(ConfigError, match="thinking.budget_tokens.*max_output_tokens"):
-        load_config_data(raw)
-    model["max_output_tokens"] = 4096
-    assert resolve_model(load_config_data(raw).providers, "deepseek/claude").max_output_tokens == 4096
+    model.pop("reasoning_effort")
+    model["thinking"] = {"enabled": False, "budget_tokens": 999999}
+    config = load_config_data(raw)
+    assert resolve_model(config.providers, "deepseek/claude").reasoning_effort == "auto"
+    assert "thinking" not in serialize_config(config)["providers"]["deepseek"]["models"]["claude"]
 
 
 def test_new_entry_id_is_stable_safe_and_unique() -> None:
