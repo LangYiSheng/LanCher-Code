@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claude Code）。
+LanCher Code 是一个**基于 Python 的 AI 编程助手**，由独立 Agent SDK、终端界面和无界面命令组成。
 
 它不是一个"只会聊天"的对话机器人，而是能在终端里和你一起：
 
@@ -17,6 +17,7 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 
 | 功能 | 说明 |
 |---|---|
+| Agent SDK / 无界面运行 | 显式配置、可注入依赖、事件快照、统一收尾；`lancher run` 支持 JSON / JSONL、恢复会话和超时 |
 | 终端多轮对话 | 安静对话为主体，流式回答；状态栏显示模型、阶段与权限，思考/工具轨迹可展开 |
 | 工作中输入 | 可补充当前任务、排到下一轮或保留草稿；取消/失败会暂停队列 |
 | 双协议后端 | 支持 OpenAI 兼容协议与 Anthropic Claude 协议 |
@@ -28,7 +29,7 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 | 模型与设置 | 供应商下管理模型，本次使用与新对话默认分别选择；单条保存，支持深浅主题和忙时 Enter 偏好 |
 | 上下文治理 | 最近可信输入 usage 校准、分类保守估算、动态预算、大工具结果落盘及验证后压缩 |
 | 请求用量账本 | 按实际请求记录对话、压缩、重试及中断消耗；会话与本次启动使用相同口径，未知不冒充零 |
-| 会话持久化 | 首条消息自动创建 UUID，按项目保存 `.lancher/sessions/<UUID>/events.jsonl` 事件格式 2，独立 workspace，支持恢复、改标题、归档和删除；旧格式保留原文件，列表单独报告并提示新建会话 |
+| 会话持久化 | 首条消息自动创建 UUID，按项目保存 `.lancher/sessions/<UUID>/events.jsonl` 事件格式 3，独立 workspace，支持恢复、改标题、归档和删除；旧格式保留原文件，列表单独报告并提示新建会话 |
 | 退出小结 | 工作中先停止本轮，空闲 3 秒内双按 Ctrl+C 退出；告别显示完整恢复命令及本次启动的输入、输出、缓存和缓存比 |
 | Skills 与项目约定 | `.lancher/skills` 的项目／用户技能，显式指定与模型加载；正文跨轮保留，成功压缩后按引用重载，项目根 `AGENTS.md` 常驻 |
 | MCP 扩展 | stdio / Streamable HTTP 的 Tools；后台初始化、分页、动态刷新、重连、独立超时和延迟发现 |
@@ -38,8 +39,8 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 | 技术 | 用途 | 版本要求 |
 |---|---|---|
 | Python | 开发语言 | `>= 3.14`（见 `pyproject.toml`） |
-| `textual` | TUI 框架 | `>=6.1.0,<7.0.0` |
-| `rich` | 富文本渲染 | `>=14.0.0,<15.0.0` |
+| `textual` | TUI 框架（tui extra） | `>=6.1.0,<7.0.0` |
+| `rich` | 富文本渲染（tui extra） | `>=14.0.0,<15.0.0` |
 | `httpx` | HTTP 客户端（流式请求模型） | `>=0.28.1,<1.0.0` |
 | `mcp` | MCP 协议客户端 | `>=1.12.4,<2.0.0` |
 | `PyYAML` | 配置文件解析 | `>=6.0.2,<7.0.0` |
@@ -52,8 +53,10 @@ LanCher Code 是一个**基于 Python 的终端 AI 编程助手**（类似 Claud
 ```text
 用户
  ↓
-Textual TUI（lancher_code/tui）
- ↓ 提交输入
+TUI / 无界面 CLI / 嵌入 Python 应用
+ ↓ 公共操作与事件快照
+AgentService（lancher_code.sdk）
+ ↓
 TurnRunner（lancher_code/agent/runner.py）── 工具循环
  ├── SessionController（会话状态 / 提示词组装）
  ├── Provider（openai / claude 流式请求）
@@ -70,7 +73,8 @@ TurnRunner（lancher_code/agent/runner.py）── 工具循环
 
 | 模块 | 位置 | 职责 |
 |---|---|---|
-| 应用装配 | `lancher_code/app.py` | 启动流程：加载配置、创建 Provider、会话、工具、MCP、TUI |
+| Agent SDK | `lancher_code/sdk.py`、`agent/service.py`、`agent/factory.py` | 核心装配、快照、结果、就绪、队列和资源生命周期 |
+| 宿主适配 | `lancher_code/app.py`、`headless.py` | TUI 引导与设置、无界面参数和输出 |
 | 会话层 | `lancher_code/sessions/controller.py` | `SessionController`：消息、transcript、阶段/权限、计划与队列状态 |
 | 工具循环 | `lancher_code/agent/runner.py` | `TurnRunner`：ReAct 循环、事件流、输入投递、取消、自动压缩 |
 | 上下文管理 | `lancher_code/context/` | 输入校准、分类估算、动态预算、结果卸载及摘要验证 |
@@ -106,6 +110,7 @@ python main.py
 
 按顺序阅读即可快速上手：
 
+0. [Agent SDK 与无界面运行 agent-sdk.md](agent-sdk.md) — Python 嵌入、机器格式与评测接入
 1. [快速开始 getting-started.md](getting-started.md) — 安装、启动、第一次运行
 2. [项目结构 project-structure.md](project-structure.md) — 目录与文件职责
 3. [架构 architecture.md](architecture.md) — 整体架构、组件关系、数据流
@@ -131,4 +136,4 @@ python main.py
 | `pyproject.toml` | 项目元数据、依赖、命令入口、pytest 配置 |
 | `lancher.spec` | PyInstaller 打包配置 |
 | `lancher.example.yaml` | 配置文件结构示例（无真实密钥） |
-| `~/.lancher/lancher.yaml` | 全局主配置，应用不读取仓库根同名文件 |
+| `~/.lancher/lancher.yaml` | 全局主配置，TUI 不读取仓库根同名文件，run 必须显式 --config |

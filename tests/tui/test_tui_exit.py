@@ -1,5 +1,6 @@
 """退出确认须覆盖真实输入焦点、弹窗和可取消的独立压缩任务。"""
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import asyncio
 
@@ -29,7 +30,7 @@ def build_app(config, directory, provider=None):
     registry = create_default_tool_registry()
     executor = ToolExecutor(registry, cwd=directory)
     runner = TurnRunner(provider or IdleProvider(), session, registry, executor)
-    return LanCherTextualApp(runner, config, session, UIConfig()), session, runner
+    return LanCherTextualApp(AgentService(runner, session), UIConfig()), session, runner
 
 
 async def until(pilot, predicate):
@@ -236,4 +237,5 @@ async def test_initialization_can_exit_with_double_interrupt(openai_provider_con
         await pilot.press("ctrl+c")
         assert app._exit_flow.is_armed
         await pilot.press("ctrl+c")
+    await app._agent.shutdown()
     assert manager.cancelled.is_set()

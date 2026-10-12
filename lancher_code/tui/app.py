@@ -1,8 +1,8 @@
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import asyncio
 from contextlib import aclosing
-from pathlib import Path
 
 from lancher_code.tui.chat.styles import CHAT_CSS
 from lancher_code.tui.chat.layout import ChatLayoutState, fit_chat_panels
@@ -22,13 +22,11 @@ from textual.widgets import Button, Static, TextArea
 from lancher_code.errors import LanCherError
 from lancher_code.providers.catalog import model_display_name
 from lancher_code.permissions.models import PermissionRequest
-from lancher_code.providers.models import ProviderConfig
 from lancher_code.agent.events import TurnEvent
 from lancher_code.config.models import UIConfig
 from lancher_code.mcp.manager import MCPInitializationProgress
 from lancher_code.config.settings import SettingsService
 from lancher_code.logging_system import get_logger
-from lancher_code.sessions.controller import SessionController
 from lancher_code.sessions.storage import SessionRepositoryError
 from lancher_code.tui.commands import SlashCommandRegistry, create_default_slash_command_registry
 from lancher_code.tui.composer import (
@@ -55,7 +53,6 @@ from lancher_code.tui.chat_controls import (
     ChatAction, StageBar, PendingQueue, PendingInputEditor, PlanPanel,
     PlanReviewScreen, ExecutionAccessScreen, ReadOnlyDetailsScreen,
 )
-from lancher_code.agent.runner import TurnRunner
 
 logger = get_logger("tui.chat")
 
@@ -87,17 +84,13 @@ class LanCherTextualApp(App[int]):
 
     def __init__(
         self,
-        turn_runner: TurnRunner,
-        provider_config: ProviderConfig,
-        session_controller: SessionController,
+        agent: AgentService,
         ui_config: UIConfig,
         slash_command_registry: SlashCommandRegistry | None = None,
         settings_service: SettingsService | None = None,
     ) -> None:
         super().__init__()
-        self._turn_runner = turn_runner
-        self._provider_config = provider_config
-        self._session_controller = session_controller
+        self._agent = agent
         self._ui_config = ui_config
         apply_theme(self, ui_config.theme)
         self._slash_command_registry = slash_command_registry or create_default_slash_command_registry()
@@ -110,11 +103,11 @@ class LanCherTextualApp(App[int]):
         self._shutdown_process_count = 0
         self._status_refresh_timer: Timer | None = None
         self._chat_started = False
-        self._transcript = TranscriptView(session_controller, lambda: self._ui_config.show_thinking_status)
+        self._transcript = TranscriptView(agent, lambda: self._ui_config.show_thinking_status)
         self._status_hint = "就绪"
         self._context_estimate_label = "未校准估算"
         self._completion = CompletionController(
-            self._slash_command_registry, session_controller, turn_runner,
+            self._slash_command_registry, agent,
             widgets=self._completion_widgets, size=lambda: self.size,
             busy=lambda: self._is_streaming, fit_panels=self._fit_chat_panels,
             refresh_chrome=self._refresh_completion_chrome,
@@ -126,15 +119,15 @@ class LanCherTextualApp(App[int]):
         self._settings_service = settings_service
         self.mcp_initialization_complete = True
         self._session_commands = SessionCommands(
-            session_controller, turn_runner, composer=lambda: self.query_one(ComposerTextArea),
+            agent, composer=lambda: self.query_one(ComposerTextArea),
             busy=lambda: self._is_streaming, notify=self.notify, open_screen=self.push_screen,
             restore_view=self._restore_session_view, refresh_completion=self._completion.refresh,
             refresh_queue=self._refresh_pending_queue, set_status=self._set_status_hint,
             preserve_input=self._preserve_command_input,
         )
-        self._task_commands = TaskCommands(session_controller, turn_runner, self.notify, self.push_screen)
-        self._capability_commands = CapabilityCommands(turn_runner, self.notify, self.push_screen)
-        self._hud = HudPresenter(session_controller, turn_runner, provider_config.model,
+        self._task_commands = TaskCommands(agent, self.notify, self.push_screen)
+        self._capability_commands = CapabilityCommands(agent, self.notify, self.push_screen)
+        self._hud = HudPresenter(agent, agent.provider_config.model,
                                  self._completion.text_allowed_while_busy)
 
     def _set_status_hint(self, text: str) -> None:
@@ -154,7 +147,7 @@ class LanCherTextualApp(App[int]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
-            yield BannerWidget(Path.cwd())
+            yield BannerWidget(self._agent.project_root)
             yield StageBar()
             yield self._transcript
             with Vertical(id="composer-region"):
@@ -203,9 +196,9 @@ class LanCherTextualApp(App[int]):
         await self._refresh_pending_queue()
         self._refresh_plan_panel()
         self._status_refresh_timer = self.set_interval(1.0, self._refresh_status_bar)
-        capabilities = self._turn_runner.capabilities
+        capabilities = self._agent.capabilities
         capabilities.add_mcp_progress_callback(self._handle_mcp_progress)
-        self._turn_runner.start_capabilities()
+        self._agent.start_capabilities()
         if capabilities.mcp_progress is not None:
             self._handle_mcp_progress(capabilities.mcp_progress)
 
@@ -228,16 +221,16 @@ class LanCherTextualApp(App[int]):
 
     async def action_request_quit(self) -> None:
         decision = self._exit_flow.request_interrupt(
-            busy=self._is_streaming or self._turn_runner.has_active_turn,
-            stopping=self._turn_runner.is_stopping,
+            busy=self._is_streaming or self._agent.has_active_turn,
+            stopping=self._agent.is_stopping,
         )
         if decision == "cancel_work":
             if self._manual_compaction_id is not None or self._compaction_worker is not None:
                 self._stop_current_work()
-            elif self._is_streaming or self._turn_runner.has_active_turn:
+            elif self._is_streaming or self._agent.has_active_turn:
                 # 工作刚排入 worker 时也可能还没有 ActiveTurn，worker 会在入口检查停止标记。
                 self._status_hint = "正在停止 · 草稿和队列会保留"
-                self._turn_runner.cancel_active_turn()
+                self._agent.cancel_active_turn()
                 self._refresh_status_bar()
             return
         if decision == "wait_for_stop":
@@ -252,7 +245,7 @@ class LanCherTextualApp(App[int]):
             self._refresh_exit_hint()
             return
         if decision == "exit":
-            self._shutdown_process_count = self._turn_runner.application_process_count
+            self._shutdown_process_count = self._agent.application_process_count
             self._ui_closing = True
             self.exit(0)
 
@@ -270,7 +263,7 @@ class LanCherTextualApp(App[int]):
         await super().on_event(event)
 
     def _exit_confirmation_text(self) -> str:
-        count = self._turn_runner.application_process_count
+        count = self._agent.application_process_count
         suffix = f" · 退出将结束 {count} 个托管进程" if count else ""
         return "再按一次 Ctrl+C 退出（3 秒内）" + suffix
 
@@ -299,7 +292,7 @@ class LanCherTextualApp(App[int]):
 
     def _request_explicit_exit(self) -> None:
         if self._exit_flow.request_exit() == "exit":
-            self._shutdown_process_count = self._turn_runner.application_process_count
+            self._shutdown_process_count = self._agent.application_process_count
             self._ui_closing = True
             self.exit(0)
 
@@ -308,9 +301,8 @@ class LanCherTextualApp(App[int]):
             if self._compaction_worker is not None:
                 self._compaction_worker.cancel()
             self._status_hint = "正在停止上下文压缩"
-            if not self._turn_runner.is_compacting:
+            if not self._agent.is_compacting:
                 # 取消发生在 worker 第一条指令之前，没有协程 finally 可替界面收尾。
-                self._finish_manual_activity_if_running("cancelled")
                 self._compaction_worker = None
                 self._manual_compaction_id = None
                 self._is_streaming = False
@@ -322,14 +314,14 @@ class LanCherTextualApp(App[int]):
                 self.call_later(self._completion.refresh)
             self._refresh_status_bar()
         else:
-            if self._turn_runner.cancel_active_turn():
+            if self._agent.cancel_active_turn():
                 self._status_hint = "正在停止 · 草稿和队列会保留"
                 self._refresh_status_bar()
 
     @on(StopTurnRequested)
     def handle_stop_turn_requested(self, event: StopTurnRequested) -> None:
         event.stop()
-        if self._is_streaming or self._turn_runner.has_active_turn:
+        if self._is_streaming or self._agent.has_active_turn:
             if self._exit_flow.request_interrupt(busy=True) == "cancel_work":
                 self._stop_current_work()
 
@@ -361,8 +353,8 @@ class LanCherTextualApp(App[int]):
         if self._is_streaming or self._ui_closing:
             return
         phases = ("discuss", "plan", "execute")
-        phase = self._session_controller.work_phase
-        self._apply_turn_event(self._turn_runner.set_phase(phases[(phases.index(phase) + 1) % len(phases)]))
+        phase = self._agent.work_phase
+        self._apply_turn_event(self._agent.set_phase(phases[(phases.index(phase) + 1) % len(phases)]))
         await self._completion.refresh()
         self._refresh_status_bar()
         self.query_one("#composer-input", ComposerTextArea).focus()
@@ -391,7 +383,7 @@ class LanCherTextualApp(App[int]):
                 self._refresh_status_bar()
                 return
             try:
-                self._turn_runner.enqueue_input(text, delivery=delivery)
+                self._agent.enqueue_input(text, delivery=delivery)
             except (LanCherError, ValueError, RuntimeError) as exc:
                 self.notify(str(exc), severity="warning")
                 return
@@ -445,7 +437,7 @@ class LanCherTextualApp(App[int]):
         request_id = event.resolution.request_id
         if request_id not in self._pending_permissions:
             return
-        self._turn_runner.resolve_permission_request(event.resolution)
+        self._agent.resolve_permission_request(event.resolution)
         await self._close_inline_permission(request_id)
 
     @work(exclusive=False, exit_on_error=False)
@@ -455,9 +447,9 @@ class LanCherTextualApp(App[int]):
         try:
             if self._exit_flow.state == "stopping":
                 submission_failed = True
-                self._turn_runner.pause_queue()
+                self._agent.pause_queue()
                 return
-            stream = self._turn_runner.run_next_queued_turn() if queued else self._turn_runner.run_user_turn(text)
+            stream = self._agent.run_next_queued_turn() if queued else self._agent.run_user_turn(text)
             # 消费事件期间也可能关闭界面；显式关闭生成器，等待执行器清理。
             async with aclosing(stream):
                 async for event in stream:
@@ -474,7 +466,7 @@ class LanCherTextualApp(App[int]):
             logger.exception(
                 "event=tui_turn_worker_failed exception_type=%s", type(exc).__name__
             )
-            self._turn_runner.pause_queue()
+            self._agent.pause_queue()
             self._status_hint = "未完成 · 队列已暂停"
             self.notify(str(exc), title="本轮未完成", severity="error")
         finally:
@@ -487,40 +479,32 @@ class LanCherTextualApp(App[int]):
                     if not composer.text:
                         composer.text = text
                         composer.cursor_location = composer.document.end
-                    if not self._session_controller.state.messages:
+                    if not self._agent.messages:
                         await self._restore_session_view()
                 await self._finish_turn_view()
             else:
                 self._pending_permissions.clear()
-                try:
-                    self._session_controller.flush()
-                except (LanCherError, ValueError, OSError):
-                    logger.exception("event=session_flush_failed")
 
     async def on_unmount(self) -> None:
         self._ui_closing = True
-        self._turn_runner.capabilities.remove_mcp_progress_callback(self._handle_mcp_progress)
+        self._agent.capabilities.remove_mcp_progress_callback(self._handle_mcp_progress)
         if self._exit_hint_timer is not None:
             self._exit_hint_timer.stop()
             self._exit_hint_timer = None
         if self._status_refresh_timer is not None:
             self._status_refresh_timer.stop()
             self._status_refresh_timer = None
-        # Textual 取消 worker 后不会等待所有后台执行器；退出前显式完成收尾。
-        self._shutdown_process_count = max(self._shutdown_process_count, self._turn_runner.application_process_count)
+        # 等待当前活动收尾；Agent 和连接的最终关闭由启动入口统一负责。
+        self._shutdown_process_count = max(self._shutdown_process_count, self._agent.application_process_count)
         try:
-            await self._turn_runner.shutdown()
+            await self._agent.stop_and_wait()
         except Exception:
-            # 应用 finally 仍会取得同一清理任务的失败结果，并在普通终端报告。
+            # 启动入口仍会执行 Agent 的最终关闭，并在普通终端报告收尾失败。
             logger.exception("event=tui_shutdown_failed")
 
     async def _finish_turn_view(self) -> None:
         for request_id in list(self._pending_permissions):
             await self._close_inline_permission(request_id)
-        try:
-            self._session_controller.flush()
-        except (LanCherError, ValueError, OSError) as exc:
-            self.notify(str(exc), title="会话持久化失败", severity="error", timeout=10)
         if self._turn_succeeded:
             self._status_hint = "已完成"
         input_widget = self.query_one("#composer-input", ComposerTextArea)
@@ -533,15 +517,6 @@ class LanCherTextualApp(App[int]):
         self._refresh_status_bar()
         self._refresh_plan_panel()
         await self._refresh_pending_queue()
-        if self._turn_succeeded:
-            self.call_later(self._start_next_queued)
-
-    def _start_next_queued(self) -> None:
-        if self._ui_closing or self._is_streaming or self._turn_runner.has_active_turn or self._turn_runner.queue_paused:
-            return
-        items = self._turn_runner.pending_inputs
-        if items and items[0].state == "pending" and items[0].delivery == "follow_up":
-            self._begin_turn("", queued=True)
 
 
     def _refresh_status_bar(self) -> None:
@@ -567,50 +542,30 @@ class LanCherTextualApp(App[int]):
     def _refresh_context_usage(self) -> None:
         banner = self.query_one(BannerWidget)
         try:
-            estimate = self._turn_runner.capabilities.context_usage()
+            estimate = self._agent.capabilities.context_usage()
             used_tokens = estimate["tokens"]
             self._context_estimate_label = "已校准估算" if estimate["source"] == "usage_calibrated" else "未校准估算"
         except Exception:
             logger.exception("event=tui_context_usage_estimate_failed")
             self._context_estimate_label = "估算暂不可用"
-            banner.update_context_usage(None, self._session_controller.context_window)
+            banner.update_context_usage(None, self._agent.context_window)
             self._refresh_status_bar()
             return
-        banner.update_context_usage(used_tokens, self._session_controller.context_window)
+        banner.update_context_usage(used_tokens, self._agent.context_window)
         self._refresh_status_bar()
 
 
-    def _finish_manual_activity_if_running(self, status: str, error_text: str | None = None) -> bool:
-        """worker 尚未开始也能收尾；与 Runner 的正常终结共用同一活动 ID。"""
-        activity = self._session_controller.state.compaction_activities.get(self._manual_compaction_id)
-        if activity is None:
-            return False
-        save_failed = False
-        try:
-            if activity.status == "running":
-                activity = self._session_controller.finish_compaction(activity.id, status=status, error_text=error_text)
-            else:
-                activity = self._session_controller.get_compaction(activity.id)
-        except (SessionRepositoryError, OSError) as exc:
-            # 内存已终结、日志写入失败时，仍要停图标和解锁输入区。
-            activity = self._session_controller.get_compaction(activity.id)
-            save_failed = True
-            logger.exception("event=compaction_status_save_failed activity_id=%s", activity.id)
-            if not self._ui_closing and self.is_running:
-                self.notify(str(exc), title="压缩状态保存失败", severity="error", timeout=10)
-        widget = self._transcript.compaction_widgets.get(activity.id)
-        if widget is not None:
-            widget.update_activity(activity)
-        return save_failed
-
     async def _consume_turn_event(self, event: TurnEvent) -> None:
         if event.kind == "user_message_created":
+            self._turn_succeeded = False
             self._close_hud_details()
         chat_view = self.query_one("#chat-view", VerticalScroll)
         follow_bottom = chat_view.is_vertical_scroll_end
         self._apply_turn_event(event)
         await self._transcript.consume(event)
         if event.kind == "compaction_updated" and event.compaction is not None:
+            if event.compaction.trigger == "manual":
+                self._manual_compaction_id = event.compaction.id
             if event.compaction.status == "completed" and event.compaction.trigger != "manual":
                 self._refresh_context_usage()
         if event.kind == "permission_request_created" and event.permission_request is not None:
@@ -669,7 +624,7 @@ class LanCherTextualApp(App[int]):
             return
         if event.kind == "compaction_updated" and event.compaction is not None:
             activity = event.compaction
-            self._status_hint = "正在压缩上下文" if activity.status == "running" else "正在处理" if self._turn_runner.has_active_turn else "就绪"
+            self._status_hint = "正在压缩上下文" if activity.status == "running" else "正在处理" if self._agent.has_active_turn else "就绪"
             return
         if event.kind == "turn_cancelled":
             self._status_hint = event.progress_message or "已停止"
@@ -691,8 +646,8 @@ class LanCherTextualApp(App[int]):
             self._status_hint = "正在处理"
 
     def _refresh_phase_chrome(self) -> None:
-        phase = self._session_controller.work_phase
-        policy = self._session_controller.execution_access
+        phase = self._agent.work_phase
+        policy = self._agent.execution_access
         glyph = "#" if phase in {"discuss", "plan"} else {"project": ">", "full": "!"}[policy]
         self.query_one("#prompt-glyph", Static).update(glyph)
 
@@ -701,10 +656,10 @@ class LanCherTextualApp(App[int]):
         if self._is_streaming:
             composer.placeholder = "任务进行中，仍可输入下一条消息"
             return
-        if self._session_controller.work_phase == "discuss":
+        if self._agent.work_phase == "discuss":
             composer.placeholder = "讨论想法或调查代码，此阶段不修改文件"
             return
-        if self._session_controller.work_phase == "plan":
+        if self._agent.work_phase == "plan":
             composer.placeholder = PLAN_PLACEHOLDER
             return
         composer.placeholder = DEFAULT_PLACEHOLDER
@@ -727,17 +682,17 @@ class LanCherTextualApp(App[int]):
 
     async def _refresh_pending_queue(self) -> None:
         await self.query_one(PendingQueue).update_items(
-            self._turn_runner.pending_inputs,
-            paused=self._turn_runner.queue_paused,
+            self._agent.pending_inputs,
+            paused=self._agent.queue_paused,
             busy=self._is_streaming,
         )
         self._fit_chat_panels()
 
     def _refresh_plan_panel(self) -> None:
         self.query_one(PlanPanel).update_snapshot(
-            self._session_controller.plan_snapshot,
+            self._agent.plan_snapshot,
             busy=self._is_streaming,
-            phase=self._session_controller.work_phase,
+            phase=self._agent.work_phase,
         )
         if self.size.height < 24 and self._pending_permissions:
             self.query_one(PlanPanel).display = False
@@ -757,9 +712,9 @@ class LanCherTextualApp(App[int]):
         event.stop()
         button_id = event.button.id
         if button_id == "chat-model":
-            config = self._turn_runner.model_config
+            config = self._agent.model_config
             if config is not None and not self._is_streaming:
-                self.push_screen(ModelPickerScreen(config, self._turn_runner.model_ref), self._handle_model_selected)
+                self.push_screen(ModelPickerScreen(config, self._agent.model_ref), self._handle_model_selected)
         elif button_id == "chat-access":
             self.push_screen(ExecutionAccessScreen(), self._handle_access_selected)
         elif button_id == "chat-details":
@@ -774,33 +729,34 @@ class LanCherTextualApp(App[int]):
         try:
             if event.action == "phase":
                 if not self._is_streaming:
-                    self._apply_turn_event(self._turn_runner.set_phase(event.value))
+                    self._apply_turn_event(self._agent.set_phase(event.value))
                     self._refresh_status_bar()
                     self._refresh_plan_panel()
                     await self._completion.refresh()
             elif event.action == "focus-composer":
                 self.query_one(ComposerTextArea).focus()
             elif event.action == "queue-toggle":
-                if self._turn_runner.queue_paused:
-                    self._turn_runner.resume_queue()
-                    self._start_next_queued()
+                if self._agent.queue_paused:
+                    self._agent.resume_queue()
+                    if self._agent.pending_inputs and not self._is_streaming and not self._agent.has_active_turn:
+                        self._begin_turn("", queued=True)
                 else:
-                    self._turn_runner.pause_queue()
+                    self._agent.pause_queue()
             elif event.action == "queue-delete":
-                self._turn_runner.remove_pending_input(event.value)
+                self._agent.remove_pending_input(event.value)
             elif event.action == "queue-convert":
-                item = next((item for item in self._turn_runner.pending_inputs if item.id == event.value), None)
+                item = next((item for item in self._agent.pending_inputs if item.id == event.value), None)
                 if item is not None:
-                    self._turn_runner.convert_pending_input(item.id, "follow_up" if item.delivery == "steer" else "steer")
+                    self._agent.convert_pending_input(item.id, "follow_up" if item.delivery == "steer" else "steer")
             elif event.action == "queue-edit":
-                item = next((item for item in self._turn_runner.pending_inputs if item.id == event.value), None)
+                item = next((item for item in self._agent.pending_inputs if item.id == event.value), None)
                 if item is not None:
-                    self._turn_runner.pause_queue()
+                    self._agent.pause_queue()
                     self.push_screen(PendingInputEditor(item.text), lambda text: self._save_pending_edit(item.id, text))
             elif event.action in {"plan-review", "plan-execute"}:
-                snapshot = self._session_controller.plan_snapshot
+                snapshot = self._agent.plan_snapshot
                 if snapshot is not None:
-                    session_id = self._session_controller.session_id
+                    session_id = self._agent.session_id
                     if event.action == "plan-review":
                         self.push_screen(PlanReviewScreen(session_id, snapshot, can_execute=snapshot.ready and not self._is_streaming), self._handle_plan_accepted)
                     else:
@@ -812,7 +768,7 @@ class LanCherTextualApp(App[int]):
     def _save_pending_edit(self, item_id: str, text: str | None) -> None:
         if text is not None:
             try:
-                self._turn_runner.update_pending_input(item_id, text)
+                self._agent.update_pending_input(item_id, text)
             except (LanCherError, ValueError, RuntimeError) as exc:
                 self.notify(str(exc), severity="warning")
             else:
@@ -823,7 +779,7 @@ class LanCherTextualApp(App[int]):
         if value is None:
             return
         try:
-            text = self._turn_runner.prepare_plan_execution(*value)
+            text = self._agent.prepare_plan_execution(*value)
         except (LanCherError, ValueError, RuntimeError) as exc:
             self.notify(str(exc), title="计划需要重新确认", severity="warning")
             return
@@ -833,7 +789,7 @@ class LanCherTextualApp(App[int]):
     def _handle_access_selected(self, policy: str | None) -> None:
         if policy is not None:
             try:
-                self._apply_turn_event(self._turn_runner.set_execution_access(policy))
+                self._apply_turn_event(self._agent.set_execution_access(policy))
             except (LanCherError, ValueError, RuntimeError) as exc:
                 self.notify(str(exc), severity="warning")
         self._refresh_status_bar()
@@ -848,19 +804,19 @@ class LanCherTextualApp(App[int]):
         self._refresh_status_bar()
 
     def _apply_models_settings(self, config) -> str | None:
-        self._turn_runner.reload_models(config)
+        self._agent.reload_models(config)
         self._refresh_status_bar()
         self._refresh_context_usage()
-        return self._turn_runner.model_ref
+        return self._agent.model_ref
 
     async def _apply_mcp_settings(self) -> str:
-        notice = await self._turn_runner.capabilities.reload_mcp()
+        notice = await self._agent.capabilities.reload_mcp()
         self._refresh_context_usage()
         await self._completion.refresh()
         return notice
 
     def _apply_runtime_settings(self, runtime) -> str:
-        notice = self._turn_runner.apply_runtime_settings(runtime)
+        notice = self._agent.apply_runtime_settings(runtime)
         self._refresh_context_usage()
         return notice
 
@@ -868,7 +824,7 @@ class LanCherTextualApp(App[int]):
     async def _execute_slash_command(self, command_name: str, arguments_text: str) -> str | None:
         self._command_preserve_input = False
         try:
-            if (self._is_streaming or self._turn_runner.has_active_turn) and not self._completion.allowed_while_busy(command_name, arguments_text):
+            if (self._is_streaming or self._agent.has_active_turn) and not self._completion.allowed_while_busy(command_name, arguments_text):
                 raise ValueError("当前任务结束后可执行命令；草稿已保留。")
             self._slash_command_registry.validate(command_name, arguments_text)
             if command_name in {"session", "model", "access", "settings"} and not arguments_text.strip():
@@ -893,14 +849,14 @@ class LanCherTextualApp(App[int]):
             return None
 
         if command_name == "do":
-            self._apply_turn_event(self._turn_runner.set_phase("execute"))
+            self._apply_turn_event(self._agent.set_phase("execute"))
             self._refresh_status_bar()
             self._refresh_context_usage()
             self._refresh_plan_panel()
             return arguments_text.strip() or None
 
         if command_name in {"plan", "discuss"}:
-            self._apply_turn_event(self._turn_runner.set_phase(command_name))
+            self._apply_turn_event(self._agent.set_phase(command_name))
             self._refresh_status_bar()
             self._refresh_context_usage()
             self._refresh_plan_panel()
@@ -914,17 +870,17 @@ class LanCherTextualApp(App[int]):
             return None
 
         if command_name == "access":
-            self._apply_turn_event(self._turn_runner.set_execution_access(arguments_text.strip()))
+            self._apply_turn_event(self._agent.set_execution_access(arguments_text.strip()))
             self._refresh_status_bar()
             self.notify("本次访问范围已更新；工作阶段保持不变。", title="访问范围")
             return None
 
         if command_name == "model":
-            config = self._turn_runner.model_config
+            config = self._agent.model_config
             if config is None:
                 raise ValueError("模型目录尚未加载。")
             ref = arguments_text.strip()
-            self._turn_runner.switch_model(ref)
+            self._agent.switch_model(ref)
             self._refresh_status_bar()
             self._refresh_context_usage()
             self.notify(f"已切换为 {model_display_name(config.providers, ref)}", title="本次模型")
@@ -940,12 +896,12 @@ class LanCherTextualApp(App[int]):
                 return None
             self.push_screen(SettingsScreen(
                 self._settings_service,
-                current_model_ref=self._turn_runner.model_ref,
+                current_model_ref=self._agent.model_ref,
                 on_models_saved=self._apply_models_settings,
                 on_model_selected=self._handle_model_selected,
                 on_ui_saved=self._apply_ui_settings,
                 on_mcp_saved=self._apply_mcp_settings,
-                on_runtime_validate=self._turn_runner.validate_runtime_settings,
+                on_runtime_validate=self._agent.validate_runtime_settings,
                 on_runtime_saved=self._apply_runtime_settings,
             ), self._handle_settings_result)
             return None
@@ -954,38 +910,13 @@ class LanCherTextualApp(App[int]):
             if arguments_text.strip():
                 self.notify("用法：/compact", title="上下文压缩", severity="warning")
                 return None
-            chat_view = self.query_one("#chat-view", VerticalScroll)
-            follow_bottom = chat_view.is_vertical_scroll_end
-            previous_ids = set(self._session_controller.state.compaction_activities)
-            try:
-                activity = self._session_controller.begin_compaction("manual")
-            except (SessionRepositoryError, OSError):
-                # 开始记录写盘失败也有可展开的失败行；不要再次尝试保存。
-                for activity_id in self._session_controller.state.compaction_activities.keys() - previous_ids:
-                    await self._transcript.mount_compaction(self._session_controller.get_compaction(activity_id))
-                if follow_bottom:
-                    self.call_after_refresh(chat_view.scroll_end, animate=False)
-                raise
-            self._manual_compaction_id = activity.id
             self._is_streaming = True
             self._exit_flow.work_started()
             self._status_hint = "正在压缩上下文..."
             composer = self.query_one("#composer-input", ComposerTextArea)
             composer.disabled = True
             self._refresh_status_bar()
-            try:
-                await self._transcript.mount_compaction(activity)
-            except BaseException as exc:
-                self._finish_manual_activity_if_running("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed", str(exc))
-                self._stop_current_work()
-                raise
-            # 挂载控件也会让出事件循环；准备期间的停止不能再启动 worker。
-            if self._manual_compaction_id != activity.id:
-                self._transcript.compaction_widgets[activity.id].update_activity(self._session_controller.get_compaction(activity.id))
-                return None
-            if follow_bottom:
-                self.call_after_refresh(chat_view.scroll_end, animate=False)
-            self._compaction_worker = self._run_manual_compaction(activity.id)
+            self._compaction_worker = self._run_manual_compaction()
             return None
 
         if command_name == "session":
@@ -1033,21 +964,19 @@ class LanCherTextualApp(App[int]):
                 await self._completion.refresh()
 
     @work(group="compaction", exclusive=True, exit_on_error=False)
-    async def _run_manual_compaction(self, activity_id: str) -> None:
+    async def _run_manual_compaction(self) -> None:
         # 压缩交给 worker，主界面的消息循环才能继续处理 Ctrl+C。
         status = "就绪"
         try:
-            await self._turn_runner.compact_context(activity_id=activity_id, on_activity=self._consume_turn_event)
+            await self._agent.compact_context(on_activity=self._consume_turn_event)
         except asyncio.CancelledError:
             status = "压缩已停止"
-            self._finish_manual_activity_if_running("cancelled")
             raise
         except Exception as exc:
             status = "压缩未完成"
             self._command_preserve_input = True
-            save_failed = self._finish_manual_activity_if_running("failed", str(exc))
             if not self._ui_closing and self.is_running:
-                if isinstance(exc, SessionRepositoryError) and not save_failed:
+                if isinstance(exc, (SessionRepositoryError, OSError)):
                     self.notify(str(exc), title="压缩状态保存失败", severity="error", timeout=10)
                 composer = self.query_one(ComposerTextArea)
                 if not composer.text:
@@ -1078,7 +1007,6 @@ class LanCherTextualApp(App[int]):
             self._compaction_worker = None
             return
         # worker 尚未进入协程就取消时，协程内的 finally 不会执行。
-        self._finish_manual_activity_if_running("cancelled" if event.state == WorkerState.CANCELLED else "failed")
         self._compaction_worker = None
         self._manual_compaction_id = None
         self._is_streaming = False
@@ -1095,7 +1023,7 @@ class LanCherTextualApp(App[int]):
     async def _restore_session_view(self) -> None:
         chat_view = self._transcript
         await self._transcript.restore()
-        self._chat_started = bool(self._session_controller.state.messages or self._transcript.compaction_widgets)
+        self._chat_started = bool(self._agent.messages or self._transcript.compaction_widgets)
         self.query_one(BannerWidget).set_compact(self._chat_started)
         chat_view.set_class(self._chat_started, "-banner-collapsed")
         self._refresh_phase_chrome()
@@ -1110,9 +1038,9 @@ class LanCherTextualApp(App[int]):
         if result is not None and result.saved:
             try:
                 if result.config is not None and not result.runtime_applied:
-                    fallback = self._turn_runner.reload_models(result.config)
+                    fallback = self._agent.reload_models(result.config)
                     if fallback:
-                        self.notify(self._turn_runner.model_notice, title="模型")
+                        self.notify(self._agent.model_notice, title="模型")
                 if result.config is not None:
                     self._apply_ui_settings(result.config.ui)
             except (LanCherError, ValueError, RuntimeError, OSError) as exc:
@@ -1136,11 +1064,11 @@ class LanCherTextualApp(App[int]):
     def _handle_model_selected(self, model_ref: str | None) -> str | None:
         if model_ref is not None:
             try:
-                self._turn_runner.switch_model(model_ref)
+                self._agent.switch_model(model_ref)
             except (LanCherError, ValueError, RuntimeError, OSError) as exc:
                 self.notify(str(exc), title="切换模型失败", severity="error", timeout=10)
             else:
-                config = self._turn_runner.model_config
+                config = self._agent.model_config
                 label = model_display_name(config.providers, model_ref)
                 self._status_hint = "就绪"
                 self.notify(f"已切换为 {label}", title="模型")
@@ -1149,7 +1077,7 @@ class LanCherTextualApp(App[int]):
         if len(self.screen_stack) == 1:
             self.query_one("#composer-input", ComposerTextArea).focus()
         self.call_later(self._completion.refresh)
-        return self._turn_runner.model_ref
+        return self._agent.model_ref
 
     def _update_composer_height(self) -> None:
         composer_input = self.query_one("#composer-input", ComposerTextArea)
@@ -1167,16 +1095,12 @@ class LanCherTextualApp(App[int]):
 class ChatTUI:
     def __init__(
         self,
-        turn_runner: TurnRunner,
-        provider_config: ProviderConfig,
-        session_controller: SessionController,
+        agent: AgentService,
         ui_config: UIConfig,
         settings_service: SettingsService | None = None,
     ) -> None:
         self._app = LanCherTextualApp(
-            turn_runner=turn_runner,
-            provider_config=provider_config,
-            session_controller=session_controller,
+            agent=agent,
             ui_config=ui_config,
             settings_service=settings_service,
         )

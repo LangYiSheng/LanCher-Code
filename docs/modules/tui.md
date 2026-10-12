@@ -1,8 +1,8 @@
 # 模块：TUI 界面
 
-TUI 基于 Textual 构建，消费 `TurnRunner` 的事件，不直接执行工具或调用模型。实现位于 `lancher_code/tui/`。
+TUI 基于 Textual 构建，只消费 `AgentService` 的事件与状态快照并调用 SDK 公共操作，不持有 TurnRunner / SessionController，不直接执行工具或调用模型。实现位于 `lancher_code/tui/`，依赖通过 `tui` extra 安装。
 
-Skills 与 MCP 的界面仅消费 `TurnRunner.capabilities` 的状态与公共操作。技能扫描、模型选择、正文加载、项目 AGENTS.md 投影、连接任务和工具目录都由 `agent/` 核心负责，界面不持有这些行为。
+Skills 与 MCP 的界面仅消费 `AgentService.capabilities` 的状态与公共操作。技能扫描、模型选择、正文加载、项目 AGENTS.md 投影、连接任务和工具目录都由 `agent/` 核心负责，界面不持有这些行为。
 
 ## 组件职责
 

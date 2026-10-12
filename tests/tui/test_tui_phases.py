@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -55,12 +56,7 @@ def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Pat
     registry.register(EchoTool())
     executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
     runner = TurnRunner(provider, session, registry, executor)
-    app = LanCherTextualApp(
-        turn_runner=runner,
-        provider_config=provider_config,
-        session_controller=session,
-        ui_config=ui_config,
-    )
+    app = LanCherTextualApp(AgentService(runner, session), ui_config)
     return app, session
 
 

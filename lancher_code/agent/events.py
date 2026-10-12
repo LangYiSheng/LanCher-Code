@@ -10,6 +10,7 @@ from lancher_code.permissions.models import PermissionResolution
 from lancher_code.sessions.models import SessionMessage
 from lancher_code.usage.models import MessageUsage
 from typing import Literal
+from lancher_code.contracts.json import json_value
 
 
 TurnEventKind = Literal[
@@ -32,6 +33,8 @@ TurnEventKind = Literal[
     "permission_request_closed",
     "turn_completed",
     "compaction_updated",
+    "mcp_progress_updated",
+    "session_changed",
 ]
 
 
@@ -52,3 +55,10 @@ class TurnEvent:
     task_id: str | None = None
     pending_input_id: str | None = None
     compaction: CompactionActivity | None = None
+    session_id: str | None = None
+    run_id: str | None = None
+    sequence: int = 0
+    mcp_progress: dict[str, object] | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return json_value(self)

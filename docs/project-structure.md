@@ -18,7 +18,9 @@ lancher-code/
 │   ├── __init__.py              # 包版本
 │   ├── __main__.py              # python -m lancher_code
 │   ├── cli.py                  # 参数解析、日志和退出码
-│   ├── app.py                  # 配置、服务、运行时与 TUI 装配
+│   ├── app.py                  # TUI 宿主：引导、界面设置与退出小结
+│   ├── headless.py             # 无界面适配、输出与退出码
+│   ├── sdk.py                  # 公共 Agent SDK，不导入 UI
 │   ├── errors.py
 │   ├── logging_system.py
 │   ├── contracts/              # 跨领域契约，不承载业务流程
@@ -26,6 +28,9 @@ lancher-code/
 │   │   ├── messages.py         # ChatRequest、ContentBlock、StreamEvent
 │   │   └── tools.py            # 工具定义、调用、结果、阶段能力
 │   ├── agent/                  # 单轮任务编排与智能体能力核心
+│   │   ├── factory.py          # 显式 AgentConfig 与可注入依赖的核心装配
+│   │   ├── service.py          # AgentService：快照、就绪、结果、队列、生命周期
+│   │   ├── results.py          # AgentResult
 │   │   ├── runner.py           # TurnRunner 公开入口与任务循环
 │   │   ├── capabilities.py     # Skills、项目约定与 MCP 生命周期的公共门面
 │   │   ├── skill_context.py    # 技能激活、跨轮状态和核心请求内容
@@ -65,7 +70,7 @@ lancher-code/
 │   │   ├── projection.py       # 事件重放
 │   │   └── service.py          # 生命周期与增量持久化协调
 │   ├── config/                 # 应用配置与设置
-│   │   ├── models.py           # AppConfig、RuntimeConfig、UIConfig
+│   │   ├── models.py           # AgentConfig、AppConfig、RuntimeConfig、UIConfig
 │   │   ├── paths.py
 │   │   ├── bootstrap.py        # 首次引导状态
 │   │   ├── loader.py           # 当前 YAML 格式校验
@@ -118,8 +123,8 @@ lancher-code/
 
 ## 依赖与职责
 
-- `app.py` 负责装配；TUI 消费 `TurnEvent` 并调用公开服务，不直接调用模型网络接口。
-- `agent/` 编排一轮任务并管理 Skills、项目约定和 MCP 能力；前端只消费 `TurnRunner.capabilities` 的状态与公共操作。`sessions/` 持有对话事实，`context/` 构造模型可见副本并管理容量。正式请求持久化主机尾部事件，HUD 预览只使用副本，不提交前缀变化。
+- `sdk.py` 是公共入口，`agent/factory.py` 装配核心，`AgentService` 持有生命周期。`app.py` 和 `headless.py` 是宿主适配器；TUI 消费快照，不持有 Runner / SessionController，也不直接调用模型。
+- `agent/` 编排一轮任务并管理 Skills、项目约定和 MCP 能力；前端使用 `AgentService` 的能力快照与公共操作。`sessions/` 持有对话事实，`context/` 构造模型可见副本并管理容量。正式请求持久化主机尾部事件，HUD 预览只使用副本，不提交前缀变化。
 - `config/models.py` 持有应用配置组合；供应商定义属于 `providers/models.py`。`providers/catalog.py` 只接收供应商映射与显式引用，不导入 `AppConfig`，避免配置加载与目录解析的循环依赖。
 - `contracts/` 只承载真正跨领域的消息、工具、控制契约。会话、权限、用量等类型由自己的领域维护，不再集中到根层 `models.py`。
 - `permissions/` 判定是否执行，`tools/` 组织工具调用，`execution/` 负责资源与进程；公共路径访问规则集中在 `filesystem/access.py`。
@@ -131,7 +136,7 @@ lancher-code/
 
 ```text
 ~/.lancher/
-├── lancher.yaml                 # 唯一主配置
+├── lancher.yaml                 # TUI 默认主配置；无界面可指定其他文件
 ├── permissions.yaml             # 用户权限规则
 ├── mcp.yaml                     # 全局 MCP
 ├── skills/<名称>/SKILL.md         # 用户技能，可包含 references / scripts 等资源

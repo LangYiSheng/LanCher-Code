@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -53,12 +54,7 @@ def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Pat
         permission_engine=PermissionEngine(permission_storage),
     )
     runner = TurnRunner(provider, session, registry, executor)
-    app = LanCherTextualApp(
-        turn_runner=runner,
-        provider_config=provider_config,
-        session_controller=session,
-        ui_config=ui_config,
-    )
+    app = LanCherTextualApp(AgentService(runner, session), ui_config)
     return app, session
 
 
@@ -82,10 +78,10 @@ async def _wait_permission(app: LanCherTextualApp, pilot) -> None:
 
 
 async def _wait_completed_turn(app: LanCherTextualApp, pilot) -> None:
-    await _until(pilot, lambda: not app._is_streaming and not app._turn_runner.has_active_turn
-                 and bool(app._session_controller.state.messages)
-                 and app._session_controller.state.messages[-1].role == "assistant"
-                 and app._session_controller.state.messages[-1].status == "complete")
+    await _until(pilot, lambda: not app._is_streaming and not app._agent.has_active_turn
+                 and bool(app._agent.state.messages)
+                 and app._agent.state.messages[-1].role == "assistant"
+                 and app._agent.state.messages[-1].status == "complete")
 
 
 def _permission_request_responses() -> list[list[StreamEvent]]:
@@ -261,13 +257,13 @@ async def test_command_permission_panel_returns_each_outcome(
     provider = FakeProvider(responses=_permission_request_responses())
     app, _session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
     captured_outcomes: list[str] = []
-    original_resolve = app._turn_runner.resolve_permission_request
+    original_resolve = app._agent.resolve_permission_request
 
     def capture_resolution(resolution) -> bool:
         captured_outcomes.append(resolution.outcome)
         return original_resolve(resolution)
 
-    app._turn_runner.resolve_permission_request = capture_resolution
+    app._agent.resolve_permission_request = capture_resolution
 
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "看看仓库状态")
@@ -323,7 +319,7 @@ async def test_closing_ui_waits_for_running_command_cleanup(openai_provider_conf
         "description": "界面退出收尾测试", "command": "Start-Sleep -Seconds 30",
     })
     app, _ = _build_app(FakeProvider(responses), openai_provider_config, ui_config, tmp_path)
-    app._turn_runner.set_execution_access("full")
+    app._agent.set_execution_access("full")
     original_spawn = process_module.spawn_backend
     started = asyncio.Event()
     processes = []
@@ -339,8 +335,8 @@ async def test_closing_ui_waits_for_running_command_cleanup(openai_provider_conf
         async with app.run_test() as pilot:
             await _submit_message(app, pilot, "启动命令")
             await asyncio.wait_for(started.wait(), 5)
-            assert app._turn_runner.has_active_turn
-        assert not app._turn_runner.has_active_turn
+            assert app._agent.has_active_turn
+        assert not app._agent.has_active_turn
         assert processes
         for process in processes:
             assert await asyncio.wait_for(process.wait(), 5) is not None

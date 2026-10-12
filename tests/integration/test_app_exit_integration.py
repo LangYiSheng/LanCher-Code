@@ -14,6 +14,7 @@ import httpx
 from rich.console import Console
 
 import lancher_code.app as app_module
+import lancher_code.agent.factory as factory_module
 from lancher_code.execution.contracts import ProcessSpec
 from lancher_code.config.bootstrap import ConfigBootstrapState
 from lancher_code.config.models import AppConfig, RuntimeConfig
@@ -32,8 +33,8 @@ async def test_exit_after_real_session_and_background_process_prints_final_usage
     monkeypatch.setattr(app_module, "Console", lambda: console)
     monkeypatch.setattr(app_module, "resolve_config_bootstrap_state", lambda: state)
     monkeypatch.setattr(app_module, "load_config", lambda path: config)
-    monkeypatch.setattr(app_module, "load_mcp_config", lambda cwd: ([], []))
-    monkeypatch.setattr(app_module, "get_global_permissions_path", lambda: tmp_path / "global-permissions.json")
+    monkeypatch.setattr(factory_module, "load_mcp_config", lambda cwd: ([], []))
+    monkeypatch.setattr(factory_module, "get_global_permissions_path", lambda: tmp_path / "global-permissions.json")
     monkeypatch.setattr(app_module, "get_global_mcp_config_path", lambda: tmp_path / "global-mcp.json")
     body = (
         b'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n'
@@ -42,23 +43,23 @@ async def test_exit_after_real_session_and_background_process_prints_final_usage
         b'data: [DONE]\n\n'
     )
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
-    monkeypatch.setattr(app_module, "create_provider", lambda config, **kwargs: create_provider(
+    monkeypatch.setattr(factory_module, "create_provider", lambda config, **kwargs: create_provider(
         config, client_factory=lambda: httpx.AsyncClient(transport=transport), **kwargs))
     captured = {}
 
     class HeadlessTUI(ChatTUI):
         async def run(self):
             app = self._app
-            runner = app._turn_runner
+            runner = app._agent._runner
 
             async def drive(pilot):
                 composer = app.query_one(ComposerTextArea)
                 composer.text = "退出链路测试"
                 await pilot.press("enter")
                 async with asyncio.timeout(10):
-                    while app._is_streaming or not app._session_controller.session_id:
+                    while app._is_streaming or not app._agent.session_id:
                         await pilot.pause(0.02)
-                session_id = app._session_controller.session_id
+                session_id = app._agent.session_id
                 script = 'import time; print("ready", flush=True); time.sleep(30)'
                 argv = (sys.executable, "-c", script)
                 command = ("& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in argv)

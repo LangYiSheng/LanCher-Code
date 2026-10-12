@@ -1,8 +1,18 @@
 from pathlib import Path
+from importlib.util import find_spec
 
 
 project_root = Path.cwd().resolve()
 icon_path = project_root / "assets" / "lancher_code.ico"
+
+# 终端发行包始终包含完整界面；普通的函数内导入仍由 PyInstaller 自动发现。
+missing_ui_dependencies = [name for name in ("rich", "textual") if find_spec(name) is None]
+if missing_ui_dependencies:
+    raise RuntimeError(
+        "打包终端界面缺少依赖："
+        + ", ".join(missing_ui_dependencies)
+        + "。请先运行 uv sync --extra build。"
+    )
 
 
 a = Analysis(

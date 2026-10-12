@@ -1,96 +1,71 @@
 # 流程：程序启动
 
-启动入口链：`main.py` / `__main__.py` / console script → `lancher_code/cli.py:main` → `lancher_code/app.py:run_app`。
+入口统一经过 `cli.main()`。无参数进入 TUI，`run` 子命令进入无界面适配器；两者使用公共 Agent SDK。帮助和参数校验在导入宿主之前完成。
 
-## 时序图
+## 核心装配与生命周期
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户
-    participant CLI as cli.main
-    participant LOG as logging_system
-    participant APP as app.run_app
-    participant BS as ConfigBootstrapTUI
-    participant CFG as config
-    participant PF as create_provider
-    participant USAGE as RunUsageTracker
-    participant SS as SessionController
-    participant REG as tool_registry
-    participant MCP as MCPClientManager
-    participant RUN as TurnRunner
-    participant CAP as AgentCapabilities
-    participant TUI as ChatTUI
-
-    U->>CLI: uv run lancher
-    CLI->>LOG: configure_logging()（写 ~/.lancher/logs/lancher-error.log）
-    CLI->>APP: asyncio.run(run_app())
-    APP->>CFG: resolve_config_bootstrap_state()
-    alt 全局配置不存在（首次启动）
-        APP->>BS: ConfigBootstrapTUI.run()
-        BS-->>APP: 用户填写并保存 → ~/.lancher/lancher.yaml + mcp.yaml 模板
-    else 用户取消引导
-        APP-->>CLI: 返回 0，退出
-    end
-    APP->>CFG: load_config() 校验配置（非法则打印错误、返回 1）
-    APP->>USAGE: 创建本次启动的请求用量账本
-    APP->>PF: create_provider(active_config, usage_observer)
-    APP->>LOG: register_sensitive_values(api_key)
-    APP->>SS: SessionController(provider, cwd, plan 路径, 初始阶段, 权限策略, 权限存储)
-    APP->>REG: create_default_tool_registry()（基础内置工具）
-    APP->>MCP: load_mcp_config(cwd) + MCPClientManager（并注册 env/headers 敏感值）
-    APP->>SS: PermissionEngine / SettingsService / ToolExecutor
-    APP->>RUN: TurnRunner(provider, session, registry, executor, 循环上限...)
-    RUN->>CAP: 创建能力门面、技能服务与工具，绑定项目约定和技能上下文
-    APP->>RUN: configure_capabilities(mcp_manager, registry)
-    APP->>TUI: ChatTUI(turn_runner, settings_service, ...)
-    APP->>RUN: start_capabilities()
-    CAP->>MCP: 后台 initialize(registry)，逐页发现工具
-    TUI-->>APP: tui.run() 进入事件循环
-    APP->>RUN: finally: turn_runner.shutdown()（能力与进程统一收尾）
-    APP->>SS: finally: session.close()
-    APP->>MCP: finally: 幂等关闭初始 manager
-    opt TUI 正常返回
-        APP->>USAGE: 获取最终用量快照
-        APP-->>U: 普通终端打印告别、恢复命令与本次用量
-    end
+    participant H as TUI或无界面宿主
+    participant F as create_agent
+    participant A as AgentService
+    participant R as TurnRunner
+    participant C as AgentCapabilities
+    participant M as MCPClientManager
+    participant S as SessionController
+    H->>F: 显式AgentConfig和工作目录
+    F->>S: 创建会话控制器与共享用量账本
+    F->>R: 创建Provider、工具注册表、权限、执行运行时
+    F->>A: 绑定Runner和Session
+    F-->>H: 服务（尚未请求模型）
+    H->>A: start_capabilities或async with
+    A->>C: start
+    C->>M: 后台初始化与分页工具发现
+    H->>A: async with或显式ready（脚本等待就绪）
+    A->>C: ready（等待初始化完成）
+    H->>A: run或run_user_turn
+    A->>R: 处理输入
+    R-->>A: 内部事件
+    A-->>H: 深拷贝事件快照与结果
+    H->>A: close或离开async with
+    A->>R: 停止任务、能力与托管进程
+    A->>S: 保存会话并释放写入锁
 ```
 
-（`REG` 表示工具注册表；`PermissionEngine / SettingsService / ToolExecutor / TurnRunner` 的创建统一归到装配步骤，详见 [../modules](../modules/) 各模块文档。）
+装配位于 `agent/factory.py`，生命周期位于 `agent/service.py`。模型切换后的 Provider 继续观察同一账本；恢复会话不把历史消耗导入本次启动账本。首条用户消息才创建 UUID Session 和独立 workspace。
 
-## 启动步骤详解
+## TUI 宿主
 
-| 步骤 | 代码位置 | 说明 |
-|---|---|---|
-| 1. 参数解析 | `cli.py build_arg_parser()` | 当前无任何参数 |
-| 2. 日志初始化 | `cli.py configure_logging()` | ERROR 级、滚动文件（5MB × 5）、敏感值脱敏；目录不可写回退 stderr |
-| 3. 引导判定 | `config/bootstrap.py` | `needs_setup = ~/.lancher/lancher.yaml 不存在` |
-| 4. 首次引导 | `tui/bootstrap.py` | 填写协议/模型/Base URL/API Key/超时/thinking；保存并创建 MCP 模板 |
-| 5. 加载配置 | `config/loader.py load_config()` | YAML 解析 + 完整校验；失败打印 `[错误]` 并退出码 1 |
-| 6. 创建 Provider | `providers/factory.py` | 按 `protocol` 返回 OpenAI/Claude 实现 |
-| 7. 敏感值注册 | `logging_system.register_sensitive_values()` | api_key 与 MCP env/headers 值，日志脱敏 |
-| 8. 创建会话控制器 | `sessions/controller.py SessionController` | 绑定 cwd、初始阶段与策略、权限存储；首条用户消息才创建 UUID Session 与独立 workspace |
-| 9. 创建工具集 | `tools/__init__.py` | 注册 文件工具、run_command、process_list/read/wait/write/stop/background、glob/grep、计划与发现工具 |
-| 10. 创建 MCP | `mcp/manager.py` | 加载全局+项目配置，由核心后台初始化 |
-| 11. 创建执行链 | `tools/core/executor.py` + `permissions/engine.py` | ToolExecutor 持有注册表与权限引擎 |
-| 12. 创建 TurnRunner | `agent/runner.py`、`agent/capabilities.py` | 注入依赖，装配 Skills 工具与项目约定、绑定 MCP 门面；配置循环上限与未知工具熔断 |
-| 13. 启动核心能力与 TUI | `app.py`、`tui/app.py` | 核心开始后台 MCP 连接；TUI 显示进度，输入立即可使用内置能力 |
-| 14. 退出清理与小结 | `app.py finally` | 等待 Runner、Session 写入者和 MCP 连接收尾；正常返回后打印恢复命令与本次启动用量，清理失败明确报告并返回 1 |
+无参数 `lancher` 只在选定 TUI 分支后导入 `app.py` 和 Textual/Rich。缺少界面依赖时提示安装 `tui` extra，返回 `1`。
 
-本次启动账本在应用装配时创建。Provider 工厂和切换模型后的新 Provider 都使用同一个 observer，Session 恢复不导入历史消耗。退出确认与统计口径详见 [结束工作与恢复对话](app-exit.md)。
+1. 初始化日志，检测 `~/.lancher/lancher.yaml`。
+2. 文件不存在时运行三步配置引导，用户取消返回 `0`。
+3. 校验主配置并用 `AppConfig.to_agent_config()` 创建 SDK 服务。
+4. 创建界面设置服务和 `ChatTUI(agent=...)`，核心后台初始化 MCP，界面展示进度。
+5. 界面消费快照与调用公共操作；初始化期间即可使用已注册的内置工具，MCP 目录在后台更新。
+6. 退出时由 AgentService 统一收尾，宿主回到普通终端后打印恢复信息和本次用量；清理失败返回 `1`。
 
-## 启动失败的常见退出
+首次引导写入主配置和 MCP 模板；SDK 不启动引导。配置详情见 [配置说明](../configuration.md)，TUI 退出交互见 [结束工作与恢复](app-exit.md)。
 
-| 退出码 | 场景 | 表现 |
-|---|---|---|
-| `0` | 引导被取消 | 直接退出，不写配置 |
-| `1` | 配置非法（YAML 错误 / 缺必填项 / protocol 不支持） | 终端打印 `[错误] <原因>`（红色），退出码 1 |
-| `1` | 其他未捕获异常 | 写入日志（`event=application_uncaught_exception`），退出码 1 |
-| `130` | 启动阶段 Ctrl+C | `KeyboardInterrupt`，退出码 130 |
+## 无界面宿主
 
-## 首次启动的产物
+`lancher run "任务" --config PATH` 进入 `headless.run_headless()`，不导入 TUI：
 
-```text
-~/.lancher/lancher.yaml      ← 引导界面写入的主配置
-~/.lancher/mcp.yaml          ← 自动生成的 MCP 模板（ensure_user_mcp_config）
-~/.lancher/logs/lancher-error.log  ← 日志（启动时即创建）
-```
+1. 获取任务参数或标准输入，拒绝空任务。
+2. 读取显式模型配置，转换为 AgentConfig，注册日志敏感值。
+3. 创建服务并进入 `async with`，等待能力准备。
+4. 可选恢复会话；显式 `--model` 优先于保存模型。
+5. 运行并消费结果，JSONL 时逐条发布事件、对审批明确拒绝。
+6. 成功、失败、取消、超时均先关闭服务，再按格式输出最终结果。
+
+命令保留配置中的阶段与访问范围，默认拒绝需要批准的请求。总超时包含初始化与任务处理；触及后等待收尾，因此退出可能晚于指定秒数。`text` 回答写 stdout，错误写 stderr；`json` / `jsonl` 的 stdout 保持机器可读。
+
+| 退出码 | 场景 |
+|---|---|
+| `0` | 任务完成或 TUI 正常退出 |
+| `1` | 配置、任务或关闭失败 |
+| `2` | 参数解析失败 |
+| `124` | 无界面任务总超时 |
+| `130` | 取消或中断 |
+
+参数、结果契约和 Python 嵌入示例见 [Agent SDK 与无界面运行](../agent-sdk.md)。

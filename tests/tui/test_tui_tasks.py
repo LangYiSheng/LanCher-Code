@@ -107,15 +107,15 @@ async def test_busy_tasks_command_opens_and_escape_scope_is_local(openai_provide
         composer.text = "/tasks"
         await app.handle_input_submitted(ComposerSubmitted(composer, composer.text))
         await pilot.pause()
-        assert isinstance(app.screen, TasksScreen) and app._turn_runner.has_active_turn
+        assert isinstance(app.screen, TasksScreen) and app._agent.has_active_turn
         assert app.screen.session_id == session.session_id
         await pilot.press("escape")
-        assert len(app.screen_stack) == 1 and app._turn_runner.has_active_turn
+        assert len(app.screen_stack) == 1 and app._agent.has_active_turn
         composer.text = "停止后还要保留的草稿"
         composer.focus()
         await pilot.press("escape")
         await pilot.pause()
-        assert not app._turn_runner.has_active_turn
+        assert not app._agent.has_active_turn
         assert composer.text == "停止后还要保留的草稿"
 
 
@@ -131,9 +131,9 @@ async def test_busy_session_stop_preserves_queue_and_clears_command(openai_provi
         composer.text = "/session stop"
         await app.handle_input_submitted(ComposerSubmitted(composer, composer.text))
         await pilot.pause()
-        assert not app._turn_runner.has_active_turn
-        assert app._turn_runner.queue_paused
-        assert app._turn_runner.pending_inputs[0].text == "后续消息"
+        assert not app._agent.has_active_turn
+        assert app._agent.queue_paused
+        assert app._agent.pending_inputs[0].text == "后续消息"
         assert composer.text == ""
 
 
@@ -152,13 +152,13 @@ async def test_task_screen_facade_binds_session_before_later_switch(openai_provi
         return {"text": "原对话日志" if cursor == 0 else "", "next_cursor": 100}
     async def stop(process_id, session_id=None):
         seen.append(("stop", session_id))
-    monkeypatch.setattr(app._turn_runner, "list_processes", list_processes)
-    monkeypatch.setattr(app._turn_runner, "read_process_output", read_output)
-    monkeypatch.setattr(app._turn_runner, "stop_process", stop)
+    monkeypatch.setattr(app._agent, "list_processes", list_processes)
+    monkeypatch.setattr(app._agent, "read_process_output", read_output)
+    monkeypatch.setattr(app._agent, "stop_process", stop)
     async with app.run_test(size=(100, 40)) as pilot:
         await app._task_commands.execute(f"show {runtime.process_id}")
         await pilot.pause()
-        app._turn_runner.new_session()
+        app._agent.new_session()
         assert session.session_id is None
         await pilot.click("#tasks-stop")
         await pilot.pause()
@@ -171,7 +171,7 @@ async def test_task_screen_facade_binds_session_before_later_switch(openai_provi
 async def test_hud_keeps_background_and_notification_visible(openai_provider_config, tmp_path, monkeypatch, size):
     app, _ = _build_app(FakeProvider([]), openai_provider_config, UIConfig(), tmp_path)
     counts = {"background": 2, "running": 2, "notifications": 1, "waiting": 3}
-    monkeypatch.setattr(app._turn_runner, "execution_summary", lambda session_id=None: counts)
+    monkeypatch.setattr(app._agent, "execution_summary", lambda session_id=None: counts)
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
         selector = "#status-right" if size[0] >= 64 else "#status-left"
@@ -197,7 +197,7 @@ async def test_hud_timer_stops_before_slow_runtime_shutdown(openai_provider_conf
     shutdown_started = asyncio.Event()
     refreshes_during_shutdown = []
     refresh = app._refresh_status_bar
-    shutdown = app._turn_runner.shutdown
+    stop_and_wait = app._agent.stop_and_wait
 
     def observe_refresh():
         if shutdown_started.is_set():
@@ -210,10 +210,10 @@ async def test_hud_timer_stops_before_slow_runtime_shutdown(openai_provider_conf
         refresh()
         # 超过真实一秒周期，确保不会有定时刷新追进异步资源清理。
         await asyncio.sleep(1.1)
-        await shutdown()
+        await stop_and_wait()
 
     monkeypatch.setattr(app, "_refresh_status_bar", observe_refresh)
-    monkeypatch.setattr(app._turn_runner, "shutdown", slow_shutdown)
+    monkeypatch.setattr(app._agent, "stop_and_wait", slow_shutdown)
     async with app.run_test(size=(32, 16)) as pilot:
         await pilot.pause()
     assert shutdown_started.is_set()

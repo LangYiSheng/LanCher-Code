@@ -1,18 +1,18 @@
 """消息时间线视图：维护控件身份、增量投影和会话恢复顺序。"""
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 from collections.abc import Callable
 from textual.containers import VerticalScroll
 from lancher_code.context.models import CompactionActivity
 from lancher_code.sessions.models import SessionMessage
-from lancher_code.sessions.controller import SessionController
 from lancher_code.agent.events import TurnEvent
 from lancher_code.tui.message import MessageWidget
 from lancher_code.tui.compaction import CompactionActivityWidget
 
 class TranscriptView(VerticalScroll):
-    def __init__(self, session: SessionController, show_thinking: Callable[[], bool]) -> None:
+    def __init__(self, agent: AgentService, show_thinking: Callable[[], bool]) -> None:
         super().__init__(id="chat-view")
-        self.session, self.show_thinking = session, show_thinking
+        self.agent, self.show_thinking = agent, show_thinking
         self.message_widgets: dict[str, MessageWidget] = {}
         self.compaction_widgets: dict[str, CompactionActivityWidget] = {}
         self.turn_message_ids: set[str] = set()
@@ -20,17 +20,17 @@ class TranscriptView(VerticalScroll):
     async def mount_message(self, message: SessionMessage) -> None:
         chat_view = self
         widget = MessageWidget(message, show_thinking=self.show_thinking(),
-                               compaction_activities=self.session.state.compaction_activities)
+                               compaction_activities=self.agent.compaction_activities)
         self.message_widgets[message.id] = widget
         await chat_view.mount(widget)
 
     async def sync_message(self, message_id: str, *, compaction: CompactionActivity | None = None) -> None:
         widget = self.message_widgets[message_id]
-        activities = self.session.state.compaction_activities
+        activities = self.agent.compaction_activities
         if compaction is not None:
             # 开始事件携带自己的快照；事件排队期间 Controller 可能已完成压缩。
             activities = {**activities, compaction.id: compaction}
-        await widget.update_from_message(self.session.get_message(message_id),
+        await widget.update_from_message(self.agent.get_message(message_id),
                                         compaction_activities=activities)
 
     async def mount_compaction(self, activity: CompactionActivity) -> None:
@@ -46,10 +46,11 @@ class TranscriptView(VerticalScroll):
         self.message_widgets.clear()
         self.compaction_widgets.clear()
         self.turn_message_ids.clear()
-        messages = self.session.state.messages
+        state = self.agent.snapshot()
+        messages = state.messages
         message_ids = {message.id for message in messages}
         standalone: dict[str | None, list[CompactionActivity]] = {}
-        for activity in self.session.state.compaction_activities.values():
+        for activity in state.compaction_activities.values():
             if activity.message_id in message_ids:
                 continue
             standalone.setdefault(activity.after_message_id, []).append(activity)

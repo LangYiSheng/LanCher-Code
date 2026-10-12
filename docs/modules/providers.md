@@ -89,7 +89,7 @@
 
 ## 与其他模块的关系
 
-- ← `factory.py` ← `app.py`：启动时解析默认模型后创建
+- ← `factory.py` ← `agent/factory.py`：SDK 装配时解析默认模型后创建
 - ← `TurnRunner.configure_models/switch_model/reload_models`：协调模型目录、协议适配器和会话有效配置的切换；正在响应或压缩时禁止切换
 - ← `agent/streaming.py`：`collect_response()` 消费流事件并验证完整响应
 - ← `context/compaction.py`：摘要压缩请求也走 `stream_chat()`

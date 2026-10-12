@@ -1,13 +1,12 @@
 """命令补全控制器：独立维护候选与选中项，只操作输入相关控件。"""
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 from dataclasses import dataclass
 from typing import Callable
 from rich.text import Text
 from textual.geometry import Size
 from lancher_code.errors import LanCherError
 from lancher_code.providers.catalog import iter_model_refs, model_display_name
-from lancher_code.sessions.controller import SessionController
-from lancher_code.agent.runner import TurnRunner
 from lancher_code.tui.commands import (SessionCompletionChoice, SlashCompletionCandidate,
     SlashCompletionContext, SlashCommandRegistry)
 from lancher_code.tui.composer import ComposerTextArea, SlashCompletionMenu, CommandHintBar
@@ -20,10 +19,10 @@ class CompletionWidgets:
     hint: CommandHintBar
 
 class CompletionController:
-    def __init__(self, registry: SlashCommandRegistry, session: SessionController, runner: TurnRunner, *,
+    def __init__(self, registry: SlashCommandRegistry, agent: AgentService, *,
                  widgets: Callable[[], CompletionWidgets], size: Callable[[], Size], busy: Callable[[], bool],
                  fit_panels: Callable[[], None], refresh_chrome: Callable[[], None]) -> None:
-        self.registry, self.session, self.runner = registry, session, runner
+        self.registry, self.agent = registry, agent
         self.widgets, self.size, self.busy = widgets, size, busy
         self.fit_panels, self.refresh_chrome = fit_panels, refresh_chrome
         self.matches: list[SlashCompletionCandidate] = []
@@ -44,14 +43,14 @@ class CompletionController:
             return
 
         cursor_at_end = composer.cursor_location == composer.document.end
-        processes = self.runner.list_processes() if composer.text.lstrip().startswith("/tasks") else []
+        processes = self.agent.list_processes() if composer.text.lstrip().startswith("/tasks") else []
         sessions = []
         session_listing_error = None
-        skills = self.runner.capabilities.list_skills() if composer.text.lstrip().startswith("/skills") else []
-        servers = self.runner.capabilities.mcp_status() if composer.text.lstrip().startswith("/mcp") else []
+        skills = self.agent.capabilities.list_skills() if composer.text.lstrip().startswith("/skills") else []
+        servers = self.agent.capabilities.mcp_status() if composer.text.lstrip().startswith("/mcp") else []
         if cursor_at_end and composer.text.lstrip().startswith("/session"):
             try:
-                listing = self.session.list_sessions()
+                listing = self.agent.list_sessions()
                 sessions = listing.items
                 if listing.issues:
                     session_listing_error = f"{len(listing.issues)} 个会话不可恢复，/session list 查看详情"
@@ -64,15 +63,15 @@ class CompletionController:
                     session_choices=tuple(SessionCompletionChoice(
                         item.session_id, item.title, item.updated_at, item.archived,
                     ) for item in sessions),
-                    active_session_id=self.session.session_id,
+                    active_session_id=self.agent.session_id,
                     process_choices=tuple((str(item["process_id"]), task_label(item)) for item in processes),
                     model_choices=self.model_choices(),
                     skill_choices=tuple((str(item.get("id", item["name"])),
                         f'{item["name"]} · {item.get("scope", "")} · ' + ("启用" if item.get("enabled", True) else "停用")) for item in skills),
                     mcp_choices=tuple((str(item["name"]), f'{item["name"]} · {item.get("state", "未知")}') for item in servers),
-                    active_model_ref=self.runner.model_ref,
-                    default_model_ref=self.runner.model_config.default_model if self.runner.model_config is not None else None,
-                    execution_access=self.session.execution_access,
+                    active_model_ref=self.agent.model_ref,
+                    default_model_ref=self.agent.model_config.default_model if self.agent.model_config is not None else None,
+                    execution_access=self.agent.execution_access,
                 )
             )
             if cursor_at_end and not composer.should_suppress_slash_menu()
@@ -199,7 +198,7 @@ class CompletionController:
 
 
     def model_choices(self) -> tuple[tuple[str, str], ...]:
-        config = self.runner.model_config
+        config = self.agent.model_config
         if config is None:
             return ()
         return tuple((ref, model_display_name(config.providers, ref)) for ref in iter_model_refs(config.providers))

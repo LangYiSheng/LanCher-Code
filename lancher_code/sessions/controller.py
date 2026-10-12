@@ -108,6 +108,10 @@ class SessionController:
         return self._cwd
 
     @property
+    def permission_storage(self) -> PermissionStorage:
+        return self._permission_storage
+
+    @property
     def state(self) -> SessionState:
         return self._state
 

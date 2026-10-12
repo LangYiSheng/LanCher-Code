@@ -17,7 +17,7 @@
 ## 在系统中的位置
 
 ```text
-tui/app.py  ──run_user_turn()──▶  TurnRunner
+TUI / 无界面 CLI / 嵌入应用 → AgentService ──run_user_turn()──▶ TurnRunner
                                               │
             ┌───────────────┬────────────────┼────────────────┐
             ▼               ▼                ▼                ▼
@@ -124,7 +124,7 @@ run_user_turn(text)
 - → `ToolRegistry`：列出可见工具 / 延迟工具索引
 - → `ToolCallAssembler`：拼接工具调用
 - → `context.tokens` / `context.budget` / `context.compaction`：usage 校准、动态额度与压缩入口
-- ← `tui/app.py`：唯一消费者
+- ← `agent/service.py`：内部事件消费者，发布快照供各前端使用
 
 ## 注意事项
 

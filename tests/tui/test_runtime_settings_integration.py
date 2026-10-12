@@ -1,5 +1,6 @@
 """真实聊天应用、设置页面与智能体核心的系统设置联动。"""
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import asyncio
 from copy import deepcopy
@@ -71,7 +72,7 @@ def _build_app(tmp_path: Path):
     runner = TurnRunner(provider, session, registry, executor,
                         skills_service=SkillsService(project, user_root=user_root))
     runner.configure_models(config, provider_factory=lambda resolved: provider)
-    app = LanCherTextualApp(runner, provider_config, session, config.ui, settings_service=service)
+    app = LanCherTextualApp(AgentService(runner, session), config.ui, settings_service=service)
     return app, runner, session, provider, service
 
 
@@ -82,11 +83,11 @@ async def _until(pilot, predicate) -> None:
 
 
 async def _submit(app, pilot, text: str) -> None:
-    previous = len(app._turn_runner._models.provider.requests)
+    previous = len(app._agent._runner._models.provider.requests)
     composer = app.query_one(ComposerTextArea)
     await app.handle_input_submitted(ComposerSubmitted(composer, text))
-    await _until(pilot, lambda: len(app._turn_runner._models.provider.requests) > previous
-                 and not app._is_streaming and not app._turn_runner.has_active_turn)
+    await _until(pilot, lambda: len(app._agent._runner._models.provider.requests) > previous
+                 and not app._is_streaming and not app._agent.has_active_turn)
 
 
 async def _open_system(app, pilot) -> SettingsScreen:

@@ -20,7 +20,7 @@
 uv sync
 ```
 
-这会在 `.venv` 中创建虚拟环境并安装 `pyproject.toml` 中声明的全部依赖。
+这会在 `.venv` 中创建虚拟环境，安装核心和默认 TUI 依赖组。`uv sync --no-default-groups` 只安装核心。
 
 如果还要运行测试或打包，分别需要额外依赖组：
 
@@ -34,7 +34,7 @@ uv sync --extra build   # 打包依赖（pyinstaller）
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -e ".[tui,dev]"
 ```
 
 ## 2. 启动程序
@@ -53,6 +53,14 @@ python main.py          # 仓库根入口（依赖 main.py）
 1. 初始化日志系统（`~/.lancher/logs/lancher-error.log`）
 2. 运行 `lancher_code.app.run_app()`
 3. 以退出码结束：`0` 正常退出 / `130` 启动阶段被 Ctrl+C 中断 / `1` 配置、收尾或未捕获异常；聊天界面中确认退出属于正常退出
+
+这些无参数方式进入 TUI。只需要 Agent 核心时可 `pip install .`，再通过显式配置运行：
+
+```bash
+lancher run "阅读项目并总结入口职责" --config ./my-model.yaml --cwd ./my-project --format json
+```
+
+无界面命令不进入首次引导，需要批准的操作默认拒绝；Python SDK 和更多输出格式见 [Agent SDK 与无界面运行](agent-sdk.md)。
 
 ## 3. 第一次运行：配置引导
 

@@ -2,7 +2,7 @@
 
 ## 整体架构
 
-LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采用分层结构：
+LanCher Code 的核心是**单进程、异步（asyncio）**的编程 Agent，通过公共 SDK 供 TUI、无界面 CLI 和嵌入应用调用：
 
 ```text
 用户
@@ -10,7 +10,9 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 ┌─────────────────────────────┐
 │ Textual TUI（tui/）          │  界面层：渲染、键盘、弹窗
 └─────────────────────────────┘
- ↓ ComposerSubmitted / 事件流
+ ↓ 公共操作 / 事件快照
+AgentService（lancher_code.sdk）
+ ↓ 统一装配、能力就绪、队列与生命周期
 ┌─────────────────────────────┐
 │ TurnRunner（agent/runner.py） │  流程层：ReAct 工具循环
 └─────────────────────────────┘
@@ -27,9 +29,10 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 关键设计决策：
 
 - **协议无关的 transcript**：会话层保存的是 `ConversationMessage` 抽象消息，由 Provider 在发送前各自序列化为 OpenAI / Claude 协议格式（见 `providers/*` 的 `_serialize_message`）。
-- **事件流解耦**：`TurnRunner.run_user_turn()` 是一个异步生成器，产出 `TurnEvent`；TUI 只消费事件更新界面，不直接调用 Provider。
+- **公共 SDK 边界**：前端只调用 `AgentService`，不持有 Runner 或 SessionController。`AgentConfig` 不含 UI，核心导入不加载 Textual / Rich。
+- **事件流解耦**：内部 Runner 产出 `TurnEvent`，服务发布深拷贝快照与递增序号。服务成功结束后自动推进 follow_up 队列；`run()` 收集 `AgentResult`，默认拒绝无人处理的审批。
 - **能力管理在核心**：`AgentCapabilities` 装配技能工具，管理 Skills 激活、项目约定投影与 MCP 生命周期。TUI 只展示核心快照和调用公共管理接口；其他前端复用同一门面。
-- **阶段与权限独立**：讨论、计划、执行决定可用工具范围，逐次确认、自动编辑、跳过询问决定范围内工具的审批方式。阶段边界同时应用于工具发现和实际执行。
+- **阶段与权限独立**：讨论、计划、执行决定可用工具范围，`project` / `full` 决定执行访问。阶段边界同时应用于工具发现和实际执行。
 - **权限判定在工具执行前**：`ToolExecutor` 对每个工具调用先过 `PermissionEngine`，只有 `allow` 才真正执行。
 - **全程异步**：`app.py` 在 `asyncio.run()` 中运行；网络请求（httpx）、子进程（run_command 工具）、文件卸载（`asyncio.to_thread`）都是异步的。
 
@@ -37,7 +40,8 @@ LanCher Code 是一个**单进程、异步（asyncio）**的终端应用，采�
 
 | 组件 | 类 / 入口 | 职责边界 |
 |---|---|---|
-| 应用装配 | `app.run_app()` | 只做组装，不做业务逻辑 |
+| 公共 SDK | `sdk.py`、`AgentService`、`create_agent` | 显式配置与依赖装配、能力就绪、快照、队列、结果与完整收尾 |
+| 宿主适配 | `app.run_app()`、`headless.run_headless()` | TUI 引导与设置、无界面参数和输出，共同消费 SDK |
 | 会话控制器 | `SessionController`（`sessions/controller.py`）与 `sessions/` | 会话状态、transcript、阶段、权限、计划与队列；独立 UUID 和事件日志持久化 |
 | 工具循环 | `TurnRunner`（`agent/runner.py`） | 回合调度、忙时输入投递、取消、压缩与计划确认 |
 | 智能体能力 | `AgentCapabilities`（`agent/capabilities.py`）、`SkillRuntime` | Skills 发现与激活、系统上下文、项目 AGENTS.md、MCP 后台初始化与管理 |
@@ -59,14 +63,17 @@ graph TD
     CLI[cli.py main] --> APP[app.py run_app]
     APP --> BS[ConfigBootstrapTUI]
     APP --> CFG[config]
-    APP --> SVC[SessionController]
-    APP --> PF[ProviderFactory]
-    APP --> REG[create_default_tool_registry]
-    APP --> MCP[MCPClientManager]
-    APP --> PE[PermissionEngine]
+    CLI --> HL[headless.py run_headless]
+    APP --> SDK[AgentService / create_agent]
+    HL --> SDK
+    SDK --> SVC[SessionController]
+    SDK --> PF[ProviderFactory]
+    SDK --> REG[create_default_tool_registry]
+    SDK --> MCP[MCPClientManager]
+    SDK --> PE[PermissionEngine]
     APP --> SS[SettingsService]
-    APP --> TE[ToolExecutor]
-    APP --> TR[TurnRunner]
+    SDK --> TE[ToolExecutor]
+    SDK --> TR[TurnRunner]
     APP --> TUI[ChatTUI]
 
     TR --> SVC
@@ -93,10 +100,7 @@ graph TD
     SVC --> PR[context.prompts]
     SVC --> CM
     SVC --> ST[sessions.service / repository / codec]
-    TUI --> TR
-    TUI --> CAP
-    TUI --> SVC
-    TUI --> PE
+    TUI --> SDK
     TUI --> SS
 ```
 
@@ -110,7 +114,7 @@ graph TD
 → LanCherTextualApp.handle_input_submitted
    ├─ 工作中：按用户选择保留草稿、补充当前任务或排到下一轮
    ├─ 解析斜杠命令（tui/commands.py），命中则先执行命令
-   └─ TurnRunner.run_user_turn(text)
+   └─ AgentService.run_user_turn(text) → 内部 TurnRunner.run_user_turn(text)
        ├─ SessionController.create_user_message()  创建用户消息 + 动态提醒
        ├─ SessionController.create_assistant_message()
        └─ 工具循环（最多 tool_loop_limit 次）：
@@ -143,7 +147,7 @@ graph TD
 ### `SessionController`（`sessions/controller.py`）
 
 ```text
-app.run_app() 创建
+create_agent() 装配，由 AgentService 持有
 → 绑定 provider_config / cwd / 初始阶段与权限，尚无 Session ID
 → 每轮对话：create_user_message → create_assistant_message → 流式追加 → complete_message
 → 首条用户消息：先创建 UUID Session 和 workspace，再调用模型
@@ -158,7 +162,7 @@ app.run_app() 创建
 ```text
 构造时注入 provider / session / registry / executor
 → run_user_turn()：创建后台任务 _run_turn + 事件队列
-→ 消费者（TUI）逐个 await 事件
+→ AgentService 发布快照，TUI / 无界面 CLI / SDK 调用者逐个 await 事件
 → 事件流结束（_QUEUE_END）后任务回收
 → 工作中输入：steer 在安全边界投递；follow_up 等当前任务成功结束后排到下一轮
 → cancel_active_turn()：取消令牌 + 取消任务 + 取消挂起的权限请求 + 暂停待处理输入
@@ -202,7 +206,8 @@ MCPClientManager.initialize() → 每个 Server 并行 connect_and_list_tools()
 
 ```mermaid
 flowchart TD
-    TUI[聊天 / 任务窗口] --> TR[TurnRunner]
+    TUI[聊天 / 任务窗口] --> SDK[AgentService]
+    SDK --> TR[TurnRunner]
     TR --> EX[ToolExecutor：权限与执行]
     EX --> RS[ResourceScheduler：共享 / 独占资源]
     RS --> FILE[文件与 MCP 工具]

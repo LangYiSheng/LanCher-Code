@@ -2,6 +2,8 @@
 
 使用 `uv run lancher` 启动。首次配置依次填写供应商连接、模型并确认；取消不保存，返回上一步保留输入。
 
+需要脚本调用时使用 `lancher run "任务" --config ./my-model.yaml`。它不启动 TUI，支持 `--cwd`、`--model`、`--session`、`--format text|json|jsonl` 与 `--timeout`；`-` 任务从标准输入读取。需要审批的请求默认拒绝，完整输出与退出码见 [Agent SDK 与无界面运行](agent-sdk.md)。以下斜杠命令和键盘操作属于 TUI。
+
 ## 阶段与权限
 
 新会话默认进入执行。输入区可以选择「讨论 → 计划 → 执行」，`Shift+Tab` 只切阶段，不发送草稿、不改变权限策略。

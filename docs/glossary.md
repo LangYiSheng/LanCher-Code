@@ -93,7 +93,9 @@
 
 | 名称 | 含义 |
 |---|---|
-| `app.py run_app()` | 应用装配入口 |
+| `app.py run_app()` | TUI 宿主入口 |
+| `AgentService` / `create_agent()` | 公共 Agent SDK 服务与核心装配 |
+| `AgentResult` | 无界面和嵌入运行的状态、回答、用量与错误 |
 | `ConfigBootstrapTUI` | 连接供应商、添加模型、确认并开始的三步首次配置界面 |
-| `TurnEvent` | TurnRunner → TUI 的事件（`user_message_created`、`tool_result_received` 等） |
+| `TurnEvent` | 内部 Runner 事件，服务发布其快照供前端消费（`user_message_created`、`tool_result_received` 等） |
 | `SlashCommand` | 斜杠命令（`/discuss`、`/plan`、`/do`、`/model`、`/session`、`/compact`、`/settings`、`/exit`） |

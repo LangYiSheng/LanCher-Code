@@ -90,46 +90,54 @@ async def test_manual_compaction_updates_one_inline_row_and_preserves_expansion(
             assert not notifications
             assert not app.query_one(ComposerTextArea).disabled
     finally:
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
-async def test_cancel_before_manual_worker_enters_stops_the_already_visible_activity(
+async def test_cancel_before_manual_worker_enters_does_not_create_an_activity(
     openai_provider_config, ui_config, tmp_path,
 ):
     app, session = _build_app(FakeProvider([]), openai_provider_config, ui_config, tmp_path)
     try:
         async with app.run_test() as pilot:
             await app._dispatch_slash_command("compact", "")
-            widget = app.query_one(CompactionActivityWidget)
-            assert widget.activity.status == "running"
             await app.action_request_quit()
             await _until(pilot, lambda: not app._is_streaming)
-            assert widget.activity.status == "cancelled"
-            assert session.state.compaction_activities[widget.activity_id].status == "cancelled"
-            assert "压缩已停止" in str(widget.header.render())
+            assert not list(app.query(CompactionActivityWidget))
+            assert not session.state.compaction_activities
             assert not app._exit_flow.is_armed
             assert not app.query_one(ComposerTextArea).disabled
     finally:
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
 async def test_cancel_status_save_failure_still_stops_spinner_and_unlocks_input(
     openai_provider_config, ui_config, tmp_path, monkeypatch,
 ):
-    app, session = _build_app(FakeProvider([]), openai_provider_config, ui_config, tmp_path)
-    session.create_user_message("已有会话")
+    provider = GateSummaryProvider()
+    app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
+    _history(session)
     original_flush = session.flush
+    original_finish = session.finish_compaction
 
     def unavailable_storage(*args, **kwargs):
         raise SessionRepositoryError("磁盘暂时不可写")
 
+    def finish_with_unavailable_storage(*args, **kwargs):
+        # 只模拟取消活动终态保存失败，不干扰模型请求用量的收尾记录。
+        monkeypatch.setattr(session, "flush", unavailable_storage)
+        try:
+            return original_finish(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(session, "flush", original_flush)
+
     try:
         async with app.run_test() as pilot:
             await app._dispatch_slash_command("compact", "")
+            await _until(pilot, provider.started.is_set)
             widget = app.query_one(CompactionActivityWidget)
-            monkeypatch.setattr(session, "flush", unavailable_storage)
+            monkeypatch.setattr(session, "finish_compaction", finish_with_unavailable_storage)
             await app.action_request_quit()
             await _until(pilot, lambda: not app._is_streaming)
             assert widget.activity.status == "cancelled"
@@ -139,7 +147,7 @@ async def test_cancel_status_save_failure_still_stops_spinner_and_unlocks_input(
             monkeypatch.setattr(session, "flush", original_flush)
     finally:
         monkeypatch.setattr(session, "flush", original_flush)
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
@@ -176,7 +184,7 @@ async def test_interrupt_during_activity_mount_cancels_preparation_instead_of_ar
             assert not app.query_one(ComposerTextArea).disabled
             assert not provider.started.is_set()
     finally:
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
@@ -193,8 +201,8 @@ async def test_start_save_failure_is_visible_as_a_failed_chat_activity(
     try:
         async with app.run_test() as pilot:
             monkeypatch.setattr(session, "flush", unavailable_storage)
-            with pytest.raises(SessionRepositoryError, match="保存启动记录失败"):
-                await app._dispatch_slash_command("compact", "")
+            await app._dispatch_slash_command("compact", "")
+            await _until(pilot, lambda: not app._is_streaming)
             widget = app.query_one(CompactionActivityWidget)
             assert widget.activity.status == "failed"
             assert widget._spinner_timer is None
@@ -204,7 +212,7 @@ async def test_start_save_failure_is_visible_as_a_failed_chat_activity(
             assert not app.query_one(ComposerTextArea).disabled
     finally:
         monkeypatch.setattr(session, "flush", original_flush)
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
@@ -233,7 +241,7 @@ async def test_final_state_is_shown_even_when_runner_failed_to_save_it(
             monkeypatch.setattr(session, "flush", original_flush)
     finally:
         monkeypatch.setattr(session, "flush", original_flush)
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
@@ -267,7 +275,7 @@ async def test_manual_failure_is_readable_in_chat_and_survives_session_resume(
             assert not restored.collapsed
             assert "摘要服务断开" in str(restored.body.render())
     finally:
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
@@ -299,7 +307,7 @@ async def test_compaction_details_remain_reachable_without_covering_the_composer
             await pilot.press("space")
             assert widget.collapsed
     finally:
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
@@ -339,7 +347,7 @@ async def test_restored_manual_rows_keep_their_message_anchors_and_automatic_row
             assert "压缩之前" in _rendered_text(blocks[0])
             assert "压缩之后" in _rendered_text(blocks[-1])
     finally:
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()
 
 
@@ -370,5 +378,5 @@ async def test_compaction_events_do_not_pull_a_reader_away_from_history(
             await pilot.pause()
             assert chat.scroll_y == position
     finally:
-        await app._turn_runner.shutdown()
+        await app._agent.shutdown()
         session.close()

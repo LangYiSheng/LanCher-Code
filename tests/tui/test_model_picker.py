@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 from copy import deepcopy
 
@@ -49,7 +50,7 @@ def build_model_app(tmp_path):
 
     runner = TurnRunner(object(), session, registry, executor)
     runner.configure_models(config, provider_factory=factory)
-    app = LanCherTextualApp(runner, resolve_model(config.providers, config.default_model), session, UIConfig())
+    app = LanCherTextualApp(AgentService(runner, session), UIConfig())
     return app, runner, session, config, constructed
 
 

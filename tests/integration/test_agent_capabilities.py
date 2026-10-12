@@ -578,7 +578,11 @@ async def test_explicit_skill_failure_is_persisted_in_failed_assistant_message(t
         failed = next(event for event in events if event.kind == 'turn_failed')
         assert failed.message is not None and failed.message.status == 'error'
         assert '已被禁用' in failed.error_text
-        assert session.state.messages[-1] is failed.message
+        stored = session.state.messages[-1]
+        assert stored == failed.message and stored is not failed.message
+        original_content = stored.content
+        failed.message.content = '客户端修改事件快照'
+        assert stored.content == original_content
         assert provider.requests == [] and not session.context_state.skill_activations
     finally:
         await close(runner, session)

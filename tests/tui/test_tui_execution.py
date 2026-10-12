@@ -1,6 +1,7 @@
 """真实 run_async、审批与原生进程；覆盖测试驱动器和实际启动路径的差别。"""
 
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import asyncio
 import json
@@ -69,7 +70,7 @@ def build_app(directory, config, responses, *, profiles=()):
     executor = ToolExecutor(registry, cwd=directory, execution_runtime=runtime,
                             permission_engine=PermissionEngine(storage))
     runner = TurnRunner(ScriptedProvider(responses), session, registry, executor)
-    app = LanCherTextualApp(runner, config, session, UIConfig())
+    app = LanCherTextualApp(AgentService(runner, session), UIConfig())
     return app, session, runner, storage
 
 
@@ -89,7 +90,7 @@ async def send(app, pilot, text, *, slash=False):
 
 
 async def finish(app, pilot):
-    await until(pilot, lambda: not app._is_streaming and not app._turn_runner.has_active_turn)
+    await until(pilot, lambda: not app._is_streaming and not app._agent.has_active_turn)
 
 
 async def wait_http_ready(client, url, pilot):

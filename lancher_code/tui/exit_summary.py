@@ -1,5 +1,6 @@
 """普通终端中的退出小结；展示结果，不负责停止任务或保存会话。"""
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,6 @@ from rich.console import Console
 from rich.text import Text
 
 from lancher_code.usage.ledger import RunUsageSummary
-from lancher_code.sessions.controller import SessionController
 from lancher_code.tui.usage import usage_lines
 
 
@@ -18,7 +18,7 @@ class ResumeTarget:
     title: str
 
 
-def select_resume_target(session: SessionController) -> ResumeTarget | None:
+def select_resume_target(session: AgentService) -> ResumeTarget | None:
     """空白草稿不创建会话；只从本次实际访问且仍存在的会话中选择。"""
     ids = list(reversed(session.visited_session_ids))
     if session.session_id is not None:

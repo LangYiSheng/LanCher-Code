@@ -110,6 +110,10 @@ class AgentCapabilities:
             # 用户取消刷新不能顺带关闭仍在初始化的连接管理器。
             await asyncio.shield(self._startup_task)
 
+    async def ready(self) -> None:
+        """等待首次工具目录准备完成，脚本首轮与界面使用同一套能力。"""
+        await self._wait_initialization()
+
     async def shutdown(self) -> None:
         self._closed = True
         await self._stop_initialization()

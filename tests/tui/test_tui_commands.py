@@ -103,7 +103,7 @@ async def test_stale_confirmation_cannot_change_new_session(openai_provider_conf
     async with app.run_test() as pilot:
         await type_command(app, pilot, f"/session remove {other_id}")
         await pilot.press("tab", "enter")
-        app._turn_runner.new_session()
+        app._agent.new_session()
         await pilot.click("#command-confirm")
         await pilot.pause()
         assert other_id in [item.session_id for item in session.list_sessions().items]
@@ -247,7 +247,7 @@ async def test_unknown_command_and_busy_command_are_not_sent(openai_provider_con
         assert not app._details_open and composer.text == ""
         provider.release.set()
         async with asyncio.timeout(10):
-            while app._is_streaming or app._turn_runner.has_active_turn or app._turn_runner.pending_inputs:
+            while app._is_streaming or app._agent.has_active_turn or app._agent.pending_inputs:
                 await pilot.pause(0.02)
         assert len(provider.requests) == 2
 

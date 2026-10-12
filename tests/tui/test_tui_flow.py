@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 from lancher_code.tui.timeline import ToolActivityWidget, ToolCallWidget
 
@@ -75,12 +76,7 @@ def _build_app(provider: FakeProvider, provider_config, ui_config, tmp_path: Pat
     registry.register(EchoTool())
     executor = ToolExecutor(registry, cwd=tmp_path, timeout_seconds=1)
     runner = TurnRunner(provider, session, registry, executor, skills_service=skills_service)
-    app = LanCherTextualApp(
-        turn_runner=runner,
-        provider_config=provider_config,
-        session_controller=session,
-        ui_config=ui_config,
-    )
+    app = LanCherTextualApp(AgentService(runner, session), ui_config)
     return app, session
 
 
@@ -288,7 +284,7 @@ async def test_core_mcp_initialization_keeps_input_usable(
     provider = FakeProvider(responses=[response])
     app, session = _build_app(provider, openai_provider_config, ui_config, tmp_path)
     manager = FakeManager()
-    app._turn_runner.configure_capabilities(mcp_manager=manager)
+    app._agent.configure_capabilities(mcp_manager=manager)
 
     async with app.run_test() as pilot:
         composer = app.query_one("#composer-input", ComposerTextArea)

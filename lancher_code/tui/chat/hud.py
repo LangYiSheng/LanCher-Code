@@ -1,13 +1,12 @@
 """HUD 的只读展示：输入状态快照，更新明确的一组控件。"""
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 from dataclasses import dataclass
 from collections.abc import Callable
 from rich.cells import cell_len
 from rich.text import Text
 from textual.widget import Widget
 from textual.widgets import Static, Button
-from lancher_code.sessions.controller import SessionController
-from lancher_code.agent.runner import TurnRunner
 from lancher_code.providers.catalog import model_display_name
 from lancher_code.usage.ledger import RunUsageSummary
 from lancher_code.tui.usage import usage_lines
@@ -43,15 +42,15 @@ class HudWidgets:
     help: Static
 
 class HudPresenter:
-    def __init__(self, session: SessionController, runner: TurnRunner, provider_model: str,
+    def __init__(self, agent: AgentService, provider_model: str,
                  command_allowed: Callable[[str], bool]) -> None:
-        self.session, self.runner, self.provider_model = session, runner, provider_model
+        self.agent, self.provider_model = agent, provider_model
         self.command_allowed = command_allowed
 
     def refresh(self, widgets: HudWidgets, state: HudState) -> None:
-        usage = self.session.total_usage()
+        usage = self.agent.total_usage()
         center_text = state.hint or ("正在处理" if state.streaming else "就绪")
-        execution = self.runner.execution_summary()
+        execution = self.agent.execution_summary()
         badges = []
         if execution["background"]:
             badges.append(f"后台 {execution['background']}")
@@ -73,7 +72,7 @@ class HudPresenter:
         compact_state = center_text.split(" · ", 1)[0]
         if state.pending_permissions:
             compact_state = "等待确认"
-        elif self.runner.queue_paused:
+        elif self.agent.queue_paused:
             compact_state = "队列暂停"
         elif state.streaming:
             compact_state = "正在停止" if "停止" in compact_state else "处理中"
@@ -115,16 +114,16 @@ class HudPresenter:
 
         status_center.update(f"{estimate} · {center_text}")
         status_right.update(right_text)
-        widgets.stage.update_phase(self.session.work_phase, busy=state.streaming)
-        config = self.runner.model_config
-        ref = self.runner.model_ref
+        widgets.stage.update_phase(self.agent.work_phase, busy=state.streaming)
+        config = self.agent.model_config
+        ref = self.agent.model_ref
         notification_hint = " · /tasks 查看任务与输出" if execution["notifications"] else ""
         details = (
             f"本次模型：{self.status_left_text()}\n"
-            f"工作目录：{self.session.project_root}\n"
-            f"执行访问范围：{'项目访问' if self.session.execution_access == 'project' else '完全访问'} · 讨论和计划只读\n"
-            f"会话：{self.session.session_title or '新对话'} · {self.session.session_id or '首条消息后创建'}\n"
-            f"会话工作目录：{self.session.paths.workspace if self.session.paths else '尚未创建'}\n"
+            f"工作目录：{self.agent.project_root}\n"
+            f"执行访问范围：{'项目访问' if self.agent.execution_access == 'project' else '完全访问'} · 讨论和计划只读\n"
+            f"会话：{self.agent.session_title or '新对话'} · {self.agent.session_id or '首条消息后创建'}\n"
+            f"会话工作目录：{self.agent.paths.workspace if self.agent.paths else '尚未创建'}\n"
             f"模型引用：{ref or self.provider_model}\n"
             f"新对话默认：{config.default_model if config is not None else '当前配置'}\n"
             f"会话累计已上报用量：\n{self.format_usage_text(usage)}\n"
@@ -146,13 +145,13 @@ class HudPresenter:
         )
 
     def status_left_text(self) -> str:
-        config = self.runner.model_config
-        if config is not None and self.runner.model_ref:
-            model = model_display_name(config.providers, self.runner.model_ref)
+        config = self.agent.model_config
+        if config is not None and self.agent.model_ref:
+            model = model_display_name(config.providers, self.agent.model_ref)
         else:
             model = self.provider_model
-        policy = "只读" if self.session.work_phase in {"discuss", "plan"} else {"project": "项目访问", "full": "完全访问"}[self.session.execution_access]
-        phase = {"discuss": "讨论", "plan": "计划", "execute": "执行"}[self.session.work_phase]
+        policy = "只读" if self.agent.work_phase in {"discuss", "plan"} else {"project": "项目访问", "full": "完全访问"}[self.agent.execution_access]
+        phase = {"discuss": "讨论", "plan": "计划", "execute": "执行"}[self.agent.work_phase]
         return f"{model} · {phase} · {policy}"
 
     @staticmethod

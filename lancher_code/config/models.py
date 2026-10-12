@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import Literal
 
 from lancher_code.contracts.control import ExecutionAccess, WorkPhase, validate_runtime_axes
@@ -34,9 +35,23 @@ class RuntimeConfig:
 
 
 @dataclass(slots=True)
+class AgentConfig:
+    """可嵌入核心的配置，不包含界面偏好。"""
+
+    providers: dict[str, ProviderDefinition]
+    default_model: str
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+
+
+@dataclass(slots=True)
 class AppConfig:
     providers: dict[str, ProviderDefinition]
     default_model: str
     ui: UIConfig = field(default_factory=UIConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+
+    def to_agent_config(self) -> AgentConfig:
+        return AgentConfig(deepcopy(self.providers), self.default_model,
+                           deepcopy(self.runtime), deepcopy(self.execution))

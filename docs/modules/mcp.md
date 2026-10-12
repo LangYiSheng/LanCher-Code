@@ -11,7 +11,7 @@ AgentCapabilities（agent/capabilities.py）
   → MCPToolAdapter → ToolRegistry → ToolExecutor
 ```
 
-`app.py` 装配依赖，`TurnRunner.capabilities` 提供公共管理入口。TUI 订阅进度并调用门面，不拥有连接任务、工具发现或请求投影逻辑。退出由智能体核心统一收尾。
+`create_agent()` 装配依赖，`AgentService.capabilities` 提供公共状态与管理入口。TUI 订阅进度，不拥有连接任务、工具发现或请求投影。TUI 后台启动能力以显示进度，初始化期间可使用已注册的内置工具；SDK 的 `async with` 或显式 `await agent.ready()` 会等待能力准备完成，适合固定首轮工具目录的脚本调用。退出由核心统一收尾。
 
 ## 配置与超时
 

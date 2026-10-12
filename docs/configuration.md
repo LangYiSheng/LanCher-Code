@@ -1,6 +1,6 @@
 # 配置
 
-LanCher Code 的配置来源有：**YAML 配置文件**、**环境变量**（通过 `${VAR}` 展开引用）、以及**首次引导界面**（写入配置文件）。当前版本**没有 CLI 参数**（见 [cli-and-interaction.md](cli-and-interaction.md) 中的说明）。
+LanCher Code 的配置来源有：**YAML 配置文件**、**环境变量**（通过 `${VAR}` 展开引用）、以及**首次引导界面**（写入配置文件）。TUI 读取全局主配置；`lancher run` 必须用 `--config PATH` 指定文件，可以用 `--model` 指定本次模型、`--cwd` 指定项目。SDK 直接接收不含 UI 的 `AgentConfig`，不读取全局模型配置，详见 [Agent SDK 与无界面运行](agent-sdk.md)。
 
 ## 配置文件位置
 

@@ -38,7 +38,7 @@ async def test_usage_details_are_scrollable_and_leave_the_composer_reachable(
                            cache_creation_input_tokens=10, reasoning_output_tokens=5),
     ).to_dict())
     # 布局检查不启动真实进程，但必须让底部的进程数字参与渲染。
-    monkeypatch.setattr(app._turn_runner, "execution_summary", lambda: {
+    monkeypatch.setattr(app._agent, "execution_summary", lambda: {
         "running": 2, "background": 1, "waiting": 3, "notifications": 4,
     })
     try:

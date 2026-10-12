@@ -6,10 +6,12 @@
 /_____/\__,_/_/ /_/\____/_/ /_/\___/_/      \____/\____/\__,_/\___/
 ```
 
-> 基于 Python 的终端 AI 编程助手。目标不是只会聊天，而是真能在终端里和你一起读代码、查文件、改文件、跑命令、写计划，并且把危险操作拦在权限系统里。
+> 基于 Python 的 AI 编程助手，由独立 Agent 核心、终端界面和无界面命令组成。可以读代码、查文件、改文件、跑命令、写计划，也可通过 Python SDK 接入测试脚本或其他前端。
 
 ## 当前能力
 
+- 独立 `lancher_code.sdk`：显式配置、事件快照、最终结果、权限处理和统一资源生命周期；核心安装不依赖 Textual / Rich。
+- `lancher run` 无界面任务，支持指定工作目录、模型、恢复会话、标准输入、JSON / JSONL 输出与超时。
 - 深浅主题的原生极简终端对话，支持流式输出、折叠工具记录和独立的思考显示。
 - 支持配置多个自定义供应商，每个供应商可添加多个模型；兼容 `OpenAI` 与 `Anthropic` 两类协议。
 - 支持供应商公共连接参数、模型逐字段覆盖、默认主模型，以及聊天中通过 `/model` 切换。
@@ -39,15 +41,25 @@ uv run lancher-code
 # 同一入口也可使用 uv run lancher
 ```
 
+仓库开发默认安装 TUI 依赖。只安装核心可用 `pip install .`；需要终端界面用 `pip install ".[tui]"`。
+
 也可以直接运行：
 
 ```bash
 python -m lancher_code
 ```
 
+无界面运行使用显式配置，不进入首次引导：
+
+```bash
+lancher run "阅读项目并总结入口职责" --config ./my-model.yaml --cwd ./my-project --format json --timeout 120
+```
+
+需要批准的操作默认拒绝，仍遵守配置中的阶段和访问范围。Python SDK、输出契约和评测接入口见 [Agent SDK 与无界面运行](docs/agent-sdk.md)。
+
 ## 配置文件
 
-程序读取全局配置：
+终端界面读取全局配置；`lancher run` 通过 `--config` 明确指定配置，SDK 接受显式 `AgentConfig`。终端界面的默认文件：
 
 ```text
 ~/.lancher/lancher.yaml
@@ -142,7 +154,7 @@ Session ID 是 32 位小写 UUID hex。列表显示短 ID，命令补全填入�
 
 ## 当前状态
 
-- Provider、会话层、工具系统、TurnRunner、TUI 已全部打通。
+- Provider、会话层、工具系统、AgentService、TUI 和无界面命令使用同一核心运行链。
 - 只读、项目访问、完全访问三种有效权限已落地，覆盖文件、Shell 和 MCP；已识别极危险操作与显式拒绝始终生效。
 - 核心代码按 `agent/`、`context/`、`sessions/`、`config/` 等领域组织；目录职责见 [项目结构](docs/project-structure.md)，验证方式见 [开发说明](docs/development.md)。
 

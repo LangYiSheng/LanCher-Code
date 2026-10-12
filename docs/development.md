@@ -17,12 +17,14 @@ uv run pytest            # 运行全部测试
 
 ## 代码组织方式
 
-- 入口 → 装配 → 界面 → 会话/流程 → 能力 → 基础，共六层（见 [project-structure.md](project-structure.md)）。
+- CLI 分流到 TUI 或无界面适配器，两者调用 `lancher_code.sdk` 的 `AgentService`；服务统一装配会话、流程、能力与执行运行时（见 [project-structure.md](project-structure.md)）。
 - **数据类型归属领域**：配置、供应商、会话、上下文、权限、用量各有自己的模型；跨领域的消息、工具与控制协议放在 `contracts/`。从类型的所有者模块直接导入，不添加根层转导出。
-- **事件驱动**：TurnRunner → TUI 通过 `TurnEvent` 通信；Provider → TurnRunner 通过 `StreamEvent` 通信。
+- **事件驱动**：内部 TurnRunner 产出 `TurnEvent`，AgentService 发布独立事件快照；前端消费快照并提交公共操作。Provider → TurnRunner 通过 `StreamEvent` 通信。
 - **协议无关**：会话层只存抽象消息，Provider 负责序列化差异。
 
-退出确认、实际收尾和终端小结有各自职责：`tui/exit_flow.py` 用单调时钟决定停止与退出意图，界面持有异步操作任务，`app.py` 统一等待清理，`tui/exit_summary.py` 只展示最终结果。`usage/ledger.py` 的本次启动账本观察实际 Provider 请求，切换 Session 或模型时要继续注入同一个 observer，不能改成累计恢复的历史消息。完整场景和统计口径见 [结束工作与恢复对话](workflows/app-exit.md)。
+退出确认、实际收尾和终端小结有各自职责：`tui/exit_flow.py` 用单调时钟决定停止与退出意图，界面持有异步操作任务，AgentService 统一等待核心清理，`app.py` 管理 TUI 宿主生命周期，`tui/exit_summary.py` 只展示最终结果。`usage/ledger.py` 的本次启动账本观察实际 Provider 请求，切换 Session 或模型时继续注入同一个 observer，不累计恢复的历史消息。完整场景和统计口径见 [结束工作与恢复对话](workflows/app-exit.md)。
+
+扩展前端或接入实验脚本优先从 [Agent SDK 与无界面运行](agent-sdk.md) 开始。边界与生命周期测试使用 FakeProvider 或 MockTransport，本次 SDK 改造不调用真实模型。
 
 ## 如何增加一个新功能
 

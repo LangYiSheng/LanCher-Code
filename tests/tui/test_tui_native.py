@@ -60,14 +60,43 @@ async def test_busy_enter_queues_then_runs_next_turn_without_overwriting_draft(o
         composer.text = "下一项任务"
         await pilot.press("enter")
         assert composer.text == ""
-        assert app._turn_runner.pending_inputs[0].delivery == "follow_up"
+        assert app._agent.pending_inputs[0].delivery == "follow_up"
         composer.text = "还没写完的草稿"
         provider.release.set()
         await pilot.pause(0.25)
         assert len(provider.requests) == 2
         assert [m.content for m in session.state.messages if m.role == "user"] == ["当前任务", "下一项任务"]
         assert composer.text == "还没写完的草稿"
-        assert not app._turn_runner.pending_inputs
+        assert not app._agent.pending_inputs
+
+
+@pytest.mark.asyncio
+async def test_failed_follow_up_does_not_show_previous_turn_as_completed(openai_provider_config, tmp_path):
+    class FailingFollowUpProvider(GatedProvider):
+        async def stream_chat(self, request):
+            if self.requests:
+                self.requests.append(request)
+                raise RuntimeError("后续请求失败")
+            async for event in super().stream_chat(request):
+                yield event
+
+    provider = FailingFollowUpProvider()
+    app, session = _build_app(provider, openai_provider_config, UIConfig(), tmp_path)
+    async with app.run_test() as pilot:
+        await _submit_message(app, pilot, "当前任务")
+        await provider.started.wait()
+        app._agent.enqueue_input("第二项任务")
+        app._agent.enqueue_input("第三项任务")
+        composer = app.query_one(ComposerTextArea)
+        composer.text = "尚未发送的草稿"
+        provider.release.set()
+        await _until(pilot, lambda: len(provider.requests) == 2 and not app._is_streaming)
+        assert not app._turn_succeeded
+        assert session.state.messages[-1].status == "error"
+        assert app._status_hint != "已完成"
+        assert app._agent.queue_paused
+        assert app._agent.pending_inputs[0].text == "第三项任务"
+        assert composer.text == "尚未发送的草稿"
 
 
 @pytest.mark.asyncio
@@ -83,10 +112,10 @@ async def test_busy_enter_honors_configured_action(openai_provider_config, tmp_p
         await pilot.press("enter")
         if action == "draft":
             assert composer.text == "补充边界条件"
-            assert not app._turn_runner.pending_inputs
+            assert not app._agent.pending_inputs
         else:
             assert composer.text == ""
-            assert app._turn_runner.pending_inputs[0].delivery == "steer"
+            assert app._agent.pending_inputs[0].delivery == "steer"
         provider.release.set()
         await pilot.pause(0.2)
         assert len(provider.requests) == (2 if action == "steer" else 1)
@@ -105,8 +134,8 @@ async def test_stop_pauses_pending_queue_and_preserves_composer(openai_provider_
         await pilot.press("ctrl+c")
         await pilot.pause(0.1)
         assert not app._is_streaming
-        assert app._turn_runner.queue_paused
-        assert app._turn_runner.pending_inputs[0].text == "后续任务"
+        assert app._agent.queue_paused
+        assert app._agent.pending_inputs[0].text == "后续任务"
         assert composer.text == "草稿仍在"
         assert len(provider.requests) == 1
 
@@ -118,21 +147,21 @@ async def test_queue_edit_remove_and_convert_preserve_input(openai_provider_conf
     async with app.run_test() as pilot:
         await _submit_message(app, pilot, "当前任务")
         await provider.started.wait()
-        item = app._turn_runner.enqueue_input("随后执行")
+        item = app._agent.enqueue_input("随后执行")
         composer = app.query_one(ComposerTextArea)
         composer.text = "独立草稿"
         await app.handle_chat_action(ChatAction("queue-edit", item.id))
         await pilot.pause()
         assert isinstance(app.screen, PendingInputEditor)
-        assert app._turn_runner.queue_paused
+        assert app._agent.queue_paused
         app.screen.dismiss("编辑后的任务")
         await pilot.pause()
-        assert app._turn_runner.pending_inputs[0].text == "编辑后的任务"
+        assert app._agent.pending_inputs[0].text == "编辑后的任务"
         assert composer.text == "独立草稿"
         await app.handle_chat_action(ChatAction("queue-convert", item.id))
-        assert app._turn_runner.pending_inputs[0].delivery == "steer"
+        assert app._agent.pending_inputs[0].delivery == "steer"
         await app.handle_chat_action(ChatAction("queue-delete", item.id))
-        assert not app._turn_runner.pending_inputs
+        assert not app._agent.pending_inputs
         provider.release.set()
         await pilot.pause()
 
@@ -149,10 +178,10 @@ async def test_ctrl_c_while_permission_waiting_closes_panel_and_preserves_draft(
         composer.text = "审批时保留的草稿"
         await pilot.press("ctrl+c")
         await _until(pilot, lambda: not app.query(InlinePermissionPanel)
-                     and not app._is_streaming and not app._turn_runner.has_active_turn)
+                     and not app._is_streaming and not app._agent.has_active_turn)
         assert not list(app.query(InlinePermissionPanel))
         assert not app._is_streaming
-        assert not app._turn_runner.has_active_turn
+        assert not app._agent.has_active_turn
         assert composer.text == "审批时保留的草稿"
 
 
@@ -240,7 +269,7 @@ async def test_narrow_permission_and_queue_leave_editor_and_hud_visible(openai_p
         panel.query_one("#permission-description", Static).update("检查保存、取消和返回行为。" * 5)
         composer = app.query_one(ComposerTextArea)
         composer.text = "保留长草稿\n第二行\n第三行"
-        app._turn_runner.enqueue_input("下一轮再检查文件")
+        app._agent.enqueue_input("下一轮再检查文件")
         await app._refresh_pending_queue()
         await pilot.pause()
         assert app.query_one("#composer").region.bottom <= 16
@@ -338,7 +367,7 @@ async def test_cancel_closes_the_active_permission_details_screen(openai_provide
         await pilot.pause()
         assert len(app.screen_stack) == 1
         assert not list(app.query(InlinePermissionPanel))
-        assert not app._turn_runner.has_active_turn
+        assert not app._agent.has_active_turn
 
 
 @pytest.mark.asyncio

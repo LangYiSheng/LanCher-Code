@@ -27,7 +27,7 @@ from lancher_code.errors import (
     ProviderPromptTooLongError,
 )
 from lancher_code.logging_system import get_logger
-from lancher_code.config.models import AppConfig, RuntimeConfig
+from lancher_code.config.models import AgentConfig, AppConfig, RuntimeConfig
 from lancher_code.contracts.control import CancellationToken, ExecutionAccess, WorkPhase
 from lancher_code.context.models import CompactionActivity, CompactionTrigger, ContextCompactionResult
 from lancher_code.usage.models import MessageUsage
@@ -113,11 +113,12 @@ class TurnRunner:
 
     def configure_models(
         self,
-        config: AppConfig,
+        config: AgentConfig | AppConfig,
         provider_factory: Callable[[ProviderConfig], ChatProvider] = create_provider,
+        *, model_ref: str | None = None,
     ) -> None:
         self._ensure_model_idle()
-        self._models.configure_models(config, provider_factory)
+        self._models.configure_models(config, provider_factory, model_ref=model_ref)
         self._apply_runtime_config(config.runtime)
 
     def validate_runtime_settings(self, runtime: RuntimeConfig) -> None:
@@ -145,7 +146,7 @@ class TurnRunner:
         return '系统设置已应用；当前会话阶段和权限保持其会话设置。'
 
     @property
-    def model_config(self) -> AppConfig | None:
+    def model_config(self) -> AgentConfig | None:
         return self._models.model_config
 
     @property
@@ -168,7 +169,7 @@ class TurnRunner:
         self._ensure_model_idle()
         self._models.switch_model(model_ref)
 
-    def reload_models(self, config: AppConfig) -> bool:
+    def reload_models(self, config: AgentConfig | AppConfig) -> bool:
         self._ensure_model_idle()
         # 模型目录热更新不能顺带应用已保存但尚未成功应用的系统设置。
         snapshot = deepcopy(config)
@@ -428,8 +429,20 @@ class TurnRunner:
         continued_on_failure: bool = False,
     ) -> ContextCompactionResult:
         """三个入口共享一次活动，摘要内部重试不会创建第二条界面记录。"""
-        activity = (self._session.get_compaction(activity_id) if activity_id is not None
-                    else self._session.begin_compaction(trigger, message_id=message_id, turn_id=turn_id))
+        previous_ids = set(self._session.state.compaction_activities)
+        try:
+            activity = (self._session.get_compaction(activity_id) if activity_id is not None
+                        else self._session.begin_compaction(trigger, message_id=message_id, turn_id=turn_id))
+        except Exception:
+            # 保存失败仍可能已经创建失败活动，发布该事实供所有前端恢复视图。
+            for created_id in self._session.state.compaction_activities.keys() - previous_ids:
+                failed = self._session.get_compaction(created_id)
+                event = TurnEvent(kind="compaction_updated", compaction=deepcopy(failed))
+                if queue is not None:
+                    await self._emit(queue, event)
+                if on_activity is not None:
+                    await on_activity(event)
+            raise
         manual_started = False
 
         async def publish(snapshot: CompactionActivity) -> None:
@@ -903,7 +916,8 @@ class TurnRunner:
 
     @staticmethod
     async def _emit(queue: asyncio.Queue[TurnEvent | object], event: TurnEvent) -> None:
-        await queue.put(event)
+        # 队列中的事实不能被随后追加的正文或工具状态改写。
+        await queue.put(deepcopy(event))
 
     def _current_message_usage(self, message_id: str) -> MessageUsage:
         usage = self._session.get_message(message_id).usage

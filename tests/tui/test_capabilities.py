@@ -24,6 +24,8 @@ def test_tui_constructors_only_receive_core_runtime_and_presentation_dependencie
     for app_class in (ChatTUI, LanCherTextualApp):
         parameters = inspect.signature(app_class.__init__).parameters
         assert "mcp_manager" not in parameters and "tool_registry" not in parameters
+        assert "agent" in parameters
+        assert "turn_runner" not in parameters and "session_controller" not in parameters
 
 
 class SnapshotManager:
@@ -73,7 +75,7 @@ def build_capability_app(config, tmp_path, provider=None):
     skills = SkillsService(tmp_path, user_root=tmp_path / "profile")
     app, session = _build_app(provider or FakeProvider([]), config, UIConfig(), tmp_path, skills_service=skills)
     manager = SnapshotManager()
-    app._turn_runner.configure_capabilities(mcp_manager=manager)
+    app._agent.configure_capabilities(mcp_manager=manager)
     return app, session, manager
 
 
@@ -155,7 +157,7 @@ async def test_text_mcp_refresh_keeps_message_pump_responsive_until_server_retur
             async with asyncio.timeout(3):
                 await pilot.press("enter")
                 await manager.refresh_started.wait()
-            assert app._turn_runner.capabilities.updating
+            assert app._agent.capabilities.updating
             assert composer.text == "/mcp refresh demo" and not composer.disabled
             # 真实键盘事件必须在服务器尚未返回时被主消息循环处理。
             await pilot.press("ctrl+c")
@@ -171,7 +173,7 @@ async def test_text_mcp_refresh_keeps_message_pump_responsive_until_server_retur
             manager.refresh_release.set()
             await app.workers.wait_for_complete()
         assert composer.text == "下一条草稿x"
-        assert not app._turn_runner.capabilities.updating
+        assert not app._agent.capabilities.updating
         assert session.session_id is None and not session.state.messages
 
 
@@ -203,7 +205,7 @@ async def test_text_mcp_failure_preserves_original_or_newer_draft(openai_provide
         assert composer.text == (new_draft or "/mcp refresh demo")
         assert notices[-1][0] == "服务器暂时不可用"
         assert notices[-1][1]["title"] == "命令未执行"
-        assert not app._turn_runner.capabilities.updating
+        assert not app._agent.capabilities.updating
         assert session.session_id is None and not session.state.messages
 
 
@@ -261,7 +263,7 @@ async def test_settings_mcp_save_awaits_core_reload_and_reports_application_fail
         reloads.append("reload")
         return "MCP 配置已应用。"
 
-    monkeypatch.setattr(app._turn_runner.capabilities, "reload_mcp", reload_mcp)
+    monkeypatch.setattr(app._agent.capabilities, "reload_mcp", reload_mcp)
     async with app.run_test() as pilot:
         await app._execute_slash_command("settings", "open")
         await pilot.pause()
@@ -281,7 +283,7 @@ async def test_settings_mcp_save_awaits_core_reload_and_reports_application_fail
         async def fail_reload():
             raise ValueError("连接失败")
 
-        monkeypatch.setattr(app._turn_runner.capabilities, "reload_mcp", fail_reload)
+        monkeypatch.setattr(app._agent.capabilities, "reload_mcp", fail_reload)
         editor.edit_mcp("demo")
         screen.query_one("#mcp-target", Input).value = "https://changed.test/mcp"
         screen.action_save_settings()

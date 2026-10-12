@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import os
 from pathlib import Path
@@ -38,9 +39,7 @@ def _chat_app(config, ui, project: Path):
     session = SessionController(config, cwd=project)
     registry = create_default_tool_registry()
     runner = TurnRunner(_IdleProvider(), session, registry, ToolExecutor(registry, cwd=project))
-    return LanCherTextualApp(
-        turn_runner=runner, provider_config=config, session_controller=session, ui_config=ui,
-    ), session
+    return LanCherTextualApp(AgentService(runner, session), ui), session
 
 
 def _request(project: Path, tool, arguments):
@@ -170,7 +169,7 @@ async def test_narrow_recursive_delete_has_only_reachable_once_approval(openai_p
     request = _request(tmp_path, DeleteFileTool(), {"path": str(target), "recursive": True})
     app, session = _chat_app(openai_provider_config, ui_config, tmp_path)
     outcomes = []
-    app._turn_runner.resolve_permission_request = lambda resolution: outcomes.append(resolution.outcome) or True
+    app._agent.resolve_permission_request = lambda resolution: outcomes.append(resolution.outcome) or True
     try:
         async with app.run_test(size=(width, height)) as pilot:
             await app._request_inline_permission(request)

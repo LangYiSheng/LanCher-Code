@@ -1,5 +1,6 @@
 """窄终端优先显示退出提示和草稿，补全在继续操作或超时后恢复。"""
 from __future__ import annotations
+from lancher_code.agent.service import AgentService
 
 import asyncio
 
@@ -32,7 +33,7 @@ async def test_exit_hint_with_background_count_keeps_tiny_terminal_controls_visi
     session.create_user_message("第二段会话，退出时仍然保留")
     registry = create_default_tool_registry()
     runner = TurnRunner(IdleProvider(), session, registry, ToolExecutor(registry, cwd=tmp_path))
-    app = LanCherTextualApp(runner, openai_provider_config, session, UIConfig())
+    app = LanCherTextualApp(AgentService(runner, session), UIConfig())
     clock = [0.0]
     app._exit_flow = ExitFlow(clock=lambda: clock[0])
     # 这里只验证排版，真实进程退出由应用集成测试负责。
