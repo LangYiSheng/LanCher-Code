@@ -9,7 +9,7 @@ from dataclasses import asdict
 
 import httpx
 
-from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent
+from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent, generation_incomplete
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
@@ -104,6 +104,7 @@ class ResponsesProvider(BaseChatProvider):
         usage = MessageUsage(is_final=False)
         usage_request_id: str | None = None
         usage_status: RequestUsageStatus = "failed"
+        stop_reason: str | None = None
         tools: dict[int, dict[str, str]] = {}
         texts: dict[tuple[int, int], str] = {}
         try:
@@ -160,9 +161,10 @@ class ResponsesProvider(BaseChatProvider):
                             if kind == "response.incomplete":
                                 usage_status = "incomplete"
                                 details = final.get("incomplete_details")
-                                reason = details.get("reason") if isinstance(details, dict) else "incomplete"
-                                yield StreamEvent(kind="message_end", usage=usage, stop_reason=str(reason),
-                                                  response_complete=False)
+                                reason = details.get("reason") if isinstance(details, dict) else None
+                                stop_reason = reason if isinstance(reason, str) and reason.strip() else "incomplete"
+                                yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason,
+                                                  response_complete=False, terminal_received=True)
                                 return
                             if final.get("status", "completed") != "completed":
                                 raise ProviderResponseError("Responses 结束事件与响应状态不一致。")
@@ -194,10 +196,15 @@ class ResponsesProvider(BaseChatProvider):
                                             yield StreamEvent(kind="text_delta", text=suffix)
                             if set(tools) - {i for i, item in enumerate(output) if item.get("type") == "function_call"}:
                                 raise ProviderResponseError("Responses 完整响应遗漏了已开始的工具调用。")
-                            usage_status = "completed"
+                            refusal = any(item.get("type") == "message" and any(
+                                part.get("type") == "refusal" for part in item.get("content", [])) for item in output)
+                            stop_reason = ("refusal" if refusal else
+                                           "tool_calls" if any(b.kind == "tool_use" for b in blocks) else "stop")
+                            usage_status = ("incomplete" if generation_incomplete(
+                                stop_reason, usage, request.max_output_tokens) else "completed")
                             yield StreamEvent(kind="message_end", usage=usage,
-                                              stop_reason="tool_calls" if any(b.kind == "tool_use" for b in blocks) else "stop",
-                                              assistant_blocks=blocks, response_complete=True)
+                                              stop_reason=stop_reason,
+                                              assistant_blocks=blocks, response_complete=True, terminal_received=True)
                             return
                         elif kind == "error":
                             self._raise_error(event)
@@ -214,7 +221,7 @@ class ResponsesProvider(BaseChatProvider):
                 raise self.map_request_error(exc) from exc
             raise
         finally:
-            self._finish_usage_request(usage_request_id, usage_status)
+            self._finish_usage_request(usage_request_id, usage_status, stop_reason=stop_reason)
 
     @staticmethod
     def _tool_delta(index: int, call_id: str | None, name: str, arguments: str) -> StreamEvent:

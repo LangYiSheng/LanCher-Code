@@ -65,6 +65,9 @@ async def prepare_compaction(
         transcript=project_tool_results(transcript, copy.deepcopy(context), context_window=config.context_window),
         visible_tools=visible_tools, state=candidate_context, context_window=config.context_window,
         cancellation_token=cancellation_token, request_factory=request_factory,
+        max_output_tokens=min(config.max_output_tokens, context_budget(config.context_window, purpose="compaction").output_tokens)
+        if config.max_output_tokens is not None else None,
+        chat_max_output_tokens=config.max_output_tokens,
     )
     # 供应商可能跨轮复用 call_id；近期历史是完整后缀，按出现次数倒序还原原文。
     originals: dict[str, list[str]] = {}

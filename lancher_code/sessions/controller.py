@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
 from time import monotonic
+from typing import Literal
 from uuid import uuid4
 
 from lancher_code.context.models import (
@@ -306,8 +307,11 @@ class SessionController:
         return MessageEditor(self._state.messages).finish_trace_segment(message_id, state)
 
     @persist_change()
-    def append_trace_notice(self, message_id: str, text: str) -> SessionMessage:
-        return MessageEditor(self._state.messages).append_trace_notice(message_id, text)
+    def append_trace_notice(self, message_id: str, text: str, *,
+                            severity: Literal["info", "warning", "error"] = "warning",
+                            code: str | None = None) -> SessionMessage:
+        return MessageEditor(self._state.messages).append_trace_notice(
+            message_id, text, severity=severity, code=code)
 
     @persist_change()
     def append_trace_tool_calls(self, message_id: str, tool_calls: list[ToolCall]) -> SessionMessage:
@@ -323,7 +327,8 @@ class SessionController:
         return MessageEditor(self._state.messages).append_trace_tool_results(message_id, results)
 
     @persist_change()
-    def append_assistant_response(self, blocks: list[ContentBlock]) -> None:
+    def append_assistant_response(self, blocks: list[ContentBlock], *, stop_reason: str | None = None,
+                                  output_limited: bool = False) -> None:
         """保存一次完整助手交换，包含工具调用前的思考与文字。"""
         if not blocks:
             return
@@ -332,11 +337,22 @@ class SessionController:
         response = ConversationMessage(
             role="assistant", blocks=copy.deepcopy(blocks), response_protocol=self._provider_config.protocol,
             response_model=self._provider_config.model,
+            response_stop_reason=stop_reason,
+            response_output_limited=output_limited,
         )
         # 完整快照也可能来自损坏的流；先验证再修改内存/写事件，不能
         # 把空思考等无效协议落成下次无法恢复的会话记录。
         SessionCodec.decode_transcript(asdict(response))
         self._transcript.append(response)
+
+    @persist_change()
+    def append_output_continuation(self) -> None:
+        """继续同一用户任务；控制消息只进模型历史，不伪造用户聊天消息。"""
+        self._transcript.append(ConversationMessage(role="user", control_kind="output_continuation", blocks=[ContentBlock.text_block(
+            "<system-reminder>\n上一次响应达到了单次输出额度，任务尚未完成。"
+            "请接着已有内容继续当前用户任务，不要重复已输出的正文，不要把中断当作完成。"
+            "优先给出可用的下一段正文或完整工具调用；大文件使用小型骨架和分段编辑。"
+            "未执行的工具必须重新发送完整参数。\n</system-reminder>")]))
 
     @persist_change()
     def append_tool_results(self, results: list[ToolExecutionResult]) -> None:
@@ -374,10 +390,11 @@ class SessionController:
     @persist_change()
     def fail_message(self, message_id: str, error_text: str) -> SessionMessage:
         message = self.finish_trace_segment(message_id, "error")
-        if not MessageEditor.has_last_notice(message, error_text):
-            self.append_trace_notice(message_id, error_text)
+        self.append_trace_notice(message_id, error_text, severity="error", code="turn_failed")
         message.status = "error"
-        message.content = error_text
+        # 出错后的提示独立于正文，不能抹去模型已经输出的内容。
+        if not message.content.strip():
+            message.content = error_text
         message.trace.collapsed = True
         self._active_dynamic_context = None
         return message
@@ -390,8 +407,7 @@ class SessionController:
                 if entry.metadata.get("state") in {"queued", "running", "awaiting_permission", "waiting_resources"}:
                     entry.metadata["state"] = "cancelled"
                 entry.metadata.pop("waiting", None)
-        if not MessageEditor.has_last_notice(message, notice_text):
-            self.append_trace_notice(message_id, notice_text)
+        self.append_trace_notice(message_id, notice_text, severity="info", code="turn_cancelled")
         message.status = "cancelled"
         if not message.content.strip():
             message.content = notice_text

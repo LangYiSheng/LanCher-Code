@@ -39,6 +39,9 @@ CHAT_CSS = """
     .message-label { color: $primary; text-style: bold; }
     .message-timeline { height: auto; width: 1fr; }
     .timeline-text { height: auto; width: 1fr; margin: 0; }
+    .timeline-notice { border-left: solid $text-muted; padding-left: 1; }
+    .timeline-notice.notice--warning { border-left: solid $warning; }
+    .timeline-notice.notice--error { border-left: solid $error; }
     .trace-section { height: auto; width: 1fr; margin: 0; }
     .standalone-compaction { margin-bottom: 1; }
     .timeline-separator { margin-top: 1; }

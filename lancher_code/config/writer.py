@@ -22,7 +22,7 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
             if model.display_name:
                 model_data["display_name"] = model.display_name
             # 缺省覆盖继续缺省，避免把继承结果固化为模型自己的配置。
-            for key in ("protocol", "base_url", "api_key", "timeout_seconds", "context_window"):
+            for key in ("protocol", "base_url", "api_key", "timeout_seconds", "context_window", "max_output_tokens"):
                 value = getattr(model, key)
                 if value is not None:
                     model_data[key] = value
@@ -52,6 +52,7 @@ def serialize_config(config: AppConfig) -> dict[str, Any]:
         },
         "runtime": {
             "tool_loop_limit": config.runtime.tool_loop_limit,
+            "output_continuation_limit": config.runtime.output_continuation_limit,
             "unknown_tool_streak_limit": config.runtime.unknown_tool_streak_limit,
             "work_phase": config.runtime.work_phase,
             "execution_access": config.runtime.execution_access,

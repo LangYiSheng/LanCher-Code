@@ -131,6 +131,8 @@ async def test_openai_parses_native_cache_and_reasoning_without_double_counting(
     assert tracker.snapshot().total_tokens == 120
     assert tracker.snapshot().reasoning_output_tokens == 12
     assert tracker.snapshot().cached_input_tokens == 80
+    assert tracker.records[0].status == "incomplete"
+    assert tracker.records[0].stop_reason == "length"
 
 
 @pytest.mark.asyncio
@@ -158,6 +160,86 @@ async def test_claude_missing_normal_input_never_invents_total_from_cache(claude
     assert events[-1].usage.cache_creation_input_tokens == 2
     assert events[-1].stop_reason == "max_tokens"
     assert tracker.snapshot().input_reported_request_count == 0
+    assert tracker.records[0].status == "incomplete"
+    assert tracker.records[0].stop_reason == "max_tokens"
+    assert tracker.records[0].max_output_tokens == 32768
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config_fixture", ["openai_provider_config", "claude_provider_config"])
+@pytest.mark.parametrize("reason_kind,expected", [("limit", "incomplete"), ("absent", "incomplete"),
+                                                 ("normal", "completed")])
+async def test_provider_ledger_preserves_actual_cap_and_stop_reason(request, config_fixture, reason_kind, expected):
+    config = request.getfixturevalue(config_fixture)
+    tracker = RunUsageTracker()
+    records = []
+    if config.protocol == "openai":
+        reason = {"limit": "length", "absent": None, "normal": "stop"}[reason_kind]
+        body = _openai_usage() + _sse({"choices": [{"delta": {}, "finish_reason": reason}]})
+        body += b"data: [DONE]\n\n"
+    else:
+        reason = {"limit": "max_tokens", "absent": None, "normal": "end_turn"}[reason_kind]
+        body = _claude_usage() + _sse({"type": "message_delta", "usage": {"output_tokens": 3},
+                                     "delta": {"stop_reason": reason}})
+        body += _sse({"type": "message_stop"})
+    provider = _provider(config, tracker, body)
+    events = [event async for event in provider.stream_chat(
+        ChatRequest(model="first", max_output_tokens=3, usage_callback=records.append))]
+    assert events[-1].terminal_received
+    assert tracker.records[0].status == records[-1]["status"] == expected
+    assert tracker.records[0].stop_reason == records[-1]["stop_reason"] == reason
+    assert tracker.records[0].max_output_tokens == records[-1]["max_output_tokens"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config_fixture", ["openai_provider_config", "claude_provider_config"])
+@pytest.mark.parametrize("reason", ["content_filter", "refusal", "aborted",
+                                    "insufficient_system_resource", "pause_turn"])
+async def test_provider_ledger_marks_abnormal_stop_incomplete(request, config_fixture, reason):
+    config = request.getfixturevalue(config_fixture)
+    tracker = RunUsageTracker()
+    records = []
+    if config.protocol == "openai":
+        body = _openai_usage() + _sse({"choices": [{"delta": {"content": "已有内容"}, "finish_reason": reason}]})
+        body += b"data: [DONE]\n\n"
+    else:
+        body = _claude_usage() + _sse({"type": "content_block_start", "index": 0,
+                                     "content_block": {"type": "text", "text": "已有内容"}})
+        body += _sse({"type": "message_delta", "usage": {"output_tokens": 3}, "delta": {"stop_reason": reason}})
+        body += _sse({"type": "message_stop"})
+    events = [event async for event in _provider(config, tracker, body).stream_chat(
+        ChatRequest(model="first", max_output_tokens=100, usage_callback=records.append))]
+    assert events[-1].response_complete and events[-1].terminal_received
+    assert events[-1].stop_reason == reason
+    assert tracker.records[0].status == records[-1]["status"] == "incomplete"
+    assert tracker.records[0].stop_reason == records[-1]["stop_reason"] == reason
+    assert tracker.records[0].max_output_tokens == records[-1]["max_output_tokens"] == 100
+    assert tracker.snapshot().completed_request_count == 0
+
+
+@pytest.mark.asyncio
+async def test_third_party_usage_observer_keeps_original_method_signatures(openai_provider_config):
+    calls = []
+
+    class LegacyObserver:
+        def start_request(self, *, protocol, model, session_id=None, turn_id=None,
+                          message_id=None, purpose="chat", request_id=None):
+            calls.append(("start", request_id))
+            return request_id
+
+        def update_request(self, request_id, usage, *, provided_fields=None):
+            calls.append(("update", request_id))
+
+        def finish_request(self, request_id, *, status):
+            calls.append(("finish", status))
+
+    body = _sse({"choices": [{"delta": {}, "finish_reason": "length"}]}) + b"data: [DONE]\n\n"
+    provider = create_provider(openai_provider_config, usage_observer=LegacyObserver(),
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=body))))
+    _ = [event async for event in provider.stream_chat(ChatRequest(model="first", max_output_tokens=5))]
+    assert calls[0][0] == "start"
+    assert calls[-1] == ("finish", "incomplete")
 
 
 @pytest.mark.asyncio

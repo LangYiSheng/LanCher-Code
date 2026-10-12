@@ -124,6 +124,7 @@ def test_catalog_rejects_invalid_default_reference(reference: str) -> None:
     ("protocol", "other"), ("base_url", ""), ("api_key", " "),
     ("timeout_seconds", True), ("timeout_seconds", float("inf")),
     ("context_window", False), ("context_window", 0),
+    ("max_output_tokens", False), ("max_output_tokens", 0), ("max_output_tokens", "32768"),
     ("thinking", {"enabled": "false"}), ("thinking", {"budget_tokens": True}),
 ])
 def test_invalid_nondefault_model_reports_qualified_path(field: str, value: object) -> None:
@@ -153,6 +154,37 @@ def test_explicit_context_window_and_disabled_thinking_round_trip() -> None:
     resolved = resolve_model(config.providers, "deepseek/claude")
     assert resolved.context_window == 32000
     assert resolved.thinking is not None and not resolved.thinking.enabled
+
+
+def test_explicit_output_limit_round_trips_without_changing_default_models() -> None:
+    raw = _catalog_data()
+    raw["providers"]["deepseek"]["models"]["reasoner"]["max_output_tokens"] = 65536
+    config = load_config_data(raw)
+    serialized = serialize_config(config)
+    restored = load_config_data(serialized)
+    assert resolve_model(restored.providers, "deepseek/reasoner").max_output_tokens == 65536
+    assert resolve_model(restored.providers, "deepseek/chat").max_output_tokens is None
+    assert "max_output_tokens" not in serialized["providers"]["deepseek"]["models"]["chat"]
+
+
+@pytest.mark.parametrize("output", [8192, 10000])
+def test_output_limit_must_fit_configured_context_window(output: int) -> None:
+    raw = _catalog_data()
+    raw["providers"]["deepseek"]["models"]["reasoner"].update({
+        "context_window": 8192, "max_output_tokens": output,
+    })
+    with pytest.raises(ConfigError, match="providers.deepseek.models.reasoner.max_output_tokens"):
+        load_config_data(raw)
+
+
+def test_enabled_thinking_budget_must_be_inside_total_output_limit() -> None:
+    raw = _catalog_data()
+    model = raw["providers"]["deepseek"]["models"]["claude"]
+    model["max_output_tokens"] = 1024
+    with pytest.raises(ConfigError, match="thinking.budget_tokens.*max_output_tokens"):
+        load_config_data(raw)
+    model["max_output_tokens"] = 4096
+    assert resolve_model(load_config_data(raw).providers, "deepseek/claude").max_output_tokens == 4096
 
 
 def test_new_entry_id_is_stable_safe_and_unique() -> None:

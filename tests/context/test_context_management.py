@@ -302,6 +302,43 @@ def test_explicit_output_budget_never_silently_changes_request_cap() -> None:
     assert impossible.input_limit == 0
 
 
+def test_chat_and_summary_have_separate_large_output_defaults() -> None:
+    assert context_budget(128000).output_tokens == 32768
+    assert context_budget(1000000).output_tokens == 32768
+    assert context_budget(128000, purpose="compaction").output_tokens == 16384
+    assert context_budget(8192).output_tokens == 2730
+    assert context_budget(8192, purpose="compaction").output_tokens == 1365
+
+
+def test_model_output_limit_is_the_actual_request_and_capacity_allowance(openai_provider_config) -> None:
+    from lancher_code.sessions.controller import SessionController
+
+    openai_provider_config.max_output_tokens = 65536
+    session = SessionController(openai_provider_config)
+    request = session.build_request([], allow_tool_calls=True)
+    budget = context_budget(session.context_window, request.max_output_tokens)
+    assert request.max_output_tokens == budget.output_tokens == 65536
+    assert budget.input_limit == session.context_window - 65536 - 1024
+    openai_provider_config.max_output_tokens = None
+    assert session.build_request([], allow_tool_calls=True).max_output_tokens == 32768
+    openai_provider_config.context_window = 1000000
+    assert session.build_request([], allow_tool_calls=True).max_output_tokens == 32768
+
+
+def test_request_does_not_inflate_total_output_by_thinking_budget(claude_provider_config) -> None:
+    from lancher_code.errors import ConfigError
+    from lancher_code.providers.models import ThinkingConfig
+    from lancher_code.sessions.controller import SessionController
+
+    claude_provider_config.max_output_tokens = 12000
+    claude_provider_config.thinking = ThinkingConfig(enabled=True, budget_tokens=8000)
+    session = SessionController(claude_provider_config)
+    assert session.build_request([], allow_tool_calls=True).max_output_tokens == 12000
+    claude_provider_config.thinking.budget_tokens = 12000
+    with pytest.raises(ConfigError, match="思考预算必须小于总输出额度"):
+        session.build_request([], allow_tool_calls=True)
+
+
 def test_bounded_recent_history_never_splits_tool_exchange() -> None:
     transcript = [ConversationMessage.text_message("user", "task"), *_tool_exchange(["x" * 4000])]
     assert select_recent_history(transcript, token_budget=100) == []

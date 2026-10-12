@@ -143,6 +143,35 @@ async def test_openai_requires_actual_tool_id_but_accepts_it_in_later_delta(
     )]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["length", None, "stop", "aborted"])
+async def test_openai_output_limit_delivers_terminal_when_tool_identity_is_truncated(openai_provider_config, reason):
+    deltas = [{"reasoning_content": "已有思考"}, {"content": "正在读取"},
+              {"tool_calls": [{"index": 0, "function": {"name": "read_file", "arguments": '{"path":"'}}]}]
+    chunks = [f"data: {json.dumps({'choices': [{'delta': delta}]})}\n\n" for delta in deltas]
+    chunks.append(f"data: {json.dumps({'choices': [{'delta': {}, 'finish_reason': reason}], 'usage': {'completion_tokens': 10}})}\n\n")
+    body = _build_sse_payload([*chunks, "data: [DONE]\n\n"])
+    tracker = RunUsageTracker()
+    provider = OpenAIProvider(openai_provider_config, usage_observer=tracker,
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=body))))
+    request = _request()
+    request.max_output_tokens = 10
+    if reason in {"stop", "aborted"}:
+        with pytest.raises(ProviderResponseError, match="真实调用标识"):
+            _ = [event async for event in provider.stream_chat(request)]
+        assert tracker.records[0].status == "failed"
+        return
+    events = [event async for event in provider.stream_chat(request)]
+    assert events[-1].terminal_received
+    assert not events[-1].response_complete
+    assert events[-1].assistant_blocks is None
+    assert events[-1].stop_reason == reason
+    assert events[-1].usage.output_tokens == 10
+    assert any(event.text == "已有思考" for event in events)
+    assert tracker.records[0].status == "incomplete"
+
+
 def _request(*, allow_tool_calls: bool = True) -> ChatRequest:
     return ChatRequest(
         model="gpt-test",

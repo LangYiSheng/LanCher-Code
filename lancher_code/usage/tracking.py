@@ -6,7 +6,7 @@ from contextlib import aclosing
 from dataclasses import replace
 from uuid import uuid4
 
-from lancher_code.contracts.messages import ChatRequest, StreamEvent
+from lancher_code.contracts.messages import ChatRequest, StreamEvent, generation_incomplete
 from lancher_code.usage.models import MessageUsage, merge_usage
 from lancher_code.providers.base import ChatProvider
 from lancher_code.usage.ledger import RequestUsageRecord
@@ -26,6 +26,7 @@ async def tracked_stream(
         request_id=request.request_id, run_id=run_id, protocol=protocol, model=request.model,
         session_id=request.session_id, turn_id=request.turn_id, message_id=request.message_id,
         purpose=request.purpose, status="running", usage=MessageUsage(is_final=False),
+        max_output_tokens=request.max_output_tokens,
     )
     identity_fields = ("request_id", "run_id", "protocol", "model", "session_id",
                        "turn_id", "message_id", "purpose")
@@ -36,12 +37,22 @@ async def tracked_stream(
         incoming = RequestUsageRecord.from_dict(data)
         if any(getattr(incoming, name) != value for name, value in identity.items()):
             raise ValueError("请求用量回调的身份或归属不一致。")
+        # 原生供应商可补齐实际默认额度；后续回调不能丢失已收到的结束原因。
+        if incoming.max_output_tokens is None:
+            incoming.max_output_tokens = record.max_output_tokens
+        if incoming.stop_reason is None:
+            incoming.stop_reason = record.stop_reason
+        if incoming.status == "completed" and generation_incomplete(
+            incoming.stop_reason, incoming.usage, incoming.max_output_tokens
+        ):
+            incoming.status = "incomplete"
         record = incoming
         if callback is not None:
             callback(record.to_dict())
 
     request.usage_callback = receive
     terminal_seen = False
+    generation_unfinished = False
     status = "incomplete"
     try:
         receive(record.to_dict())
@@ -51,16 +62,17 @@ async def tracked_stream(
                 if event.kind == "message_end":
                     terminal_seen = event.response_complete is True
                     merged = merge_usage(record.usage, event.usage)
-                    if merged != record.usage:
-                        receive(replace(record, usage=merged).to_dict())
+                    reason = event.stop_reason or record.stop_reason
+                    generation_unfinished = generation_incomplete(reason, merged, record.max_output_tokens)
+                    receive(replace(record, usage=merged, stop_reason=reason).to_dict())
                 yield event
-        status = "completed" if terminal_seen else "incomplete"
+        status = "completed" if terminal_seen and not generation_unfinished else "incomplete"
     except asyncio.CancelledError:
         status = "cancelled"
         raise
     except GeneratorExit:
         if terminal_seen:
-            status = "completed"
+            status = "incomplete" if generation_unfinished else "completed"
         elif request.cancellation_token is not None and request.cancellation_token.is_cancelled:
             status = "cancelled"
         else:

@@ -9,7 +9,7 @@ import httpx
 
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
-from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent
+from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent, generation_incomplete, output_limit_reached
 from lancher_code.usage.models import MessageUsage
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
@@ -20,7 +20,7 @@ from lancher_code.usage.ledger import RequestUsageStatus, UsageField
 
 logger = get_logger("providers.claude")
 
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = 32768
 
 
 class ClaudeProvider(BaseChatProvider):
@@ -46,7 +46,7 @@ class ClaudeProvider(BaseChatProvider):
         tool_arguments: dict[int, str] = {}
         try:
             async with self._client_factory() as client:
-                usage_request_id = self._start_usage_request(request)
+                usage_request_id = self._start_usage_request(request, max_output_tokens=payload["max_tokens"])
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     await raise_native_error_status(response, experimental=request.experimental_mcp_tool_append)
 
@@ -164,12 +164,21 @@ class ClaudeProvider(BaseChatProvider):
                             continue
 
                         if event_type == "message_stop":
-                            usage_status = "completed"
+                            usage_status = ("incomplete" if generation_incomplete(
+                                stop_reason, usage, payload["max_tokens"]) else "completed")
                             usage.is_final = saw_output_delta
                             self._report_usage(usage_request_id, usage, usage.known_fields)
+                            try:
+                                completed_blocks = self._complete_assistant_blocks(assistant_blocks, tool_arguments)
+                            except ProviderResponseError:
+                                if not output_limit_reached(stop_reason, usage, payload["max_tokens"]):
+                                    raise
+                                # 仅明确额度耗尽时允许缺少完整快照；整批工具交给
+                                # 上层拒绝执行，累计文字仍可用于下一次模型请求。
+                                completed_blocks = None
                             yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason,
-                                              assistant_blocks=self._complete_assistant_blocks(assistant_blocks, tool_arguments),
-                                              response_complete=True)
+                                              assistant_blocks=completed_blocks,
+                                              response_complete=completed_blocks is not None, terminal_received=True)
                             return
 
                         if event_type == "error":
@@ -210,7 +219,7 @@ class ClaudeProvider(BaseChatProvider):
                 raise self.map_request_error(exc) from exc
             raise
         finally:
-            self._finish_usage_request(usage_request_id, usage_status)
+            self._finish_usage_request(usage_request_id, usage_status, stop_reason=stop_reason)
 
     @staticmethod
     def _complete_assistant_blocks(
@@ -240,8 +249,9 @@ class ClaudeProvider(BaseChatProvider):
             "messages": self._serialize_request_messages(request),
             "max_tokens": max_tokens,
             "stream": True,
-            "thinking": self._build_thinking_payload(request),
         }
+        if request.thinking is not None:
+            payload["thinking"] = self._build_thinking_payload(request)
         if request.system:
             payload["system"] = "\n\n".join(request.system)
         if request.tools:

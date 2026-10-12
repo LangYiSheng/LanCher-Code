@@ -69,10 +69,27 @@ class MessageEditor:
                 entry.metadata["state"] = state
         return message
 
-    def append_trace_notice(self, message_id: str, text: str) -> SessionMessage:
+    def append_trace_notice(self, message_id: str, text: str, *,
+                            severity: Literal["info", "warning", "error"] = "warning",
+                            code: str | None = None) -> SessionMessage:
+        """提示独立保存级别；同一原因和文本只展示一次，不覆盖不同事件的细节。"""
+        if severity not in ("info", "warning", "error"):
+            raise ValueError(f"未知消息提示级别：{severity}")
         message = self.finish_trace_segment(message_id)
+        for entry in reversed(message.trace.entries):
+            if entry.kind != "notice" or entry.text != text:
+                continue
+            if entry.metadata.get("code") not in (None, code) and code is not None:
+                continue
+            entry.metadata["severity"] = severity
+            if code is not None:
+                entry.metadata["code"] = code
+            return message
         self.expand_trace_on_first_entry(message)
-        message.trace.entries.append(TraceEntry(kind="notice", text=text))
+        metadata: dict[str, object] = {"severity": severity}
+        if code is not None:
+            metadata["code"] = code
+        message.trace.entries.append(TraceEntry(kind="notice", text=text, metadata=metadata))
         return message
 
     def append_trace_tool_calls(self, message_id: str, tool_calls: list[ToolCall]) -> SessionMessage:
@@ -145,11 +162,6 @@ class MessageEditor:
                 )
             )
         return message
-
-    @staticmethod
-    def has_last_notice(message: SessionMessage, text: str) -> bool:
-        return bool(message.trace.entries and message.trace.entries[-1].kind == "notice"
-                    and message.trace.entries[-1].text == text)
 
     def get_message(self, message_id: str) -> SessionMessage:
         for message in self._messages:

@@ -121,3 +121,14 @@ def test_provider_context_window_defaults_and_validates() -> None:
         raw["providers"]["main"]["models"]["default"]["context_window"] = value
         with pytest.raises(ConfigError):
             load_config_data(raw)
+
+
+def test_runtime_output_continuation_limit_defaults_and_validates() -> None:
+    assert load_config_data(_data()).runtime.output_continuation_limit == 3
+    raw = _data()
+    raw["runtime"] = {"output_continuation_limit": 5}
+    assert load_config_data(raw).runtime.output_continuation_limit == 5
+    for value in (True, 0, -1, "3"):
+        raw["runtime"]["output_continuation_limit"] = value
+        with pytest.raises(ConfigError, match="runtime.output_continuation_limit"):
+            load_config_data(raw)

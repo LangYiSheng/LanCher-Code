@@ -149,9 +149,13 @@ class ModelSettingsEditor(Vertical):
                         yield Checkbox("继承供应商", value=True, id=f"inherit-{name}", classes="model-inherit")
                         yield widget
                 yield from self._field("上下文窗口", Input(id="model-context-window", type="integer"))
+                yield from self._field("单次总输出额度（token）", Input(id="model-max-output-tokens", type="integer", placeholder="默认 32768；小窗口自动适配"))
+                yield Static("总输出额度包含思考、正文和工具参数，需符合供应商支持的上限。", classes="inherit-note")
+                yield Static("思考轨迹的显示在“外观与输入”中设置；OpenAI 兼容协议使用模型和服务端的推理默认行为。", classes="inherit-note")
                 with Vertical(id="model-thinking-fields", classes="model-section"):
-                    yield Checkbox("启用 Anthropic thinking", id="model-thinking")
-                    yield from self._field("Thinking budget", Input(id="model-thinking-budget", type="integer"))
+                    yield Checkbox("启用 Anthropic 手动思考预算", id="model-thinking")
+                    yield Static("仅用于支持手动 thinking 的模型；这是请求参数，不控制思考轨迹显示。", classes="inherit-note")
+                    yield from self._field("手动思考预算（token）", Input(id="model-thinking-budget", type="integer"))
                 yield Static("", id="model-id", classes="entry-id", markup=False)
             yield Button("删除模型", id="model-delete", classes="danger-button")
 
@@ -277,6 +281,7 @@ class ModelSettingsEditor(Vertical):
                 self.query_one(f"#inherit-{field}", Checkbox).value = own is None
                 self.query_one(f"#model-{field}").value = "" if field == "api-key" else str(own if own is not None else getattr(provider, attribute))
             self.query_one("#model-context-window", Input).value = str(model.context_window or "")
+            self.query_one("#model-max-output-tokens", Input).value = str(model.max_output_tokens or "")
             self.query_one("#model-thinking", Checkbox).value = bool(model.thinking and model.thinking.enabled)
             self.query_one("#model-thinking-budget", Input).value = str(model.thinking.budget_tokens or "") if model.thinking else ""
         self.query_one("#model-id", Static).update(f"稳定引用：{provider_id}/{model_id or '保存时生成'}")
@@ -364,6 +369,7 @@ class ModelSettingsEditor(Vertical):
                         value = value or model.api_key or ""
                 setattr(model, attr, value)
             model.context_window = self._positive_number("model-context-window", "上下文窗口", integer=True) if self.query_one("#model-context-window", Input).value.strip() else None
+            model.max_output_tokens = self._positive_number("model-max-output-tokens", "单次总输出额度", integer=True) if self.query_one("#model-max-output-tokens", Input).value.strip() else None
             enabled = self.query_one("#model-thinking", Checkbox).value
             budget = self.query_one("#model-thinking-budget", Input).value.strip()
             model.thinking = ThinkingConfig(enabled=enabled, budget_tokens=self._positive_number("model-thinking-budget", "Thinking budget", integer=True) if budget else None) if enabled or budget or model.thinking is not None else None

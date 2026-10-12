@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from rich.console import Group
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -13,7 +14,36 @@ from textual.events import Click
 from textual.widgets import Static
 
 from lancher_code.sessions.models import SessionMessage, TraceEntry
-from lancher_code.tui.theme import theme_palette
+from lancher_code.tui.theme import TerminalMarkdown, theme_palette
+
+
+class NoticeWidget(Static):
+    """持久消息提示独立于过程折叠，严重级别不受最终消息状态影响。"""
+
+    def __init__(self, entry: TraceEntry, *, status: str = "complete") -> None:
+        super().__init__(classes="timeline-text timeline-notice")
+        self.entry, self.status = entry, status
+        self.severity = "info"
+
+    def on_mount(self) -> None:
+        self.update_notice(self.entry, status=self.status)
+
+    def update_notice(self, entry: TraceEntry, *, status: str) -> None:
+        self.entry, self.status = entry, status
+        severity = entry.metadata.get("severity")
+        # 已保存的旧提示仅在投影时兜底，不能改写会话里的原始记录。
+        self.severity = str(severity) if severity in ("info", "warning", "error") else (
+            "error" if status == "error" else "info" if status == "cancelled" else "warning")
+        colors = theme_palette(self.app.theme)
+        color = colors["muted" if self.severity == "info" else self.severity]
+        label = {"info": "提示", "warning": "警告", "error": "错误"}[self.severity]
+        icon = {"info": "·", "warning": "!", "error": "×"}[self.severity]
+        if entry.metadata.get("code") == "turn_cancelled":
+            icon, label = "■", "已停止"
+        for level in ("info", "warning", "error"):
+            self.set_class(level == self.severity, f"notice--{level}")
+        self.update(Group(Text(f"{icon} {label}", style="bold " + color),
+                          TerminalMarkdown(entry.text, self.app.theme)))
 
 
 class TraceHeader(Static):
@@ -357,6 +387,11 @@ class TimelineBlock:
 
 def timeline_blocks(message: SessionMessage) -> list[TimelineBlock]:
     """工具结果归回调用位置，正文与思考严格沿用保存的段顺序。"""
+    if message.role == "system":
+        severity = "error" if message.status == "error" else "info"
+        text = message.content or ("请求失败。" if message.status == "error" else "")
+        return [TimelineBlock("system-notice", "notice", [TraceEntry(
+            kind="notice", text=text, metadata={"severity": severity})])] if text else []
     blocks: list[TimelineBlock] = []
     groups: dict[str, TimelineBlock] = {}
     call_groups: dict[str, TimelineBlock] = {}
@@ -386,4 +421,28 @@ def timeline_blocks(message: SessionMessage) -> list[TimelineBlock]:
             blocks.append(TimelineBlock(key, "compaction", [entry]))
         else:
             blocks.append(TimelineBlock(f"entry-{index}", entry.kind, [entry]))
+    if message.role != "assistant":
+        return blocks
+
+    notices = [entry for entry in message.trace.entries if entry.kind == "notice"]
+    has_text = any(block.kind == "text" for block in blocks)
+    # 缺少正文轨迹的投影仍展示已有正文；错误/停止正文曾被用作提示时避免重复。
+    terminal_content = message.status in {"error", "cancelled"} and not notices and not has_text
+    if (message.content.strip() and not has_text and not terminal_content
+            and message.content not in {entry.text for entry in notices}
+            and message.content not in {"本轮已取消。", "上次任务已中断。"}):
+        first_notice = next((index for index, block in enumerate(blocks) if block.kind == "notice"), len(blocks))
+        blocks.insert(first_notice, TimelineBlock("content-fallback", "text", [TraceEntry(
+            kind="text", text=message.content)]))
+    if message.status in {"error", "cancelled"}:
+        severity = "error" if message.status == "error" else "info"
+        code = "turn_failed" if message.status == "error" else "turn_cancelled"
+        has_terminal_notice = any(
+            entry.metadata.get("code") == code or entry.metadata.get("severity") == severity
+            or "severity" not in entry.metadata for entry in notices)
+        if not has_terminal_notice:
+            text = message.content if terminal_content and message.content else (
+                "请求失败，已保留此前输出。" if message.status == "error" else "本轮已取消。")
+            blocks.append(TimelineBlock("terminal-notice", "notice", [TraceEntry(
+                kind="notice", text=text, metadata={"severity": severity, "code": code})]))
     return blocks

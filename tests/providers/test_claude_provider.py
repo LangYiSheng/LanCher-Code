@@ -153,6 +153,38 @@ async def test_claude_does_not_fabricate_missing_tool_ids(claude_provider_config
     assert tracker.records[0].status == "failed"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["max_tokens", None, "end_turn", "aborted"])
+async def test_claude_output_limit_delivers_terminal_when_tool_identity_is_truncated(claude_provider_config, reason):
+    body = _protocol_events([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "thinking", "thinking": "已有思考"}},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "name": "read_file", "input": {}}},
+        {"type": "message_delta", "delta": {"stop_reason": reason}, "usage": {"output_tokens": 10}},
+        {"type": "message_stop"},
+    ])
+    tracker = RunUsageTracker()
+    provider = ClaudeProvider(claude_provider_config, usage_observer=tracker,
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=body))))
+    request = _request()
+    request.max_output_tokens = 10
+    if reason in {"end_turn", "aborted"}:
+        with pytest.raises(ProviderResponseError, match="真实调用标识"):
+            _ = [event async for event in provider.stream_chat(request)]
+        assert tracker.records[0].status == "failed"
+        return
+    events = [event async for event in provider.stream_chat(request)]
+    assert events[-1].terminal_received
+    assert not events[-1].response_complete
+    assert events[-1].assistant_blocks is None
+    assert events[-1].stop_reason == reason
+    assert events[-1].usage.output_tokens == 10
+    assert any(event.text == "已有思考" for event in events)
+    assert tracker.records[0].status == "incomplete"
+
+
 def _request(*, thinking: ThinkingConfig | None = None, allow_tool_calls: bool = True) -> ChatRequest:
     return ChatRequest(
         model="claude-test",
@@ -162,6 +194,12 @@ def _request(*, thinking: ThinkingConfig | None = None, allow_tool_calls: bool =
         allow_tool_calls=allow_tool_calls,
         thinking=thinking,
     )
+
+
+def test_claude_omits_unconfigured_thinking_and_uses_roomy_output_default(claude_provider_config):
+    payload = ClaudeProvider(claude_provider_config)._build_payload(_request())
+    assert "thinking" not in payload
+    assert payload["max_tokens"] == 32768
 
 
 @pytest.mark.asyncio

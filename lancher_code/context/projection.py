@@ -6,7 +6,7 @@ import copy
 import json
 from collections import defaultdict, deque
 
-from lancher_code.contracts.messages import ContentBlock, ConversationMessage
+from lancher_code.contracts.messages import ContentBlock, ConversationMessage, OUTPUT_LIMIT_REASONS
 from lancher_code.providers.models import ProviderProtocol
 
 
@@ -43,6 +43,18 @@ def project_historical_tool_exchanges(
     projected: list[ConversationMessage] = []
     for message_index, original in enumerate(messages):
         message = copy.deepcopy(original)
+        if (message.role == 'assistant' and (message.response_output_limited or message.response_stop_reason in OUTPUT_LIMIT_REASONS)
+                and not any(block.kind == 'tool_use' for block in message.blocks)
+                and protocol == 'claude'):
+            # 截断的思考未必收到完整签名，不能作为新的原生 thinking 回传。
+            # 原始记录保持不变，只在发送副本里引用可读的未完成内容。
+            message.blocks = [ContentBlock.text_block(
+                '上一次响应达到输出额度，以下为未完成思考，仅供继续任务参考：\n' + block.text
+            ) if block.kind == 'thinking' and block.text else block
+                for block in message.blocks if block.kind != 'redacted_thinking'
+                and (block.kind != 'thinking' or block.text)]
+            if not message.blocks:
+                message.blocks = [ContentBlock.text_block('上一次响应在思考期间达到输出额度，任务尚未完成。')]
         if message_index in selected:
             blocks = [ContentBlock.text_block(selected[message_index])]
             for block in message.blocks:
@@ -89,6 +101,9 @@ def project_historical_tool_exchanges(
             projected.append(ConversationMessage(
                 role=segment_role, blocks=segment, response_protocol=message.response_protocol,
                 response_model=message.response_model,
+                response_stop_reason=message.response_stop_reason,
+                response_output_limited=message.response_output_limited,
+                control_kind=message.control_kind,
             ))
         elif not message.blocks:
             projected.append(message)

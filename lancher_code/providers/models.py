@@ -27,6 +27,7 @@ class ProviderConfig:
     timeout_seconds: float = 60.0
     thinking: ThinkingConfig | None = None
     context_window: int = 128000
+    max_output_tokens: int | None = None
 
 
 @dataclass(slots=True)
@@ -41,6 +42,7 @@ class ModelDefinition:
     timeout_seconds: float | None = None
     context_window: int | None = None
     thinking: ThinkingConfig | None = None
+    max_output_tokens: int | None = None
 
 
 @dataclass(slots=True)

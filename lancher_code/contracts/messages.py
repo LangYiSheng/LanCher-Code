@@ -14,6 +14,27 @@ from typing import Literal
 
 ConversationRole = Literal["system", "user", "assistant", "tool"]
 
+OUTPUT_LIMIT_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+STOP_REASON_MESSAGES = {
+    "content_filter": "供应商的内容过滤中止了生成", "refusal": "供应商拒绝了本次生成",
+    "aborted": "供应商中止了生成", "insufficient_system_resource": "供应商因资源不足中止了生成",
+    "pause_turn": "供应商暂停了生成",
+}
+
+
+def output_limit_reached(stop_reason: str | None, usage: MessageUsage,
+                         max_output_tokens: int | None) -> bool:
+    """优先使用停止原因；缺少原因时才以实报用量补充判断。"""
+    return stop_reason in OUTPUT_LIMIT_REASONS or (
+        stop_reason is None and max_output_tokens is not None
+        and usage.output_tokens is not None and usage.output_tokens >= max_output_tokens
+    )
+
+
+def generation_incomplete(stop_reason: str | None, usage: MessageUsage,
+                          max_output_tokens: int | None) -> bool:
+    return stop_reason in STOP_REASON_MESSAGES or output_limit_reached(stop_reason, usage, max_output_tokens)
+
 
 StreamEventKind = Literal[
     "text_delta",
@@ -73,6 +94,9 @@ class ConversationMessage:
     blocks: list[ContentBlock]
     response_protocol: ProviderProtocol | None = None
     response_model: str | None = None
+    response_stop_reason: str | None = None
+    response_output_limited: bool = False
+    control_kind: Literal["output_continuation"] | None = None
 
     @classmethod
     def text_message(cls, role: ConversationRole, text: str) -> ConversationMessage:
@@ -129,3 +153,5 @@ class StreamEvent:
     assistant_blocks: list[ContentBlock] | None = None
     # 只有显式完整结束的响应可以执行工具。
     response_complete: bool = False
+    # 部分协议有显式 incomplete 终帧；与缺少终帧的 EOF 分开判断。
+    terminal_received: bool = False

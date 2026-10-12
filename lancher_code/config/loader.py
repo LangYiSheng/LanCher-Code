@@ -194,6 +194,7 @@ def _load_model(raw: Any, path: str) -> ModelDefinition:
         api_key=_require_non_empty_string(raw, "api_key", f"{path}.api_key") if raw.get("api_key") is not None else None,
         timeout_seconds=_read_positive_float(raw["timeout_seconds"], f"{path}.timeout_seconds") if raw.get("timeout_seconds") is not None else None,
         context_window=_read_positive_int(raw["context_window"], f"{path}.context_window") if raw.get("context_window") is not None else None,
+        max_output_tokens=_read_positive_int(raw["max_output_tokens"], f"{path}.max_output_tokens") if raw.get("max_output_tokens") is not None else None,
         thinking=_load_thinking(raw.get("thinking"), f"{path}.thinking"),
     )
 
@@ -234,6 +235,7 @@ def _load_ui(raw_value: dict[str, Any]) -> UIConfig:
 
 def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
     tool_loop_limit = _read_positive_int(raw_value.get("tool_loop_limit", 50), "runtime.tool_loop_limit")
+    output_continuation_limit = _read_positive_int(raw_value.get("output_continuation_limit", 3), "runtime.output_continuation_limit")
     unknown_tool_streak_limit = _read_positive_int(
         raw_value.get("unknown_tool_streak_limit", 3),
         "runtime.unknown_tool_streak_limit",
@@ -250,6 +252,7 @@ def _load_runtime(raw_value: dict[str, Any]) -> RuntimeConfig:
         raise ConfigError("runtime.experimental_mcp_tool_append 必须是布尔值。")
     return RuntimeConfig(
         tool_loop_limit=tool_loop_limit,
+        output_continuation_limit=output_continuation_limit,
         unknown_tool_streak_limit=unknown_tool_streak_limit,
         work_phase=work_phase,
         execution_access=execution_access,

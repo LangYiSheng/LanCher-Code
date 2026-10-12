@@ -18,7 +18,7 @@ from lancher_code.errors import (
 from lancher_code.contracts.messages import ChatRequest, StreamEvent
 from lancher_code.usage.models import MessageUsage, merge_usage
 from lancher_code.providers.models import ProviderConfig
-from lancher_code.usage.ledger import RequestUsageRecord, RequestUsageStatus, UsageField, UsageObserver
+from lancher_code.usage.ledger import RequestUsageRecord, RequestUsageStatus, RunUsageTracker, UsageField, UsageObserver
 
 
 class ChatProvider(Protocol):
@@ -53,7 +53,7 @@ class BaseChatProvider:
         request.request_id, request.run_id = identity, run_id
         return attempt
 
-    def _start_usage_request(self, request: ChatRequest) -> str:
+    def _start_usage_request(self, request: ChatRequest, *, max_output_tokens: int | None = None) -> str:
         request_id = request.request_id or uuid4().hex
         if self._usage_observer is not None:
             request_id = self._usage_observer.start_request(
@@ -66,7 +66,8 @@ class BaseChatProvider:
         self._usage_requests[request_id] = (request, RequestUsageRecord(
             request_id=request_id, run_id=run_id, protocol=self.config.protocol, model=request.model,
             session_id=request.session_id, turn_id=request.turn_id, message_id=request.message_id,
-            purpose=request.purpose))
+            purpose=request.purpose,
+            max_output_tokens=request.max_output_tokens if max_output_tokens is None else max_output_tokens))
         self._emit_usage_record(request_id)
         return request_id
 
@@ -82,12 +83,14 @@ class BaseChatProvider:
             self._usage_observer.update_request(request_id, usage, provided_fields=provided_fields)
         self._emit_usage_record(request_id)
 
-    def _finish_usage_request(self, request_id: str | None, status: RequestUsageStatus) -> None:
+    def _finish_usage_request(self, request_id: str | None, status: RequestUsageStatus, *,
+                              stop_reason: str | None = None) -> None:
         if request_id is None:
             return
         pair = self._usage_requests.get(request_id)
         if pair is not None:
             pair[1].status = status
+            pair[1].stop_reason = stop_reason
         if self._usage_observer is not None:
             self._usage_observer.finish_request(request_id, status=status)
         try:
@@ -97,7 +100,12 @@ class BaseChatProvider:
 
     def _emit_usage_record(self, request_id: str) -> None:
         pair = self._usage_requests.get(request_id)
-        if pair is not None and pair[0].usage_callback is not None:
+        if pair is None:
+            return
+        # 内置账本接收完整快照；第三方观察者继续使用原有三个方法签名。
+        if isinstance(self._usage_observer, RunUsageTracker):
+            self._usage_observer.accept_record(pair[1])
+        if pair[0].usage_callback is not None:
             pair[0].usage_callback(pair[1].to_dict())
 
     @staticmethod

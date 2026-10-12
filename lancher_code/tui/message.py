@@ -17,7 +17,7 @@ from lancher_code.mcp.manager import MCPInitializationProgress
 from lancher_code.tui.compaction import CompactionActivityWidget
 from lancher_code.tui.theme import TerminalMarkdown, theme_palette
 from lancher_code.tui.timeline import (
-    ThinkingTraceWidget, ToolActivityWidget, timeline_blocks,
+    NoticeWidget, ThinkingTraceWidget, ToolActivityWidget, timeline_blocks,
 )
 
 class BannerWidget(Static):
@@ -158,14 +158,14 @@ class MessageWidget(Vertical):
         label_widget.styles.text_style = "bold"
 
         timeline = self.query_one(".message-timeline", Vertical)
-        blocks = timeline_blocks(self._message) if self.role == "assistant" else []
+        blocks = timeline_blocks(self._message) if self.role != "user" else []
         wanted = {block.key for block in blocks}
         for key in list(self._blocks):
             if key not in wanted:
                 await self._blocks.pop(key).remove()
         # 增量更新原有控件；不要在每个 delta 重建并丢掉焦点和展开选择。
         previous_kind: str | None = None
-        for block in blocks:
+        for index, block in enumerate(blocks):
             activity = self._compaction_activities.get(block.entries[0].metadata.get("activity_id", "")) if block.kind == "compaction" else None
             widget = self._blocks.get(block.key)
             if activity is not None and widget is not None and not isinstance(widget, CompactionActivityWidget):
@@ -180,12 +180,16 @@ class MessageWidget(Vertical):
                     widget = ThinkingTraceWidget(block.entries, collapsed=block.entries[0].metadata.get("state") != "streaming")
                 elif block.kind == "tool":
                     widget = ToolActivityWidget(block.entries, status=self.status)
+                elif block.kind == "notice":
+                    widget = NoticeWidget(block.entries[0], status=self.status)
                 elif activity is not None:
                     widget = CompactionActivityWidget(activity)
                 else:
                     widget = Static(classes=f"timeline-text timeline-{block.kind}")
                 self._blocks[block.key] = widget
-                await timeline.mount(widget)
+                following = next((self._blocks[following.key] for following in blocks[index + 1:]
+                                  if following.key in self._blocks), None)
+                await timeline.mount(widget, before=following)
             if isinstance(widget, ThinkingTraceWidget):
                 widget.display = self._show_thinking
                 widget.update_entries(block.entries)
@@ -194,6 +198,8 @@ class MessageWidget(Vertical):
             elif isinstance(widget, CompactionActivityWidget):
                 if activity is not None:
                     widget.update_activity(activity)
+            elif isinstance(widget, NoticeWidget):
+                widget.update_notice(block.entries[0], status=self.status)
             else:
                 text = block.entries[0].text
                 if block.kind == "compaction":
@@ -210,13 +216,13 @@ class MessageWidget(Vertical):
                 previous_kind = block.kind
 
         body_widget = self.query_one(".message-body", Static)
-        # 助手正文由时间线呈现；其他消息直接显示正文。
-        body_text = "" if self.role == "assistant" and blocks else self._body_text()
+        # 助手正文与系统提示由时间线呈现；用户消息直接显示正文。
+        body_text = "" if self.role != "user" and blocks else self._body_text()
         body_widget.display = bool(body_text)
         body_widget.set_class(bool(body_text) and previous_kind is not None, "timeline-separator")
         if body_text:
             body_widget.styles.color = self._body_color()
-            body_widget.update(TerminalMarkdown(body_text, self.app.theme) if self.role == "assistant" and self.status != "error" else Text(body_text))
+            body_widget.update(TerminalMarkdown(body_text, self.app.theme) if self.role != "user" else Text(body_text))
 
     def collapse_for_completion(self) -> None:
         """任务成功结束只收起一次，用户随后重新查看时不再干预。"""

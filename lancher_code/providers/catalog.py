@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 
+from lancher_code.context.budget import context_budget
 from lancher_code.errors import ConfigError
 from lancher_code.providers.models import ModelDefinition, ProviderConfig, ProviderDefinition
 
@@ -53,6 +54,15 @@ def resolve_model(providers: Mapping[str, ProviderDefinition], model_ref: str) -
     context_window = model.context_window if model.context_window is not None else (200000 if protocol == "claude" else 128000)
     if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window <= 0:
         raise ConfigError(f"{prefix}.context_window 必须是正整数。")
+    max_output_tokens = model.max_output_tokens
+    if max_output_tokens is not None and (type(max_output_tokens) is not int or max_output_tokens <= 0):
+        raise ConfigError(f"{prefix}.max_output_tokens 必须是正整数。")
+    budget = context_budget(context_window, max_output_tokens)
+    if max_output_tokens is not None and max_output_tokens >= context_window:
+        raise ConfigError(f"{prefix}.max_output_tokens 必须小于上下文窗口 context_window。")
+    thinking = deepcopy(model.thinking) if protocol == "claude" else None
+    if thinking is not None and thinking.enabled and thinking.effective_budget_tokens >= budget.output_tokens:
+        raise ConfigError(f"{prefix}.thinking.budget_tokens 必须小于总输出额度 max_output_tokens（当前 {budget.output_tokens}）。")
     return ProviderConfig(
         protocol=protocol,
         model=_connection_string(model.model_name, f"{prefix}.model_name"),
@@ -60,7 +70,8 @@ def resolve_model(providers: Mapping[str, ProviderDefinition], model_ref: str) -
         api_key=api_key,
         timeout_seconds=float(timeout),
         context_window=context_window,
-        thinking=deepcopy(model.thinking) if protocol == "claude" else None,
+        max_output_tokens=max_output_tokens,
+        thinking=thinking,
     )
 
 

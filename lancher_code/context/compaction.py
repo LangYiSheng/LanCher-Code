@@ -13,7 +13,7 @@ from lancher_code.context.recovery import build_recovery_prompt
 from lancher_code.context.summary import SUMMARY_REQUEST_PROMPT, SUMMARY_SYSTEM_PROMPT, parse_summary
 from lancher_code.context.tokens import estimate_messages_tokens, estimate_request_tokens
 from lancher_code.contracts.control import CancellationToken
-from lancher_code.contracts.messages import ChatRequest, ConversationMessage
+from lancher_code.contracts.messages import ChatRequest, ContentBlock, ConversationMessage, OUTPUT_LIMIT_REASONS, output_limit_reached
 from lancher_code.contracts.tools import ToolDefinition
 from lancher_code.errors import ContextCompactionError, ProviderPromptTooLongError
 from lancher_code.logging_system import get_logger
@@ -41,8 +41,10 @@ async def compact_transcript(
     context_window: int,
     cancellation_token: CancellationToken | None = None,
     max_output_tokens: int | None = None,
+    chat_max_output_tokens: int | None = None,
     request_factory: Callable[[ChatRequest], ChatRequest] | None = None,
 ) -> TranscriptCompaction:
+    pending_control = transcript[-1] if transcript and transcript[-1].control_kind == "output_continuation" else None
     transcript = _without_dynamic_reminders(transcript)
     pending_call_ids: set[str] = set()
     for message in transcript:
@@ -126,10 +128,12 @@ async def compact_transcript(
             ConversationMessage.text_message("user", recovery),
             *copy.deepcopy(recent),
         ]
+        if pending_control is not None:
+            compacted.append(copy.deepcopy(pending_control))
         after_tokens = estimate_messages_tokens(compacted)
         if after_tokens >= before_tokens:
             raise ContextCompactionError("摘要没有缩小上下文，保留原有历史。")
-        if after_tokens > context_budget(context_window).input_limit:
+        if after_tokens > context_budget(context_window, chat_max_output_tokens).input_limit:
             raise ContextCompactionError("摘要与恢复内容仍超过可用输入预算，保留原有历史。")
         return TranscriptCompaction(transcript=compacted, dropped_groups=dropped_groups)
     raise ContextCompactionError("上下文过长，已无可用于摘要的完整消息组。")
@@ -202,10 +206,7 @@ async def _collect_summary(provider: ChatProvider, request: ChatRequest) -> str:
         raise ContextCompactionError("摘要请求意外返回了工具调用。")
     if not completed:
         raise ContextCompactionError("摘要响应未正常结束，保留原有历史。")
-    if stop_reason in {"length", "max_tokens", "max_output_tokens"} or (
-        usage is not None and usage.output_tokens is not None
-        and request.max_output_tokens is not None and usage.output_tokens >= request.max_output_tokens
-    ):
+    if output_limit_reached(stop_reason, usage or MessageUsage(), request.max_output_tokens):
         raise ContextCompactionError("摘要达到输出上限，可能不完整，保留原有历史。")
     return "".join(parts)
 
@@ -226,6 +227,12 @@ def _without_dynamic_reminders(
 ) -> list[ConversationMessage]:
     cleaned: list[ConversationMessage] = []
     for message in copy.deepcopy(transcript):
+        if message.control_kind == "output_continuation":
+            # 控制消息不是新的用户目标，压缩仍须保留真人用户的最近原话。
+            continue
+        if message.role == "assistant" and (message.response_output_limited or message.response_stop_reason in OUTPUT_LIMIT_REASONS):
+            message.blocks.insert(0, ContentBlock.text_block(
+                "本次助手响应因输出额度耗尽中断，任务尚未完成；以下是已经生成的部分内容。"))
         if (
             message.role == "user"
             and len(message.blocks) > 1

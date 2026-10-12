@@ -65,10 +65,13 @@ default_model: deepseek/chat
 | `api_key` | str / null | 继承供应商 | 单独覆盖 API 密钥，支持环境变量 |
 | `timeout_seconds` | float / null | 继承供应商 | 单独覆盖请求超时 |
 | `context_window` | int / null | 按有效协议取 `128000` / `200000` | 上下文窗口，必须为正整数 |
-| `thinking.enabled` | bool | `false` | 启用 Anthropic thinking，仅 `claude` 协议生效 |
-| `thinking.budget_tokens` | int | 请求阶段默认 `2048` | thinking 预算，必须为正整数 |
+| `max_output_tokens` | int / null | 普通请求 `32768`；小窗口按比例适配 | 单次总输出额度，包含思考、正文和工具参数，必须为正整数且小于上下文窗口 |
+| `thinking.enabled` | bool | 块内默认 `false` | Anthropic 手动思考预算，仅对支持该参数的 `claude` 协议模型生效；整块省略时使用服务端默认，与界面的思考显示无关 |
+| `thinking.budget_tokens` | int | 请求阶段默认 `2048` | thinking 预算，必须为正整数；启用时必须小于总输出额度 |
 
 继承按字段独立解析：修改模型的 Base URL 不会取消其密钥或协议继承。省略字段或写 `null` 表示继承，连接字段的空字符串不是继承标记。上下文窗口和 thinking 是模型设置，不属于供应商公共字段。
+
+`max_output_tokens` 是独立的模型设置，调大 `context_window` 不会越过缺省的单次输出额度。显式配置按原值发送，不会为适配窗口偷偷缩小；额度还需符合供应商支持的上限。Claude thinking 预算包含在总输出内，不额外叠加。压缩摘要的缺省输出额度为 `16384`，小窗口同样适配；模型显式上限较小时摘要使用较小值。上下文容量检查预留实际请求的总输出额度，接近输入阈值时在下次模型请求前自动压缩；若连输入和安全余量都无法容纳，则在发送请求前明确报错。
 
 ### 开发版格式边界
 
@@ -79,7 +82,7 @@ default_model: deepseek/chat
 | 配置项 | 类型 | 默认值 | 必填 | 作用 |
 |---|---|---|---|---|
 | `ui.show_timestamps` | bool | `false` | 否 | 是否显示消息时间戳（当前界面实现中尚未使用该开关的渲染逻辑） |
-| `ui.show_thinking_status` | bool | `true` | 否 | 是否显示思考轨迹折叠区 |
+| `ui.show_thinking_status` | bool | `true` | 否 | 是否显示思考轨迹折叠区，仅改变显示，不改变模型请求或推理能力 |
 | `ui.theme` | str | `dark` | 否 | `dark` / `light`，统一应用于聊天与设置 |
 | `ui.busy_enter_action` | str | `follow_up` | 否 | `follow_up` 排到下一轮、`steer` 补充当前任务、`draft` 保留草稿 |
 
@@ -88,6 +91,7 @@ default_model: deepseek/chat
 | 配置项 | 类型 | 默认值 | 必填 | 作用 |
 |---|---|---|---|---|
 | `runtime.tool_loop_limit` | int | `50` | 否 | 单轮对话最大工具循环次数 |
+| `runtime.output_continuation_limit` | int | `3` | 否 | 同一段输出达到额度后的自动续接次数，必须为正整数；连续耗尽超过此值会明确提示，保留已有内容 |
 | `runtime.unknown_tool_streak_limit` | int | `3` | 否 | 连续请求未知工具达到该次数即停止本轮 |
 | `runtime.work_phase` | str | `execute` | 否 | 初始工作阶段：`discuss` / `plan` / `execute` |
 | `runtime.execution_access` | str | `project` | 否 | 执行访问范围：`project` / `full`；讨论和计划强制只读 |
@@ -221,7 +225,7 @@ mcp_servers:
 
 运行时可以通过 `/settings` 打开 Textual 设置面板（`tui/settings/screen.py` + `config/settings.py`），五个标签页：
 
-- **模型设置**：增删改供应商及其多个模型，选择新会话默认模型；模型连接字段可独立继承或覆盖。API Key 留空保留原值，勾选“继承供应商”才会清除模型自己的密钥覆盖。模型高级选项包含上下文窗口和 thinking。
+- **模型设置**：增删改供应商及其多个模型，选择新会话默认模型；模型连接字段可独立继承或覆盖。API Key 留空保留原值，勾选“继承供应商”才会清除模型自己的密钥覆盖。模型高级选项包含上下文窗口、单次总输出额度和 thinking。
 - **MCP 服务器**：全局 / 项目两层，增删改 Server
 - **项目权限 / 全局权限**：增删改、上下移规则
 - **外观与输入**：主题与忙时输入偏好

@@ -252,6 +252,8 @@ async def test_automatic_compaction_circuit_breaker_persists_after_three_failure
     tmp_path: Path,
 ) -> None:
     openai_provider_config.context_window = 34_000
+    # 本测试固定输入软阈值，验证失败后仍有可发送空间的降级行为。
+    openai_provider_config.max_output_tokens = 4096
     responses: list[list[StreamEvent | DelayedEvent] | Exception] = []
     for _ in range(3):
         responses.extend(

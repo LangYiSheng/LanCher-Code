@@ -52,7 +52,7 @@
 ### Anthropic（内部协议值 `claude`，`claude.py`）
 
 - URL：`{base_url}/messages`，Header：`x-api-key: <api_key>`、`anthropic-version: 2023-06-01`
-- Payload：`model`、`system`（字符串拼接）、`max_tokens`（本次请求的实际输出预算）、`stream: true`、`thinking`（enabled/disabled + budget_tokens）、可选 `tools`（`input_schema`）
+- Payload：`model`、`system`（字符串拼接）、`max_tokens`（本次请求的实际总输出预算）、`stream: true`、可选 `thinking`（显式手动配置时发送 enabled/disabled + budget_tokens；省略则使用服务端默认）、可选 `tools`（`input_schema`）
 - 事件类型：`message_start` / `content_block_start`（tool_use 整体给出 input 时直接产出完整参数）/ `content_block_delta`（text_delta / thinking_delta / input_json_delta）/ `message_delta`（usage）/ `message_stop` / `error`
 - 用量合并：`input_tokens + cache_read_input_tokens + cache_creation_input_tokens` 记为总输入，缓存读取/创建同时作为子项保存。缺少输入分量则保留部分上报标记；开始帧的输出不当作最终确认。
 

@@ -63,5 +63,6 @@ def app_config_for(provider: ProviderConfig, **overrides):
         name="测试", protocol=provider.protocol, base_url=provider.base_url,
         api_key=provider.api_key, timeout_seconds=provider.timeout_seconds,
         models={"default": ModelDefinition(model_name=provider.model,
-            context_window=provider.context_window, thinking=provider.thinking)},
+            context_window=provider.context_window, thinking=provider.thinking,
+            max_output_tokens=provider.max_output_tokens)},
     )}, default_model="test/default", **overrides)

@@ -36,12 +36,25 @@ class RequestUsageRecord:
     purpose: str = "chat"
     status: RequestUsageStatus = "running"
     usage: MessageUsage = field(default_factory=lambda: MessageUsage(is_final=False))
+    stop_reason: str | None = None
+    max_output_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.stop_reason is not None and (
+            not isinstance(self.stop_reason, str) or not self.stop_reason.strip()
+        ):
+            raise ValueError("请求用量记录的 stop_reason 无效。")
+        if self.max_output_tokens is not None and (
+            type(self.max_output_tokens) is not int or self.max_output_tokens <= 0
+        ):
+            raise ValueError("请求用量记录的 max_output_tokens 必须是正整数。")
 
     def to_dict(self) -> dict[str, object]:
         return {"request_id": self.request_id, "run_id": self.run_id, "protocol": self.protocol,
                 "model": self.model, "session_id": self.session_id, "turn_id": self.turn_id,
                 "message_id": self.message_id, "purpose": self.purpose, "status": self.status,
-                "usage": self.usage.to_dict()}
+                "usage": self.usage.to_dict(), "stop_reason": self.stop_reason,
+                "max_output_tokens": self.max_output_tokens}
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> RequestUsageRecord:
@@ -60,7 +73,9 @@ class RequestUsageRecord:
         return cls(request_id=data["request_id"], run_id=data["run_id"], protocol=data["protocol"],
                    model=data["model"], purpose=data["purpose"], status=status,
                    session_id=data.get("session_id"), turn_id=data.get("turn_id"),
-                   message_id=data.get("message_id"), usage=MessageUsage.from_dict(usage))  # type: ignore[arg-type]
+                   message_id=data.get("message_id"), usage=MessageUsage.from_dict(usage),
+                   stop_reason=data.get("stop_reason"),
+                   max_output_tokens=data.get("max_output_tokens"))  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)

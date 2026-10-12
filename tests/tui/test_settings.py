@@ -199,6 +199,62 @@ async def test_runtime_validation_failure_preserves_file_and_checkbox_draft(tmp_
 
 
 @pytest.mark.asyncio
+async def test_output_continuation_limit_saves_and_applies_live_but_invalid_draft_does_not(tmp_path) -> None:
+    from lancher_code.agent.runner import TurnRunner
+    from lancher_code.providers.catalog import resolve_model
+    from lancher_code.sessions.controller import SessionController
+    from lancher_code.tools.core.executor import ToolExecutor
+    from lancher_code.tools.core.registry import ToolRegistry
+
+    class IdleProvider:
+        async def stream_chat(self, request):
+            raise AssertionError("保存系统设置不应触发模型请求。")
+            yield
+
+    service = _service(tmp_path)
+    config = service.load().config
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    session = SessionController(resolve_model(config.providers, config.default_model), cwd=project,
+                                permission_storage=service.permission_storage)
+    registry = ToolRegistry()
+    provider = IdleProvider()
+    runner = TurnRunner(provider, session, registry, ToolExecutor(registry, cwd=project))
+    runner.configure_models(config, provider_factory=lambda _resolved: provider)
+    app = _settings_app(service, on_runtime_validate=runner.validate_runtime_settings,
+                        on_runtime_saved=runner.apply_runtime_settings)
+    try:
+        async with app.run_test(size=(100, 40)) as pilot:
+            screen = app.screen
+            await pilot.click("#tab-runtime")
+            value = screen.query_one("#runtime-output-continuations", Input)
+            assert value.value == "3"
+            value.value = "7"
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            assert load_config(service.config_path).runtime.output_continuation_limit == 7
+            assert runner._runtime_config.output_continuation_limit == 7
+            assert runner.model_config.runtime.output_continuation_limit == 7
+            assert not screen._system_pending
+            assert "已应用" in str(screen.query_one("#settings-notice", Static).render())
+            saved = service.config_path.read_bytes()
+
+            for invalid in ("0", "-1", "invalid", ""):
+                value.value = invalid
+                screen.action_save_settings()
+                await pilot.pause()
+                assert "正整数" in str(screen.query_one("#settings-error", Static).render())
+                assert value.value == invalid
+                assert service.config_path.read_bytes() == saved
+                assert runner._runtime_config.output_continuation_limit == 7
+                assert runner.model_config.runtime.output_continuation_limit == 7
+                assert screen.query_one(SystemSettingsEditor).dirty
+    finally:
+        await runner.shutdown()
+        session.close()
+
+
+@pytest.mark.asyncio
 async def test_runtime_apply_failure_reports_saved_pending_and_returns_latest_config(tmp_path) -> None:
     service = _service(tmp_path)
 
@@ -295,6 +351,7 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
         screen.query_one("#model-base-url", Input).value = "${CUSTOM_URL}"
         screen.query_one("#model-timeout", Input).value = "91"
         screen.query_one("#model-context-window", Input).value = "12345"
+        screen.query_one("#model-max-output-tokens", Input).value = "8192"
         screen.query_one("#model-thinking", Checkbox).value = True
         screen.query_one("#model-thinking-budget", Input).value = "2048"
         screen.action_save_settings()
@@ -303,7 +360,9 @@ async def test_model_overrides_key_retention_and_restore_inheritance(tmp_path) -
         model = service.load().config.providers["test"].models["default"]
         assert (model.protocol, model.base_url, model.api_key, model.timeout_seconds) == ("claude", "${CUSTOM_URL}", "${CUSTOM_KEY}", 91)
         assert model.context_window == 12345 and model.thinking.budget_tokens == 2048
+        assert model.max_output_tokens == 8192
         editor.open_model("test", "default")
+        assert screen.query_one("#model-max-output-tokens", Input).value == "8192"
         assert screen.query_one("#model-api-key", Input).value == ""
         screen.action_save_settings()
         await pilot.pause()

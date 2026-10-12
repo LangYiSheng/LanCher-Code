@@ -186,6 +186,30 @@ def test_serialized_records_retain_scope_and_do_not_import_another_run() -> None
         tracker.start_request(protocol="openai", model="first", request_id=identity, session_id="another")
 
 
+def test_request_record_loads_old_data_and_round_trips_output_details() -> None:
+    record = RequestUsageRecord(request_id="request", run_id="run", protocol="openai", model="first",
+                                status="incomplete", stop_reason="length", max_output_tokens=32768)
+    assert RequestUsageRecord.from_dict(record.to_dict()) == record
+    legacy = record.to_dict()
+    legacy.pop("stop_reason")
+    legacy.pop("max_output_tokens")
+    restored = RequestUsageRecord.from_dict(legacy)
+    assert restored.stop_reason is None
+    assert restored.max_output_tokens is None
+
+
+@pytest.mark.parametrize("field,value", [
+    ("stop_reason", ""), ("stop_reason", " "), ("stop_reason", 3), ("stop_reason", True),
+    ("max_output_tokens", 0), ("max_output_tokens", -1), ("max_output_tokens", True),
+    ("max_output_tokens", 2.5), ("max_output_tokens", "32768"),
+])
+def test_request_record_rejects_invalid_output_details(field, value) -> None:
+    data = RequestUsageRecord(request_id="request", run_id="run", protocol="openai", model="first").to_dict()
+    data[field] = value
+    with pytest.raises(ValueError, match=field):
+        RequestUsageRecord.from_dict(data)
+
+
 def test_explicit_existing_identity_is_idempotent_without_resetting_usage() -> None:
     tracker = RunUsageTracker()
     identity = tracker.start_request(protocol="openai", model="first", request_id="same")

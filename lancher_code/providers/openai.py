@@ -10,7 +10,7 @@ import httpx
 
 from lancher_code.errors import ProviderPromptTooLongError, ProviderRequestError, ProviderResponseError
 from lancher_code.logging_system import get_logger
-from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent
+from lancher_code.contracts.messages import ChatRequest, ContentBlock, StreamEvent, generation_incomplete, output_limit_reached
 from lancher_code.usage.models import MessageUsage, merge_usage
 from lancher_code.contracts.tools import ToolCallChunk
 from lancher_code.providers.base import BaseChatProvider
@@ -56,13 +56,22 @@ class OpenAIProvider(BaseChatProvider):
 
                     async for _event_name, data in self.iter_sse_events(response):
                         if data == "[DONE]":
-                            usage_status = "completed"
+                            usage_status = ("incomplete" if generation_incomplete(
+                                stop_reason, usage, request.max_output_tokens) else "completed")
                             usage.is_final = True
                             self._report_usage(usage_request_id, usage, usage.known_fields)
+                            try:
+                                completed_blocks = self._complete_assistant_blocks(
+                                    assistant_blocks, tool_blocks, tool_arguments)
+                            except ProviderResponseError:
+                                if not output_limit_reached(stop_reason, usage, request.max_output_tokens):
+                                    raise
+                                # 额度截断可能连调用标识都未输出完；交付明确终帧，
+                                # 由上层保留文字并续接，不能提供任何可执行工具快照。
+                                completed_blocks = None
                             yield StreamEvent(kind="message_end", usage=usage, stop_reason=stop_reason,
-                                              assistant_blocks=self._complete_assistant_blocks(assistant_blocks, tool_blocks,
-                                                                                               tool_arguments),
-                                              response_complete=True)
+                                              assistant_blocks=completed_blocks,
+                                              response_complete=completed_blocks is not None, terminal_received=True)
                             return
 
                         chunk = self.parse_json_payload(data)
@@ -178,7 +187,7 @@ class OpenAIProvider(BaseChatProvider):
                 raise self.map_request_error(exc) from exc
             raise
         finally:
-            self._finish_usage_request(usage_request_id, usage_status)
+            self._finish_usage_request(usage_request_id, usage_status, stop_reason=stop_reason)
 
     @staticmethod
     def _complete_assistant_blocks(

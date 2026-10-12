@@ -27,8 +27,11 @@ class RuntimeConfig:
     work_phase: WorkPhase = "execute"
     execution_access: ExecutionAccess = "project"
     experimental_mcp_tool_append: bool = False
+    output_continuation_limit: int = 3
 
     def __post_init__(self) -> None:
+        if type(self.output_continuation_limit) is not int or self.output_continuation_limit < 1:
+            raise ValueError("runtime.output_continuation_limit 必须是正整数。")
         if type(self.experimental_mcp_tool_append) is not bool:
             raise ValueError("runtime.experimental_mcp_tool_append 必须是布尔值。")
         self.work_phase, self.execution_access = validate_runtime_axes(self.work_phase, self.execution_access)

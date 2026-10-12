@@ -167,6 +167,7 @@ async def test_config_bootstrap_app_can_save_claude_thinking_settings(tmp_path) 
         app.query_one("#api-key-input", Input).value = "test-key"
         app.query_one("#thinking-enabled", Checkbox).value = True
         app.query_one("#thinking-budget-input", Input).value = "2048"
+        app.query_one("#max-output-tokens-input", Input).value = "65536"
         app._save()
         await pilot.pause(0.05)
 
@@ -177,6 +178,7 @@ async def test_config_bootstrap_app_can_save_claude_thinking_settings(tmp_path) 
     assert active.thinking is not None
     assert active.thinking.enabled is True
     assert active.thinking.budget_tokens == 2048
+    assert active.max_output_tokens == 65536
 
 
 @pytest.mark.asyncio

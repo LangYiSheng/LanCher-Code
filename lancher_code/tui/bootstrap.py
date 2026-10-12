@@ -114,9 +114,13 @@ class ConfigBootstrapApp(App[int]):
                     yield Input(placeholder="例如 日常编程；留空使用 API 模型名称", id="model-display-input", classes="field-input")
                     with Collapsible(title="高级模型选项", collapsed=True, id="model-advanced-panel"):
                         yield Static("以后可在设置中添加模型，或为单个模型覆盖连接参数。", classes="setup-hint")
+                        yield Static("单次总输出额度（token，可选）", classes="field-label")
+                        yield Input(placeholder="默认 32768；包含思考、正文和工具参数", id="max-output-tokens-input", classes="field-input")
+                        yield Static("OpenAI 兼容协议使用模型和服务端的推理默认行为；思考轨迹显示可在外观设置中调整。", classes="setup-hint")
                         with Vertical(id="claude-thinking"):
-                            yield Checkbox("启用 Anthropic thinking", id="thinking-enabled")
-                            yield Static("思考预算（可选）", classes="field-label")
+                            yield Checkbox("启用 Anthropic 手动思考预算", id="thinking-enabled")
+                            yield Static("仅适用于支持手动 thinking 的模型，不控制思考轨迹显示。", classes="setup-hint")
+                            yield Static("手动思考预算（可选）", classes="field-label")
                             yield Input(placeholder="例如 2048", id="thinking-budget-input", classes="field-input")
                 with Vertical(id="setup-confirm", classes="setup-page"):
                     yield Static("", id="bootstrap-summary", markup=False)
@@ -235,6 +239,11 @@ class ConfigBootstrapApp(App[int]):
             "timeout_seconds": timeout_seconds,
             "models": {model_id: model},
         }
+
+        if not connection_only:
+            output_raw = self.query_one("#max-output-tokens-input", Input).value.strip()
+            if output_raw:
+                model["max_output_tokens"] = self._parse_positive_int(output_raw, "max_output_tokens")
 
         if protocol == "claude" and not connection_only:
             thinking_enabled = self.query_one("#thinking-enabled", Checkbox).value

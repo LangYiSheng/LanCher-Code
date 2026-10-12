@@ -24,10 +24,13 @@ def context_budget(
     """按模型窗口分配预算，显式输出额度必须与实际请求保持一致。
 
     这里的安全余量覆盖粗估误差；软阈值提前启动整理，硬输入额度用于
-    发出请求前检查。小窗口不会继承大模型的固定 20K 摘要预留。
+    发出请求前检查。小窗口不会继承大模型的固定摘要预留。
     """
     window = max(1, context_window)
-    default_output = min(4096, max(128, window // (6 if purpose == "compaction" else 8)))
+    # 普通生成包含思考、正文和工具参数；摘要也为模型内置推理留空间。
+    # 小窗口按比例预留；摘要仍需容纳待压缩材料，优先留下输入空间。
+    default_output = min(16384 if purpose == "compaction" else 32768,
+                         max(128, window // (6 if purpose == "compaction" else 3)))
     # 显式额度是实际请求上限，不能为了预算好看而偷偷缩小，否则检查的
     # 输入空间会与服务端实发请求不一致。无法容纳时输入预算归零，调用方
     # 在发出请求前给出明确错误。

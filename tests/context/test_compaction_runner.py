@@ -6,7 +6,7 @@ import pytest
 from provider_helpers import complete_test_response
 
 from lancher_code.agent.runner import TurnRunner
-from lancher_code.contracts.messages import StreamEvent
+from lancher_code.contracts.messages import ContentBlock, StreamEvent
 from lancher_code.errors import ContextCompactionError, ProviderPromptTooLongError
 from lancher_code.sessions.controller import SessionController
 from lancher_code.sessions.storage import SessionRepositoryError
@@ -123,6 +123,8 @@ async def test_two_bad_format_attempts_count_as_one_automatic_failure_and_contin
     openai_provider_config, tmp_path,
 ):
     openai_provider_config.context_window = 34_000
+    # 固定输出预留，使此场景保持在自动压缩软阈值与硬输入上限之间。
+    openai_provider_config.max_output_tokens = 4096
     runner, session, provider = _runner(openai_provider_config, tmp_path, [
         _invalid_summary(), _invalid_summary(),
         [StreamEvent(kind="text_delta", text="继续完成本轮"), StreamEvent(kind="message_end",
@@ -345,3 +347,42 @@ async def test_emergency_recovery_still_retries_main_request_only_once(
     assert events[-1].kind == "turn_failed"
     assert events[-1].error_text == "第二次超限"
     session.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_real_user_request_and_does_not_split_output_continuations(
+    openai_provider_config, tmp_path,
+):
+    runner, session, provider = _runner(openai_provider_config, tmp_path, [_summary()])
+    actual_request = "请保留这条原话：只改当前模块，不能修改数据库。" + "x" * 25_000
+    later_partial = "这是第二次续接的未完成正文，不应单独成为近期用户轮。"
+    session.create_user_message(actual_request)
+    session.append_assistant_response(
+        [ContentBlock.text_block("第一段未完成正文" + "x" * 50_000)], stop_reason="length")
+    session.append_output_continuation()
+    session.append_assistant_response([ContentBlock.text_block(later_partial)], stop_reason="length")
+    session.append_output_continuation()
+
+    try:
+        result = await runner.compact_context()
+        assert result.after_tokens < result.before_tokens
+        assert len(provider.requests) == 1
+        summary_history = provider.requests[0].messages[:-1]
+        assert all(message.control_kind is None for message in summary_history)
+        assert any(message.role == "user" and message.blocks[0].text == actual_request
+                   for message in summary_history)
+        interrupted_responses = [message for message in summary_history
+                                 if message.response_stop_reason == "length"]
+        assert len(interrupted_responses) == 2
+        assert all("任务尚未完成" in message.blocks[0].text for message in interrupted_responses)
+        # 当前用户与两段输出仍是同一大轮，不能让内部续接提示把最后一段
+        # 切成可独立保留的小轮；压缩后单独补回真人用户的明确约束。
+        actual_users = [message for message in session.transcript
+                        if message.role == "user" and message.control_kind is None]
+        assert actual_users[-1].blocks[0].text == actual_request
+        controls = [message for message in session.transcript if message.control_kind is not None]
+        assert len(controls) == 1
+        assert session.transcript[-1].control_kind == "output_continuation"
+        assert not any(block.text == later_partial for message in session.transcript for block in message.blocks)
+    finally:
+        session.close()

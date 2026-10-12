@@ -25,6 +25,7 @@ from lancher_code.errors import (
     ContextCompactionError,
     LanCherError,
     ProviderPromptTooLongError,
+    ProviderResponseError,
 )
 from lancher_code.logging_system import get_logger
 from lancher_code.config.models import AgentConfig, AppConfig, RuntimeConfig
@@ -127,6 +128,8 @@ class TurnRunner:
             raise ConfigError('原生 MCP 工具追加实验项必须为布尔值。')
         if runtime.tool_loop_limit < 1 or runtime.unknown_tool_streak_limit < 1:
             raise ConfigError('工具循环和未知工具次数上限必须为正整数。')
+        if type(runtime.output_continuation_limit) is not int or runtime.output_continuation_limit < 1:
+            raise ConfigError('输出自动续接次数必须为正整数。')
 
     def _apply_runtime_config(self, runtime: RuntimeConfig) -> None:
         self._runtime_config = deepcopy(runtime)
@@ -568,6 +571,7 @@ class TurnRunner:
         total_usage = MessageUsage()
         loop_count = 0
         unknown_tool_streak = 0
+        output_continuations = 0
         discovered_tool_names = set(self._session.context_state.prefix_state.get('observed_tools', {}))
         pending_tool_calls: list[ToolCall] = []
         phase = self._session.work_phase
@@ -604,7 +608,7 @@ class TurnRunner:
                 loop_count += 1
                 self._raise_if_cancelled(cancellation_token)
                 if loop_count > self._max_tool_loops:
-                    error_text = f"本轮工具循环达到上限（{self._max_tool_loops} 次），已停止继续执行。"
+                    error_text = f"本轮模型与工具循环达到上限（{self._max_tool_loops} 次），已有内容已保留，任务尚未完成。"
                     message = self._session.fail_message(assistant_message.id, error_text)
                     await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
                     return
@@ -714,8 +718,6 @@ class TurnRunner:
                             )
                         except Exception:
                             raise prompt_error
-                        if result.after_tokens > context_budget(self._session.context_window).input_limit:
-                            raise
                         logger.info(
                             "event=emergency_context_compaction_succeeded context_id=%s before_tokens=%s after_tokens=%s dropped_groups=%s",
                             self._session.context_state.context_id,
@@ -731,12 +733,17 @@ class TurnRunner:
                             deferred_tool_groups=deferred_tool_groups,
                         )
                         request.cancellation_token = cancellation_token
+                        if self._session.estimate_request_tokens(request) > context_budget(
+                            self._session.context_window, request.max_output_tokens
+                        ).input_limit:
+                            raise ContextCompactionError("紧急压缩后仍超过本次请求的可用输入预算。")
 
                 tool_calls, precomputed_results = response.tool_calls, response.precomputed_results
                 # 每次请求只提交一次完整助手响应；工具反馈分支同样需要原思考数据。
                 response_blocks = response.assistant_blocks
                 if response_blocks:
-                    self._session.append_assistant_response(response_blocks)
+                    self._session.append_assistant_response(response_blocks, stop_reason=response.stop_reason,
+                                                           output_limited=response.output_limited)
 
                 total_usage = self._current_message_usage(assistant_message.id)
                 await self._emit(
@@ -747,6 +754,15 @@ class TurnRunner:
                         usage=self._current_message_usage(assistant_message.id),
                     ),
                 )
+
+                if response.output_limited:
+                    output_continuations += 1
+                    if output_continuations <= self._runtime_config.output_continuation_limit:
+                        notice = f"本次输出达到额度（{request.max_output_tokens:,} tokens），正在自动续接；已有内容已保留。"
+                        message = self._session.append_trace_notice(assistant_message.id, notice,
+                            severity="warning", code="output_limit")
+                        await self._emit(queue, TurnEvent(kind="progress_updated", message=message,
+                            progress_message="输出达到额度，正在自动续接"))
 
                 if tool_calls:
                     if response.text:
@@ -805,6 +821,7 @@ class TurnRunner:
                         assistant_message = self._session.get_message(next_message_id)
                         total_usage = MessageUsage()
                         unknown_tool_streak = 0
+                        output_continuations = 0
                         written_plan_digest = None
                         continue
 
@@ -817,6 +834,10 @@ class TurnRunner:
                         message = self._session.fail_message(assistant_message.id, error_text)
                         await self._emit(queue, TurnEvent(kind="turn_failed", message=message, error_text=error_text))
                         return
+                    if response.output_limited:
+                        self._check_output_continuation_limit(output_continuations)
+                    else:
+                        output_continuations = 0
                     continue
 
                 unknown_tool_streak = 0
@@ -824,7 +845,13 @@ class TurnRunner:
                 if next_message_id is not None:
                     assistant_message = self._session.get_message(next_message_id)
                     total_usage = MessageUsage()
+                    output_continuations = 0
                     written_plan_digest = None
+                    continue
+                if response.output_limited:
+                    self._check_output_continuation_limit(output_continuations)
+                    self._session.append_output_continuation()
+                    # 下一次请求再次经过输入预算、自动压缩和取消检查。
                     continue
                 # 最终检查与关闭接收在同一事件循环片段完成；晚到的补充保留为暂停消息。
                 active_turn.accepting_input = False
@@ -867,6 +894,14 @@ class TurnRunner:
             except Exception as exc:
                 logger.exception('event=session_persistence_failed')
                 await self._emit(queue, TurnEvent(kind='turn_failed', error_text=f'会话保存失败：{exc}'))
+
+    def _check_output_continuation_limit(self, attempts: int) -> None:
+        limit = self._runtime_config.output_continuation_limit
+        if attempts > limit:
+            raise ProviderResponseError(
+                f"已自动续接 {limit} 次，但模型仍达到输出额度；已有内容已保留，任务尚未完成。"
+                "可提高模型的输出额度，或将任务拆分后继续。"
+            )
 
     def _pause_queue_best_effort(self) -> None:
         try:

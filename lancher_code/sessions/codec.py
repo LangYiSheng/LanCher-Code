@@ -441,6 +441,17 @@ class SessionCodec:
         if value['role'] not in {'system', 'user', 'assistant', 'tool'}:
             raise ValueError('模型上下文角色无效。')
         response_protocol, response_model = value.get('response_protocol'), value.get('response_model')
+        response_stop_reason = value.get('response_stop_reason')
+        response_output_limited = value.get('response_output_limited', False)
+        if type(response_output_limited) is not bool or response_output_limited and value['role'] != 'assistant':
+            raise ValueError('输出截断标记只能属于助手消息。')
+        control_kind = value.get('control_kind')
+        if control_kind is not None and (value['role'] != 'user' or control_kind != 'output_continuation'):
+            raise ValueError('模型上下文控制消息无效。')
+        if response_stop_reason is not None and (
+            value['role'] != 'assistant' or not isinstance(response_stop_reason, str) or not response_stop_reason
+        ):
+            raise ValueError('响应停止原因只能是助手消息的非空文本。')
         if response_protocol is not None and (
             not isinstance(response_protocol, str) or response_protocol not in {'claude', 'openai'}
         ):
@@ -506,4 +517,6 @@ class SessionCodec:
                 raise ValueError('普通内容块不能携带思考协议字段。')
             blocks.append(block)
         return ConversationMessage(role=value['role'], blocks=blocks,
-                                   response_protocol=response_protocol, response_model=response_model)
+                                   response_protocol=response_protocol, response_model=response_model,
+                                   response_stop_reason=response_stop_reason,
+                                   response_output_limited=response_output_limited, control_kind=control_kind)

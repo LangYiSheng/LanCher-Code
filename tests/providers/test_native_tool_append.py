@@ -227,6 +227,24 @@ async def test_responses_unfinished_stream_never_exposes_executable_blocks(opena
     assert not events[-1].response_complete and events[-1].assistant_blocks is None
     assert tracker.records[0].status == "incomplete"
     assert tracker.records[0].usage.cached_input_tokens is None
+    assert events[-1].terminal_received == bool(ending)
+    assert tracker.records[0].stop_reason == ("max_output_tokens" if ending else None)
+
+
+@pytest.mark.asyncio
+async def test_responses_refusal_preserves_reason_and_records_incomplete_generation(openai_provider_config):
+    output = [{"type": "message", "role": "assistant", "content": [
+        {"type": "refusal", "refusal": "无法处理此请求"}]}]
+    body = _sse([_done(output, {"input_tokens": 20, "output_tokens": 5})])
+    tracker = RunUsageTracker()
+    provider = OpenAIProvider(openai_provider_config, usage_observer=tracker,
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, content=body))))
+    events = [event async for event in provider.stream_chat(_request())]
+    assert events[-1].response_complete and events[-1].terminal_received
+    assert events[-1].stop_reason == tracker.records[0].stop_reason == "refusal"
+    assert tracker.records[0].status == "incomplete"
+    assert any(event.text == "无法处理此请求" for event in events)
 
 
 @pytest.mark.asyncio
