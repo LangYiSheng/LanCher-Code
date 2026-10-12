@@ -255,7 +255,13 @@ class ClaudeProvider(BaseChatProvider):
                        effort=self.config.reasoning_effort if request.reasoning_effort is None else request.reasoning_effort,
                        max_tokens=max_tokens))
         if request.system:
-            payload["system"] = "\n\n".join(request.system)
+            cache_index = self._shared_system_cache_index(request) if request.prompt_cache_enabled else None
+            if cache_index is None:
+                payload["system"] = "\n\n".join(request.system)
+            else:
+                blocks = [{"type": "text", "text": text} for text in request.system]
+                blocks[cache_index]["cache_control"] = {"type": "ephemeral"}
+                payload["system"] = blocks
         if request.tools:
             payload["tools"] = [self._serialize_tool(tool) for tool in request.tools]
         if not request.allow_tool_calls and (request.tools or request.tool_updates):

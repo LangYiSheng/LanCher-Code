@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from html import escape
+import json
 
 from lancher_code.agent.skills import SkillError, SkillSnapshot, SkillsService
 from lancher_code.context.models import ContextManagementState
@@ -113,12 +114,21 @@ class SkillRuntime:
 
     def context_blocks(self, state: ContextManagementState) -> list[str]:
         blocks = []
-        catalog = self.service.catalog_prompt(
-            max_chars=max(512, min(8000, self.session.context_window // 10)),
-            disabled=set(state.disabled_skills),
-        )
-        if catalog:
-            blocks.append(catalog)
+        budget = max(512, min(8000, self.session.context_window // 10))
+        # 全局额度不依赖项目库存；未使用的额度留给项目，保持总预算不变。
+        global_catalog = self.service.catalog_prompt(scope='user', max_chars=budget // 2)
+        project_catalog = self.service.catalog_prompt(scope='project', max_chars=budget - len(global_catalog))
+        blocks.extend(catalog for catalog in (global_catalog, project_catalog) if catalog)
+        overrides = {info.id: f'project/{info.name}' for info in self.service.list_skills()
+                     if info.shadowed and f'- {info.id} [user]:' in global_catalog}
+        explicit_only = sorted(info.id for info in self.service.list_skills()
+                               if not info.auto_load and info.id in overrides.values())
+        status = {'disabled': sorted(state.disabled_skills), 'overrides': overrides, 'explicit_only': explicit_only}
+        blocks.append('<skills_state>\n'
+                      '这是当前技能状态的完整快照；未禁用的候选可以按需加载，同名默认选择项目技能。\n'
+                      '覆盖目标列入 explicit_only 时，必须由用户显式指定，不能自动触发或改用全局来源绕过。\n'
+                      '覆盖不删除全局来源，用户仍可显式指定完整 ID；禁用技能不能加载或读取。\n'
+                      + json.dumps(status, ensure_ascii=False, sort_keys=True) + '\n</skills_state>')
         for skill_id, item in state.skill_activations.items():
             if skill_id in state.disabled_skills:
                 continue

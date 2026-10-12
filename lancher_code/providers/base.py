@@ -48,6 +48,13 @@ class BaseChatProvider:
         return bound_metadata(self.config.metadata, protocol=self.config.protocol, model=request.model,
                               base_url=self.config.base_url, api_key=self.config.api_key)
 
+    @staticmethod
+    def _shared_system_cache_index(request: ChatRequest) -> int | None:
+        count = request.shared_system_count
+        if type(count) is not int or not 0 <= count <= len(request.system):
+            raise ProviderRequestError('共享系统前缀缓存边界无效。')
+        return count - 1 if count else None
+
     def _prepare_usage_attempt(self, request: ChatRequest) -> ChatRequest:
         """每次执行使用独立副本；只消费上层为本次尝试准备的一次性 ID。"""
         prepared = request.take_prepared_usage_attempt()

@@ -144,7 +144,7 @@ def group_complete_turns(transcript: list[ConversationMessage]) -> list[list[Con
     leading: list[ConversationMessage] = []
     pending_call_ids: set[str] = set()
     for message in transcript:
-        if message.role == "user" and message.control_kind != 'process_notification' and not pending_call_ids:
+        if message.role == "user" and message.control_kind not in {'process_notification', 'host_update'} and not pending_call_ids:
             if not groups:
                 groups.append([*leading, message])
                 leading = []
@@ -227,18 +227,11 @@ def _without_dynamic_reminders(
 ) -> list[ConversationMessage]:
     cleaned: list[ConversationMessage] = []
     for message in copy.deepcopy(transcript):
-        if message.control_kind == "output_continuation":
+        if message.control_kind in {'output_continuation', 'host_update'}:
             # 控制消息不是新的用户目标，压缩仍须保留真人用户的最近原话。
             continue
         if message.role == "assistant" and (message.response_output_limited or message.response_stop_reason in OUTPUT_LIMIT_REASONS):
             message.blocks.insert(0, ContentBlock.text_block(
                 "本次助手响应因输出额度耗尽中断，任务尚未完成；以下是已经生成的部分内容。"))
-        if (
-            message.role == "user"
-            and len(message.blocks) > 1
-            and message.blocks[0].kind == "text"
-            and message.blocks[0].text.startswith("<system-reminder>\n")
-        ):
-            message.blocks = message.blocks[1:]
         cleaned.append(message)
     return cleaned

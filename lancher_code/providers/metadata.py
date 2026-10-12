@@ -19,6 +19,8 @@ class ModelCapabilities:
     effort_levels: tuple[str, ...] | None = None
     default_effort: str | None = None
     endpoints: tuple[str, ...] | None = None
+    # 兼容端点可声明 Responses 的显式前缀缓存扩展，未知时不发送。
+    prompt_cache_breakpoints: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +106,11 @@ def parse_model_metadata(raw: dict[str, Any], *, fingerprint: str, fetched_at: s
     endpoints = _strings(raw.get('supported_endpoints'))
     if endpoints is not None:
         endpoints = tuple(name for name in endpoints if name in API_MODES[1:])
+    caching = capabilities.get('prompt_caching')
+    breakpoints = (_support(caching.get('explicit_breakpoints'))
+                   if isinstance(caching, dict) and _support(caching) is not False else None)
+    if _support(caching) is False:
+        breakpoints = False
     created = raw.get('created_at', raw.get('created'))
     created = str(created) if type(created) is int else _text(created)
     return ModelMetadata(
@@ -113,7 +120,7 @@ def parse_model_metadata(raw: dict[str, Any], *, fingerprint: str, fetched_at: s
         context_window=_positive(raw.get('context_window')) or _positive(raw.get('max_input_tokens')),
         max_output_tokens=_positive(raw.get('max_output_tokens')) or _positive(raw.get('max_tokens')),
         input_modalities=_strings(raw.get('input_modalities')), output_modalities=_strings(raw.get('output_modalities')),
-        capabilities=ModelCapabilities(types, levels, default, endpoints),
+        capabilities=ModelCapabilities(types, levels, default, endpoints, breakpoints),
     )
 
 
@@ -155,11 +162,14 @@ def load_metadata(raw: Any, path: str) -> ModelMetadata | None:
             invalid()
     if cap.get('default_effort') is not None and not isinstance(cap['default_effort'], str):
         invalid()
+    if cap.get('prompt_cache_breakpoints') is not None and type(cap['prompt_cache_breakpoints']) is not bool:
+        invalid()
     return ModelMetadata(
         id=raw['id'], source_fingerprint=raw['source_fingerprint'], fetched_at=raw['fetched_at'],
         **{key: raw.get(key, '') for key in ('display_name', 'owned_by', 'created_at', 'lifecycle')},
         context_window=raw.get('context_window'), max_output_tokens=raw.get('max_output_tokens'),
         input_modalities=_strings(raw.get('input_modalities')), output_modalities=_strings(raw.get('output_modalities')),
         capabilities=ModelCapabilities(*(_strings(cap.get(key)) for key in ('thinking_types', 'effort_levels')),
-                                       cap.get('default_effort'), _strings(cap.get('endpoints'))),
+                                       cap.get('default_effort'), _strings(cap.get('endpoints')),
+                                       cap.get('prompt_cache_breakpoints')),
     )

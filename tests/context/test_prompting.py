@@ -40,7 +40,8 @@ def _context(
 def test_build_system_prompt_excludes_environment_and_reminder() -> None:
     prompt = prompting_module.build_system_prompt()
 
-    assert "LanCher Code" in prompt
+    assert '你是一个 AI 编程助手' in prompt
+    assert all(word not in prompt for word in ('LanCher Code', '终端环境', 'TUI', 'WebUI', 'EditFile', 'WriteFile', '2-3 句', '一两句话', '不确定时候先问'))
     assert "当前工作目录" not in prompt
     assert "当前日期" not in prompt
     assert "<system-reminder>" not in prompt

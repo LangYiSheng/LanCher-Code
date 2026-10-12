@@ -69,6 +69,7 @@ def _shape_digest(request: ChatRequest) -> str:
         "api_mode": request.api_mode,
         "experimental_mcp_tool_append": request.experimental_mcp_tool_append,
         "prompt_cache_enabled": request.prompt_cache_enabled,
+        "shared_system_count": request.shared_system_count,
         "tool_updates": request.tool_updates,
     })
 

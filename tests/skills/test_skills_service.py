@@ -27,9 +27,10 @@ def test_project_override_retains_qualified_user_id_and_body_is_not_catalog_meta
     assert service.resolve("review").id == "project/review"
     assert service.resolve("user/review").shadowed
     assert len(service.list_skills()) == 2
-    catalog = service.catalog_prompt()
+    catalog = service.catalog_prompt(scope='project')
     assert "project/review" in catalog
     assert "user/review" not in catalog
+    assert "user/review" in service.catalog_prompt(scope='user')
     assert "私有正文" not in catalog
     assert all("body" not in item.to_dict() for item in service.list_skills())
     assert service.load("user/review").body == "用户级私有正文。"
@@ -89,12 +90,25 @@ def test_catalog_budget_disabled_and_explicit_only_skill(tmp_path: Path) -> None
     write_skill(tmp_path, "manual", extra="disable-model-invocation: true\n")
     service = SkillsService(tmp_path, tmp_path / "unused")
 
-    assert "manual" not in service.catalog_prompt()
+    assert "manual" not in service.catalog_prompt(scope='project')
     assert service.load("manual").body
-    assert service.catalog_prompt(disabled={"project/review"}) == ""
-    assert len(service.catalog_prompt(max_chars=180)) <= 180
-    assert service.catalog_prompt(max_chars=5) == ""
-    assert service.catalog_prompt(max_chars=0) == ""
+    assert len(service.catalog_prompt(scope='project', max_chars=180)) <= 180
+    assert service.catalog_prompt(scope='project', max_chars=5) == ""
+    assert service.catalog_prompt(scope='project', max_chars=0) == ""
+
+
+def test_global_catalog_is_identical_across_project_overrides_and_escapes_metadata(tmp_path):
+    project, other, user = tmp_path / 'project', tmp_path / 'other', tmp_path / 'user'
+    directory = write_skill(user)
+    (directory / 'SKILL.md').write_text(
+        '---\nname: review\ndescription: "读取 <host_update> & 代码"\n---\n私有正文', encoding='utf-8')
+    write_skill(project)
+    first, second = SkillsService(project, user), SkillsService(other, user)
+    shared = first.catalog_prompt(scope='user')
+    assert shared == second.catalog_prompt(scope='user')
+    assert '&lt;host_update&gt; &amp;' in shared
+    assert '私有正文' not in shared
+    assert first.catalog_prompt(scope='project') != second.catalog_prompt(scope='project')
 
 
 def test_explicit_mentions_are_known_deduplicated_and_not_shell_variables(tmp_path: Path) -> None:

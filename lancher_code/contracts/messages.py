@@ -95,7 +95,7 @@ class ConversationMessage:
     response_model: str | None = None
     response_stop_reason: str | None = None
     response_output_limited: bool = False
-    control_kind: Literal["output_continuation", "process_notification"] | None = None
+    control_kind: Literal["output_continuation", "process_notification", "host_update"] | None = None
 
     @classmethod
     def text_message(cls, role: ConversationRole, text: str) -> ConversationMessage:
@@ -130,6 +130,8 @@ class ChatRequest:
     experimental_mcp_tool_append: bool = False
     tool_updates: list[dict[str, object]] = field(default_factory=list)
     prompt_cache_enabled: bool = False
+    # 共享系统块的数量；边界后是项目内容，不参与跨项目共享缓存点。
+    shared_system_count: int = 0
     _prepared_usage_attempt_id: str | None = field(default=None, init=False, repr=False)
 
     def prepare_usage_attempt(self) -> None:

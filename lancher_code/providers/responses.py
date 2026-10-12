@@ -33,6 +33,12 @@ class ResponsesProvider(BaseChatProvider):
         updates = grouped_tool_updates(request)
         definitions = {tool.name: responses_tool(asdict(tool)) for tool in request.tools}
         items: list[dict[str, object]] = [{"role": "developer", "content": text} for text in request.system]
+        metadata = self._model_metadata(request)
+        if metadata is not None and metadata.capabilities.prompt_cache_breakpoints is True:
+            cache_index = self._shared_system_cache_index(request)
+            if cache_index is not None:
+                items[cache_index]['content'] = [{'type': 'input_text', 'text': request.system[cache_index],
+                                                 'prompt_cache_breakpoint': {'mode': 'explicit'}}]
         for index in range(len(request.messages) + 1):
             for event in updates.get(index, []):
                 if event["removals"]:

@@ -64,7 +64,8 @@ def test_session_controller_builds_request_with_system_messages_and_tools(openai
     assert request.model == "gpt-test"
     assert request.allow_tool_calls is True
     assert request.tools[0].name == "read_file"
-    assert len(request.system) == 2
+    assert len(request.system) == 3
+    assert request.shared_system_count == 2
     assert [message.role for message in request.messages] == ["user", "assistant", "user", "user"]
     assert request.messages[0].blocks[0].text == "第一轮"
     assert request.messages[-1].blocks[0].text.startswith("<host_update ")
@@ -75,8 +76,7 @@ def test_session_controller_keeps_stable_system_prompt_between_requests(openai_p
     first_request = controller.build_request([], allow_tool_calls=True)
     second_request = controller.build_request([], allow_tool_calls=False)
 
-    assert first_request.system[0] == second_request.system[0]
-    assert first_request.system[1] == second_request.system[1]
+    assert first_request.system == second_request.system
 
 
 def test_session_controller_system_and_environment_prompt_are_split(openai_provider_config, tmp_path: Path) -> None:
@@ -87,11 +87,13 @@ def test_session_controller_system_and_environment_prompt_are_split(openai_provi
     )
 
     request = controller.build_request([], allow_tool_calls=True)
-    system_prompt, environment_prompt = request.system
+    system_prompt, host_rules, environment_prompt = request.system
 
     assert str(tmp_path.resolve()) not in system_prompt
     assert "2026-06-28" not in system_prompt
     assert "<system-reminder>" not in system_prompt
+    assert str(tmp_path.resolve()) not in host_rules
+    assert "2026-06-28" not in host_rules
     assert str(tmp_path.resolve()) in environment_prompt
     assert "2026-06-28" not in environment_prompt
     assert "系统：" in environment_prompt

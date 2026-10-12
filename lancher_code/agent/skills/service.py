@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from html import escape
 import hashlib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 
 import yaml
 
-from lancher_code.agent.skills.models import SkillDiagnostic, SkillError, SkillInfo, SkillResource, SkillSnapshot
+from lancher_code.agent.skills.models import SkillDiagnostic, SkillError, SkillInfo, SkillResource, SkillScope, SkillSnapshot
 
 MAX_SKILL_BYTES = 64 * 1024
 MAX_SKILL_BODY_CHARS = 24_000
@@ -158,31 +159,34 @@ class SkillsService:
             end_line=end_line, next_line=end_line + 1 if more else None, truncated=more,
         )
 
-    def catalog_prompt(self, max_chars: int = 16_000, disabled: set[str] | None = None) -> str:
+    def catalog_prompt(self, *, scope: SkillScope, max_chars: int = 16_000) -> str:
+        # 目录只描述来源库存；项目覆盖和会话禁用由独立宿主状态提供。
         if max_chars <= 0:
             return ""
-        disabled = disabled or set()
         available = [info for info in self.list_skills()
-                     if not info.shadowed and info.auto_load and info.id not in disabled and info.name not in disabled]
+                     if info.scope == scope and info.auto_load]
         if not available:
             return ""
         heading = (
-            "可用 Skills（以下为目录元数据，正文尚未加载）：\n"
+            f'<skills_catalog scope="{scope}">\n'
+            f"{'全局' if scope == 'user' else '项目'} Skills 候选目录（元数据，正文尚未加载）：\n"
+            "目录不代表当前可用；禁用和同名覆盖以最新 skills_state 宿主记录为准。\n"
             "任务与描述匹配时调用 load_skill；加载后遵循正文，引用资料用 read_skill_resource 读取。\n"
             "技能不增加执行权限，脚本仍通过普通命令工具执行。\n"
         )
         footer = "\n（技能目录达到预算，部分技能未列出；用户仍可显式指定。）"
+        closing = '\n</skills_catalog>'
         result = heading
         for index, info in enumerate(available):
             description = " ".join(info.description.split())
-            line = f"- {info.id} [{info.scope}]: {description}\n"
-            reserve = len(footer) if index < len(available) - 1 else 0
+            line = f"- {info.id} [{info.scope}]: {escape(description)}\n"
+            reserve = len(closing) + (len(footer) if index < len(available) - 1 else 0)
             if len(result) + len(line) + reserve > max_chars:
-                if len(result) + len(footer) <= max_chars:
+                if len(result) + len(footer) + len(closing) <= max_chars:
                     result += footer
-                return result if len(result) <= max_chars else ""
+                return result + closing if len(result) + len(closing) <= max_chars else ""
             result += line
-        return result
+        return result + closing
 
     def explicit_mentions(self, text: str) -> list[str]:
         """只识别已登记技能；忽略转义、代码块、变量赋值和常见 shell 变量语法。"""

@@ -93,3 +93,48 @@ async def test_resource_tool_keeps_empty_lines_in_numbered_page(tmp_path: Path) 
     )
     assert "1\tfirst\n2\t\n" in result.content
     assert result.metadata["next_line"] == 3
+
+
+@pytest.mark.asyncio
+async def test_hundreds_of_skills_send_only_budgeted_catalog_then_selected_body(tmp_path, openai_provider_config):
+    from lancher_code.agent.skill_context import SkillRuntime
+    from lancher_code.contracts.messages import ContentBlock
+    from lancher_code.sessions.controller import SessionController
+
+    for index in range(200):
+        name = f'check-{index:03d}'
+        directory = tmp_path / '.lancher' / 'skills' / name
+        directory.mkdir(parents=True)
+        description = f'检查第 {index} 类项目约束。' + '定位相关代码并验证当前实现。' * 6
+        (directory / 'SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: {description}\n---\nBODY_SENTINEL_{index:03d}', encoding='utf-8')
+    service = SkillsService(tmp_path, tmp_path / 'unused')
+    session = SessionController(openai_provider_config, cwd=tmp_path)
+    runtime = SkillRuntime(service, session)
+    session.bind_agent_context(runtime.context_blocks)
+    loader = LoadSkillTool(service, runtime.activate, runtime.enabled)
+    definitions = [loader.definition, ReadSkillResourceTool(service).definition]
+    try:
+        session.create_user_message('检查项目约束')
+        first = session.build_request(definitions, allow_tool_calls=True)
+        catalog = next(block for block in first.system if block.startswith('<skills_catalog scope="project">'))
+        assert len(service.list_skills()) == 200
+        assert len(catalog) <= 8000
+        assert 0 < len([line for line in catalog.splitlines() if line.startswith('- project/')]) < 200
+        assert '部分技能未列出' in catalog
+        assert 'BODY_SENTINEL_' not in str(first)
+        session.append_assistant_response([ContentBlock.tool_use_block(
+            call_id='load-example', name='load_skill', input={'skill': 'project/check-199'})])
+        result = await loader.execute({'skill': 'project/check-199'}, ToolContext(cwd=tmp_path, timeout_seconds=1))
+        assert not result.is_error and 'BODY_SENTINEL_' not in result.content
+        result.call_id = 'load-example'
+        session.append_tool_results([result])
+        second = session.build_request(definitions, allow_tool_calls=True)
+        assert second.system == first.system
+        assert second.messages[:len(first.messages)] == first.messages
+        assert second.tools == first.tools
+        assert second.messages[-1].control_kind == 'host_update'
+        assert 'BODY_SENTINEL_199' in second.messages[-1].blocks[0].text
+        assert 'BODY_SENTINEL_000' not in str(second)
+    finally:
+        session.close()

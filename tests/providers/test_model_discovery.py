@@ -166,6 +166,19 @@ def test_openai_compatible_effort_extension_is_parsed_without_vendor_detection()
     assert model.capabilities.default_effort == 'high'
 
 
+@pytest.mark.parametrize('support', [True, False, None])
+def test_explicit_cache_support_is_preserved_and_unknown_is_not_inferred(support):
+    raw = {'id': 'unbranded', 'capabilities': {'prompt_caching': {
+        'explicit_breakpoints': {'supported': support}}}}
+    metadata = parse_model_metadata(raw, fingerprint='f', fetched_at='now')
+    assert metadata.capabilities.prompt_cache_breakpoints is support
+    assert load_metadata(serialize_metadata(metadata), 'metadata') == metadata
+    snapshot = serialize_metadata(metadata)
+    snapshot['capabilities']['prompt_cache_breakpoints'] = 'true'
+    with pytest.raises(ConfigError, match='快照格式无效'):
+        load_metadata(snapshot, 'metadata')
+
+
 def test_merge_is_additive_idempotent_and_preserves_manual_settings_and_overrides():
     provider = _provider()
     provider.models = {'stable': ModelDefinition('a', display_name='我的名称', context_window=16000, max_output_tokens=2048),

@@ -51,6 +51,7 @@ def prepare_request(*, config: ProviderConfig, context: PromptContext,
                        work_phase=context.work_phase,
                        execution_access=context.execution_access, session_id=context.session_id,
                         max_output_tokens=output_tokens, experimental_mcp_tool_append=experimental,
-                        tool_updates=updates, prompt_cache_enabled=(experimental or config.protocol == 'claude'
+                        tool_updates=updates, shared_system_count=state.prefix_state['shared_system_count'],
+                        prompt_cache_enabled=(experimental or config.protocol == 'claude'
                         and urlsplit(config.base_url).hostname == 'api.anthropic.com'))
     return request, state, transcript

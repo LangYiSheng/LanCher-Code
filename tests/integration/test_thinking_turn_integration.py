@@ -299,7 +299,7 @@ async def test_compact_rejects_closed_nine_section_summary_when_sse_has_no_messa
 
         assert session.transcript == original_transcript
         assert tool.executed == [] and len(requests) == 1
-        assert "thinking" not in requests[0]
+        assert requests[0]['thinking'] == {'type': 'adaptive'}
         assert len(session.state.request_usage) == 1
         record = next(iter(session.state.request_usage.values()))
         assert record["status"] == "incomplete"
