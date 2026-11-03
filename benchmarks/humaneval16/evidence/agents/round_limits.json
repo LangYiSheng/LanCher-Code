@@ -1,0 +1,56 @@
+[
+  {
+    "agent": "lancher",
+    "tool_calls": 50,
+    "tool_errors": 0,
+    "status": "failed",
+    "model_rounds": 50,
+    "run_usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cached_input_tokens": 0,
+      "request_count": 50,
+      "completed_request_count": 50,
+      "incomplete_request_count": 50,
+      "input_reported_request_count": 0,
+      "output_reported_request_count": 0,
+      "cache_reported_request_count": 0,
+      "cache_hit_ratio": null,
+      "cache_creation_input_tokens": 0,
+      "reasoning_output_tokens": 0,
+      "cache_creation_reported_request_count": 0,
+      "reasoning_reported_request_count": 0,
+      "invalid_request_count": 0,
+      "usage": {
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "output_tokens": null,
+        "cache_creation_input_tokens": null,
+        "reasoning_output_tokens": null,
+        "is_final": true,
+        "partial_fields": [
+          "cache",
+          "cache_creation",
+          "input",
+          "output",
+          "reasoning"
+        ],
+        "invalid_reasons": []
+      },
+      "cache_ratio_estimated": false,
+      "cache_ratio_request_count": 0
+    },
+    "evidence_kind": "offline_agent_simulation",
+    "usage": null,
+    "cost_usd": 0.0
+  },
+  {
+    "agent": "mini-swe-agent",
+    "status": "LimitsExceeded",
+    "model_rounds": 50,
+    "tool_calls": 50,
+    "evidence_kind": "offline_agent_simulation",
+    "usage": null,
+    "cost_usd": 0.0
+  }
+]
