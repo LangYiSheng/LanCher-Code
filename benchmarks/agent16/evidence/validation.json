@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-03",
+  "python": "3.14.8",
+  "lancher_source_commit": "f984bb72b46d8eff8d82d148782da83a62a3d308",
+  "mini_swe_agent_version": "2.4.6",
+  "command": "python -m pytest benchmarks/agent16/test_harness.py -q",
+  "tests_passed": 24,
+  "duration_seconds": 10.61,
+  "offline_fixture_runs": 32,
+  "online_runs": 0,
+  "api_cost_usd": 0,
+  "round_limit_verified": {
+    "lancher": 50,
+    "mini-swe-agent": 50
+  },
+  "sandbox_probe": "bwrap: Creating new namespace failed: Operation not permitted"
+}
