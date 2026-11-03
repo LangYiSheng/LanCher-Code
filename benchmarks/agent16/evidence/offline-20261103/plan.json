@@ -1,0 +1,52 @@
+{
+  "mode": "not_run",
+  "tasks": 16,
+  "agents": [
+    "lancher",
+    "mini-swe-agent==2.4.6"
+  ],
+  "max_turns": 50,
+  "planned_runs": 32,
+  "max_primary_model_requests": 1600,
+  "retry_and_compaction_requests": "must be separately counted and budgeted before online enablement",
+  "model": "gpt-6-luna",
+  "api": "Responses",
+  "reasoning_effort": "medium",
+  "official_api_key_verified": false,
+  "api_cost_incurred_usd": 0,
+  "pricing_source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+  "pricing_checked_on": "2026-11-03",
+  "rates_per_million": {
+    "input": 0.1,
+    "cached_input": 0.01,
+    "output": 0.5
+  },
+  "scenarios": [
+    {
+      "requests": 320,
+      "mean_input_tokens": 8000,
+      "mean_output_tokens": 1500,
+      "estimated_usd": 0.496
+    },
+    {
+      "requests": 1600,
+      "mean_input_tokens": 20000,
+      "mean_output_tokens": 2000,
+      "estimated_usd": 4.8
+    },
+    {
+      "requests": 1600,
+      "mean_input_tokens": 100000,
+      "mean_output_tokens": 4000,
+      "estimated_usd": 19.2
+    }
+  ],
+  "budget_usd": 30,
+  "approval": false,
+  "blockers": [
+    "online adapter and hard request/budget guard not yet enabled",
+    "OS sandbox unavailable here: bwrap namespace creation prohibited",
+    "confirm model access and both Responses adapters with approved pilot"
+  ],
+  "note": "Estimates only; cumulative context, reasoning, retries and cache billing affect actual spend."
+}
