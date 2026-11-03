@@ -1,0 +1,40 @@
+[
+  {
+    "evidence_kind": "offline_agent_simulation",
+    "agent": "lancher",
+    "planned": 16,
+    "recorded": 16,
+    "missing": [],
+    "graded": 16,
+    "succeeded": 16,
+    "success_rate": null,
+    "offline_check_passed": 16,
+    "observed_rate": 1.0,
+    "wilson95": null,
+    "elapsed_seconds": 18.333308559000216,
+    "tool_calls": 32,
+    "input_tokens": null,
+    "output_tokens": null,
+    "cost_usd": 0.0,
+    "failure_types": {}
+  },
+  {
+    "evidence_kind": "offline_agent_simulation",
+    "agent": "mini-swe-agent",
+    "planned": 16,
+    "recorded": 16,
+    "missing": [],
+    "graded": 16,
+    "succeeded": 16,
+    "success_rate": null,
+    "offline_check_passed": 16,
+    "observed_rate": 1.0,
+    "wilson95": null,
+    "elapsed_seconds": 5.599270667000383,
+    "tool_calls": 48,
+    "input_tokens": null,
+    "output_tokens": null,
+    "cost_usd": 0.0,
+    "failure_types": {}
+  }
+]

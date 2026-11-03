@@ -1,0 +1,33 @@
+{
+  "dataset": "openai/human-eval",
+  "source_commit": "b9453e8f1865df0a0057a1383767caa400acfbcf",
+  "source_sha256": "b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef",
+  "selection": "SHA256(seed + colon + task_id) ascending; first 16",
+  "seed": "lancher-comparison-v1-2026-11-03",
+  "tasks_sha256": "cc1cbb0cc46f2c21219d4182b40066d7c5aa7981115079ae2c3e78f0b61bf1b0",
+  "task_ids": [
+    "HumanEval/123",
+    "HumanEval/88",
+    "HumanEval/40",
+    "HumanEval/28",
+    "HumanEval/85",
+    "HumanEval/128",
+    "HumanEval/96",
+    "HumanEval/18",
+    "HumanEval/10",
+    "HumanEval/79",
+    "HumanEval/100",
+    "HumanEval/25",
+    "HumanEval/120",
+    "HumanEval/34",
+    "HumanEval/37",
+    "HumanEval/69"
+  ],
+  "lancher_commit": "f984bb72b46d8eff8d82d148782da83a62a3d308",
+  "baseline": "mini-swe-agent==2.4.6",
+  "max_rounds": 50,
+  "repetitions": 1,
+  "grading": "Original check(candidate), all assertions must pass",
+  "scope": "function-level; not SWE-bench or repository repair",
+  "online_status": "not_run"
+}

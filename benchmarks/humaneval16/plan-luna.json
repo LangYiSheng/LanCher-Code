@@ -1,0 +1,50 @@
+{
+  "status": "not_approved_not_run",
+  "model": "gpt-6-luna",
+  "agents": 2,
+  "tasks": 16,
+  "runs": 32,
+  "max_rounds": 50,
+  "max_main_rounds": 1600,
+  "extra_requests": "Retries, compaction and output continuation must be metered separately",
+  "rates_per_million": {
+    "input": 0.1,
+    "cached": 0.01,
+    "output": 0.5
+  },
+  "price_date": "2026-11-03",
+  "price_source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+  "assumptions": "Standard tier, input <=272K, no cache writes/discounts; estimates are not caps",
+  "proposed_global_budget_usd": 25,
+  "reserve_usd": 5,
+  "scenarios": [
+    {
+      "label": "planning",
+      "requests": 320,
+      "input_per_request": 8000,
+      "output_per_request": 1000,
+      "uncached_cost_usd": 0.416
+    },
+    {
+      "label": "heavy",
+      "requests": 1600,
+      "input_per_request": 20000,
+      "output_per_request": 2000,
+      "uncached_cost_usd": 4.8
+    },
+    {
+      "label": "large_context",
+      "requests": 1600,
+      "input_per_request": 128000,
+      "output_per_request": 8192,
+      "uncached_cost_usd": 27.0336
+    }
+  ],
+  "blockers": [
+    "User approval before any billed batch",
+    "Working OS sandbox with no grader data visible",
+    "Responses API credential/model probe",
+    "Gateway hard budget enforcement including retries",
+    "Pinned sandbox image and identical task Python runtime"
+  ]
+}
